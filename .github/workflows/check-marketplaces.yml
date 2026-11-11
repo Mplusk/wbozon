@@ -1,0 +1,35 @@
+name: Check marketplace API access
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wildberries:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check Wildberries
+        env:
+          WB_API_TOKEN: ${{ secrets.WB_API_TOKEN }}
+        run: python3 marketplace_check.py wb
+
+  ozon:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check Ozon
+        env:
+          OZON_API_KEY: ${{ secrets.OZON_API_KEY }}
+          OZON_CLIENT_ID: ${{ secrets.OZON_CLIENT_ID || vars.OZON_CLIENT_ID }}
+        run: python3 marketplace_check.py ozon
