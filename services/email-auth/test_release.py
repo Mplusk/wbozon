@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import subprocess
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('release', Path(__file__).parent / 'deploy/release.py')
@@ -119,6 +120,46 @@ class ReleaseTests(unittest.TestCase):
     def test_state_write_mode(self):
         self.e.deploy(A)
         self.assertEqual(self.e.path.stat().st_mode & 0o777, 0o600)
+    def test_activation_timeout_does_not_recover(self):
+        self.e.deploy(A)
+        original = self.d.call
+        def call(args, timeout=60):
+            if args[0] == 'run' and args[args.index('--name') + 1] == r.NAME:
+                self.d.calls.append(args)
+                raise r.UncertainDockerOutcome('synthetic timeout')
+            return original(args, timeout)
+        self.d.call = call
+        with self.assertRaises(r.UncertainDockerOutcome): self.e.deploy(B)
+        self.assertIsNotNone(self.e.state()['pending'])
+        self.assertTrue(self.e.uncertain_path.exists())
+        before = len(self.d.calls)
+        with self.assertRaises(r.DeployError): self.e.recover()
+        with self.assertRaises(r.DeployError): self.e.deploy(B)
+        self.assertEqual(len(self.d.calls), before)
+    def test_candidate_timeout_no_cleanup_or_activation(self):
+        original = self.d.call
+        def call(args, timeout=60):
+            if args[0] == 'run':
+                self.d.calls.append(args)
+                raise r.UncertainDockerOutcome('synthetic timeout')
+            return original(args, timeout)
+        self.d.call = call
+        with self.assertRaises(r.UncertainDockerOutcome): self.e.deploy(A)
+        self.assertTrue(self.e.uncertain_path.exists())
+        self.assertFalse(any(a[0] in ('rm', 'stop', 'rename') for a in self.d.calls))
+    def test_timeout_classification(self):
+        with patch.object(r.subprocess, 'run', side_effect=subprocess.TimeoutExpired('docker', 1)):
+            with self.assertRaises(r.UncertainDockerOutcome): r.Docker().call(['run'])
+    def test_untrusted_parent_rejected(self):
+        parent = self.base / 'unsafe'; parent.mkdir(mode=0o777); parent.chmod(0o777)
+        f = parent / 'secret'; f.write_text('synthetic'); f.chmod(0o600)
+        with self.assertRaisesRegex(r.DeployError, 'Parent directories'):
+            r.checked_path(str(f), 'file')
+    def test_runtime_secret_inside_data_rejected(self):
+        c = dict(self.c, env_file=str(self.base / 'data/runtime.env'))
+        f = self.base / 'config.json'; f.write_text(json.dumps(c)); f.chmod(0o600)
+        with patch.object(r, 'checked_path', side_effect=lambda p, *a, **k: Path(p)):
+            with self.assertRaisesRegex(r.DeployError, 'inside application data'): r.load_config(str(f))
 
 
 if __name__ == '__main__': unittest.main()
