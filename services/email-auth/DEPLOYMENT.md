@@ -1,7 +1,7 @@
 # Deployment status and proposed CD
 
 The canonical service source is this directory. It is the standard-library WSGI
-prototype, not a separate Flask experiment on the VPS. CI runs its 36 application/deployment regression
+prototype, not a separate Flask experiment on the VPS. CI runs its 38 application/deployment regression
 tests and builds/smoke-tests its container. CI never connects to the VPS, sends
 email, or reads production credentials. Existing repository CI is unchanged.
 
@@ -111,3 +111,9 @@ Every parent directory of config/state/secrets must be controlled by the trusted
 operator (root or the invoking identity) and not group/other-writable. The app-owned
 data directory cannot contain config, state or the runtime env file. Temporary
 world-writable paths such as /tmp are not accepted for production configuration.
+
+Candidate intent is fsynced before Docker run. A process killed during candidate
+creation leaves evidence that blocks another release. Normal confirmed candidate
+cleanup removes it. Uncertain-outcome markers are always persisted while the same
+deployment lock is held, including timeouts during explicit recovery. Regression
+tests cover both a killed child process and lock ownership at marker write time.
