@@ -1,7 +1,7 @@
 {
   "image_repository": "ghcr.io/cossomoj/wbandozon-email-auth",
   "state_dir": "/var/lib/3dprinta-deployer",
-  "env_file": "/etc/3dprinta-auth/runtime.env",
+  "secret_dir": "/etc/3dprinta-auth/secrets",
   "data_dir": "/var/lib/3dprinta-auth",
   "port": 18731,
   "network": "3dprinta-auth-backend"

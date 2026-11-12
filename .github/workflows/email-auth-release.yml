@@ -26,7 +26,8 @@ jobs:
       - name: Verify the exact release commit
         working-directory: services/email-auth
         run: |
-          python3 -m compileall -q app.py test_app.py test_release.py deploy/release.py
+          python3 -m pip install -r requirements.txt
+          python3 -m compileall -q portal.py smoke.py candidate.py test_portal.py app.py test_app.py test_release.py deploy/release.py
           python3 -m unittest -v
       - name: Build and publish immutable-commit image
         shell: bash
@@ -42,15 +43,13 @@ jobs:
           name="email-auth-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           trap 'docker rm -f "$name" >/dev/null 2>&1 || true; docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
           docker run -d --name "$name" --network none --read-only --cap-drop=ALL \
-            --security-opt=no-new-privileges --memory=128m --cpus=.5 \
+            --security-opt=no-new-privileges --memory=128m --cpus=.5 --pids-limit=100 \
             --tmpfs /tmp:rw,noexec,nosuid,size=16m \
             --tmpfs /data:rw,noexec,nosuid,size=16m,uid=10001,gid=10001 \
-            -e DATABASE_PATH=/data/test.sqlite \
-            -e SESSION_SECRET="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" \
-            -e BASE_URL=https://3dprinta.shop "$tag" >/dev/null
+            "$tag" python candidate.py >/dev/null
           ready=0
           for attempt in $(seq 1 30); do
-            if docker exec "$name" python -c "import urllib.request; r=urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8000/',headers={'Host':'3dprinta.shop'}),timeout=2); assert r.status==200"; then
+            if docker exec "$name" python smoke.py; then
               ready=1; break
             fi
             sleep 1

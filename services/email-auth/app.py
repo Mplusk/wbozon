@@ -96,7 +96,7 @@ class LoginApp:
                 row=c.execute('SELECT csrf FROM sessions WHERE hash=? AND expires>?',(self.digest(sid),now)).fetchone()
                 if not row or not hmac.compare_digest(row[0],csrf):return reply('Forbidden','403 Forbidden')
                 c.execute('DELETE FROM sessions WHERE hash=?',(self.digest(sid),))
-            return reply('Вы вышли.',extra=[cookie('__Host-sid','',0)])
+            return reply('Вы вышли. <a href="/">Войти снова</a>',extra=[cookie('__Host-sid','',0)])
         return reply('Not found','404 Not Found')
 
 def smtp_mailer(recipient,link):

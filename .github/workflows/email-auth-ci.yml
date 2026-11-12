@@ -21,7 +21,8 @@ jobs:
       - name: Syntax and offline security regressions
         working-directory: services/email-auth
         run: |
-          python3 -m compileall -q app.py gunicorn.conf.py test_app.py test_release.py deploy/release.py
+          python3 -m pip install -r requirements.txt
+          python3 -m compileall -q portal.py smoke.py candidate.py test_portal.py app.py gunicorn.conf.py test_app.py test_release.py deploy/release.py
           python3 -m unittest -v
       - name: Build isolated runtime
         run: docker build --tag email-auth-ci services/email-auth
@@ -32,15 +33,13 @@ jobs:
           name="email-auth-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
           docker run -d --name "$name" --read-only --cap-drop=ALL \
-            --security-opt=no-new-privileges --memory=128m --cpus=.5 \
+            --security-opt=no-new-privileges --memory=128m --cpus=.5 --pids-limit=100 \
             --tmpfs /tmp:rw,noexec,nosuid,size=16m \
             --tmpfs /data:rw,noexec,nosuid,size=16m,uid=10001,gid=10001 \
-            -p 127.0.0.1:18081:8000 \
-            -e DATABASE_PATH=/data/test.sqlite \
-            -e SESSION_SECRET="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" \
-            -e BASE_URL=https://3dprinta.shop email-auth-ci >/dev/null
+            --network none \
+            email-auth-ci python candidate.py >/dev/null
           for attempt in $(seq 1 30); do
-            if curl --fail --silent -H 'Host: 3dprinta.shop' http://127.0.0.1:18081/ >/dev/null; then
+            if docker exec "$name" python smoke.py >/dev/null; then
               exit 0
             fi
             sleep 1

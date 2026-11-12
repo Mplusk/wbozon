@@ -1,81 +1,68 @@
-# Deployment status and proposed CD
+# Portal + opt-in single-service CD
 
-The canonical service source is this directory. It is the standard-library WSGI
-prototype, not a separate Flask experiment on the VPS. CI runs its 38 application/deployment regression
-tests and builds/smoke-tests its container. CI never connects to the VPS, sends
-email, or reads production credentials. Existing repository CI is unchanged.
+Local integration based on PR3 CD head `896791b86c6a9d980fc0d87586b5d28ac79f0af5`.
+Not deployed; no production activation or Sites integration is implied.
 
-CD is NOT enabled. This service does not replace Sites ChatGPT OAuth, implement
-marketplace routes, or store marketplace API credentials.
+## Runtime contract (replaces previous env-file instructions)
 
-## Proposed production pipeline
+The Docker default runs `portal:create_portal()`. No secret values in env, image,
+repository or CI. The separately installed deploy controller takes `secret_dir`
+instead of `env_file`. Upgrade the controller/config together only after review.
 
-1. Review and merge the service only after CI and independent review.
-2. Build an immutable image in CI for the selected commit, not on the 2-GB VPS.
-   Pin the base image digest before production. Publish to a private registry.
-3. Use a dedicated read-only registry identity on the VPS. Do not put root SSH,
-   SMTP, or marketplace passwords in GitHub Actions. Do not install a privileged
-   self-hosted runner on the shared VPS.
-4. A separately reviewed, locally trusted deploy helper may activate only this
-   service's image digest, under a lock and with a last-good digest retained.
-   It must never execute arbitrary shell commands from a workflow or restart
-   another Compose project. Registry authentication and this limited privilege
-   need explicit setup; no credential or permission has been created here.
-5. Before activation: check free disk/memory, record neighboring service health,
-   start an isolated candidate with synthetic data, verify HTTP readiness, and
-   reject it on failure. Production database/SMTP secrets must not enter the
-   CI candidate. Back up the service's SQLite database consistently before
-   migrations; never assume a code rollback reverses a schema migration.
-6. Activate only this service, verify health, and restore the previous image if
-   unhealthy. Keep exact commit/digest and redacted deployment result. Do not
-   run global prune, compose down, or restart the shared proxy.
-7. Public HTTPS routing must be a separate reviewed change: the existing Caddy
-   is in a bridge container, so its localhost is not the host localhost. Choose
-   a narrowly scoped container network; preserve other virtual hosts. Never
-   expose the backend directly to the Internet. Ensure auth query tokens and
-   cookies are absent from every proxy, access, error and tracing log.
+Operator provisions a dedicated data directory (UID10001, mode0700), separate
+from state/config/secrets. `auth.sqlite` and `vault.sqlite` share that data mount.
+The dedicated secrets directory must be UID10001 mode0700; its four regular files
+UID10001 mode0600: `session` (random text >=32 chars), `vault-key` (32 random binary
+bytes), `read-token-hash` (SHA256 hex of a random >=32-byte bridge bearer),
+`smtp-password` (SpaceWeb password). Parent directories must be trusted operator
+owned and not group/world writable. No symlinks. The directory is mounted readonly
+at `/run/secrets/portal`; environment contains only fixed paths and public config.
+Do not broadly chown/chmod existing shared directories or reuse another project's
+UID or secrets directory. The plaintext bridge bearer is provisioned separately in
+the authorized caller's secure secret store, not stored on this server or in Git.
 
-## Remaining gates
+Protected `config.example.json` is the schema example. No env-file is consumed.
+Secrets must not be nested inside writable application data. The deploy helper
+checks paths/ownership, but does not provision accounts, permissions or Docker
+networks. UID10001 uniqueness on the shared host requires operator verification.
 
-- Confirm protected main/review rules and the private image registry.
-- Provision a least-privilege registry/deploy credential through approved storage.
-- Review service identity, resource limits, persistent data permissions and ingress.
-- Configure SMTP through protected runtime configuration, rotate previously
-  exposed credentials, and test one authorized real email.
-- Complete live browser, HTTPS, restart, rollback and neighboring-project checks.
+## Checks and release
 
-The existing repository deploy/deploy.py is only a file-release template and
-does not supply container health checks, activation or rollback. Do not point
-the production service at it until those controls are implemented and tested.
+CI installs pinned dependencies, runs authentication/vault/API/deployer tests,
+builds the portal image, and starts a `--network none` candidate. `candidate.py`
+creates disposable random secrets inside `/data` tmpfs only and starts the SAME
+production portal factory. Production never invokes the candidate entrypoint.
+Readiness requires `/`200, `/settings`401 and `/api/read`401; no mail/provider
+requests. Offline tests exercise authenticated settings, CSRF, encrypted storage,
+independent bearer authorization and fixed read-only provider dispatch.
 
-## Implemented opt-in CD controls (not installed or activated)
+The manual main-only release workflow builds/tests before publishing an image.
+It does not deploy or contact the VPS. The separately reviewed controller uses
+immutable image digest, isolated candidate, loopback bind, service ownership
+labels, serialized durable transition journal, and explicit recovery for uncertain
+Docker outcomes. Existing adjacent applications must not be changed.
 
-`deploy/release.py` now provides `check`, `deploy`, `rollback`, and `recover`.
-No invocation is automatic. All mutating commands require `--execute`.
+## Mandatory rollout gates
 
-- Only an approved GHCR repository plus `sha256:` digest is accepted, never a tag.
-- Fixed container name `3dprinta-auth`; refusal to manipulate an existing container
-  unless its service label matches. No global Docker/Compose commands or proxy edits.
-- Dedicated network must already exist. The deployer does not create or attach
-  networks to Caddy. Backend publication is only `127.0.0.1:<configured-port>`.
-- Synthetic candidate has no network, runtime secrets or production database.
-- Bounded resources, read-only container root, no capabilities or host Docker socket.
-- Journal persisted before activation; concurrent activation is locked. A failed
-  runtime is retained stopped, previous runtime restored. After an interruption,
-  `recover` is required before another release. Uncertain Docker outcomes are not
-  blindly retried. The control state and images must be inspected on failure.
-- No automatic image/container deletion or database migrations. Old stopped
-  containers may retain environment secrets; their inventory is privileged.
-- Config/state/runtime env must be private and owned by the deploy identity.
-  The separate database directory must be private and owned by UID 10001 (the
-  image's non-root user). Provisioning these paths/permissions is deliberately
-  not implemented by the deployer and must be reviewed before installation.
-- The deployer can call Docker, so its identity is effectively privileged. Do not
-  give Docker membership to arbitrary agents. Install this reviewed control file
-  outside the release directory; changes to it require a separate review.
+Docker build and runtime smoke must pass in CI (Docker is unavailable in the local
+review environment). Test synthetic login/settings flow in a staging browser.
+Confirm trusted proxy IP handling and ensure reverse proxy/APM never logs query
+strings, cookies, Authorization or request bodies. Review encrypted backup and key
+recovery. Code rollback is NOT a DB schema/key rollback. Retain matching encrypted
+DB/key backups. Check SMTP delivery without logging links. Protect and rotate the
+independent bridge bearer; no header from Sites is treated as user identity.
 
-Examples below are documentation, not an instruction to run against an
-unprepared server:
+See PORTAL.md for restricted API scope (two first-page reads only), outstanding
+rotation/revocation UI and other limitations. Do not claim this is a complete MCP
+OAuth server. The Sites adapter is a separate change requiring verified platform
+configuration and retaining Sites OAuth/owner checks.
+
+## Controller ownership and recovery
+
+Docker authority is effectively privileged. Do not grant Docker membership to
+arbitrary agents. Install reviewed `release.py` outside the release image and
+review changes independently. `check` performs no Docker/network operation.
+Examples only, not commands to run on an unprepared host:
 
 ```
 python3 release.py --config /etc/3dprinta-auth/deploy.json check
@@ -84,36 +71,16 @@ python3 release.py --config /etc/3dprinta-auth/deploy.json --execute rollback
 python3 release.py --config /etc/3dprinta-auth/deploy.json --execute recover
 ```
 
-The manually dispatched `email-auth-release.yml` runs only on `main`, tests the
-exact commit and publishes a commit-tagged GHCR image with the repository's
-short-lived GITHUB_TOKEN. It does not connect to the VPS. Confirm package privacy,
-permissions and immutable digest before use. It has NOT been dispatched here.
-There is no automatic deploy workflow, registry credential, server installation
-or public route in this change. The release-image workflow requires the owner to
-merge reviewed code first; a draft PR is not a production release.
+Confirm package privacy and immutable digest before activation. CI publishing is
+not deployment. No registry credential, daemon, timer, network provisioning or
+public route is included here. Mock tests do not replace isolated runtime tests.
 
-Tests cover deployment state, idempotency, candidate/activation failure, rollback,
-interrupted recovery, concurrency, foreign-container refusal, paths and secret-free
-candidate arguments. These mocks are not a substitute for real isolated VPS tests.
-
-## Uncertain command outcome
-
-A Docker timeout is not treated as a confirmed failure. The deployer writes a
-private uncertain.json marker and leaves the activation journal intact. It does
-not automatically stop, rename, remove, retry or roll back while the daemon may
-still be finishing the original command. Further deploy/recover operations refuse
-to run. An operator must independently verify that the command has settled, inspect
-exact service-owned containers and reconcile the journal. Only then may that
-operator clear the marker and request explicit recovery. There is intentionally
-no automatic marker-clear flag or timer.
-
-Every parent directory of config/state/secrets must be controlled by the trusted
-operator (root or the invoking identity) and not group/other-writable. The app-owned
-data directory cannot contain config, state or the runtime env file. Temporary
-world-writable paths such as /tmp are not accepted for production configuration.
-
-Candidate intent is fsynced before Docker run. A process killed during candidate
-creation leaves evidence that blocks another release. Normal confirmed candidate
-cleanup removes it. Uncertain-outcome markers are always persisted while the same
-deployment lock is held, including timeouts during explicit recovery. Regression
-tests cover both a killed child process and lock ownership at marker write time.
+A Docker timeout is NOT a confirmed failure. The private `uncertain.json` marker
+blocks subsequent mutation. Do not retry/stop/rename/remove while the original
+command could still be running. Operator must independently establish its outcome,
+inspect only this service's owned containers, reconcile journal, then explicitly
+clear the marker and request recovery. No automatic marker-clear option exists.
+Candidate intent is fsynced before run; SIGKILL leaves blocking evidence. Markers
+are written while the same deployment lock is held. Do not delete evidence merely
+to get the next deployment through. Retained failed/previous containers require
+separate deliberate cleanup, not broad Docker prune.
