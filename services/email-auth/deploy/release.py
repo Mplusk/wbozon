@@ -2,7 +2,7 @@
 """Opt-in, single-service deployment. No daemon, timer or remote execution.
 
 This control file must be installed and reviewed independently of image releases.
-Production secrets stay in a protected runtime env file, never in CI.
+Production secrets stay in separately mounted private files, never in CI.
 """
 import argparse
 import contextlib
@@ -20,7 +20,7 @@ NAME = '3dprinta-auth'
 LABEL = 'io.sidzen.service'
 DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
 BACKUP = re.compile(r'3dprinta-auth-(?:previous|failed)-[0-9a-f]{16}\Z')
-PROBE = "import urllib.request; r=urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8000/',headers={'Host':'3dprinta.shop'}),timeout=2); assert r.status==200"
+PROBE = 'import smoke; smoke.check()'
 
 
 class DeployError(Exception):
@@ -31,7 +31,7 @@ class UncertainDockerOutcome(DeployError):
     """Daemon may still finish the command. No automatic compensating mutations."""
 
 
-def checked_path(value, kind, owner=None):
+def checked_path(value, kind, owner=None, private_parent=None):
     p = Path(value)
     if any(c in value for c in ('\x00', '\n', '\r', ',')) or not p.is_absolute() or p == Path('/') or p.is_symlink():
         raise DeployError('Runtime paths must be absolute, dedicated and not symlinks')
@@ -42,6 +42,10 @@ def checked_path(value, kind, owner=None):
         raise DeployError('Symlink runtime paths are not allowed')
     for parent in p.parents:
         mode = parent.stat()
+        if parent == private_parent:
+            if mode.st_uid != 10001 or stat.S_IMODE(mode.st_mode) & 0o077:
+                raise DeployError("Secret directory must be private to application UID")
+            continue
         if mode.st_uid not in (0, os.geteuid()) or stat.S_IMODE(mode.st_mode) & 0o022:
             raise DeployError('Parent directories must be controlled by the trusted operator and not writable by others')
     mode = p.stat()
@@ -56,7 +60,7 @@ def load_config(path):
         c = json.loads(path.read_text())
     except (ValueError, OSError):
         raise DeployError('Invalid configuration') from None
-    if set(c) != {'image_repository', 'state_dir', 'env_file', 'data_dir', 'port', 'network'}:
+    if set(c) != {'image_repository', 'state_dir', 'secret_dir', 'data_dir', 'port', 'network'}:
         raise DeployError('Unexpected or missing configuration keys')
     if not isinstance(c['image_repository'], str) or not re.fullmatch(r'ghcr\.io/[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_./-]*', c['image_repository']):
         raise DeployError('Only an explicit GHCR image repository is supported')
@@ -66,17 +70,19 @@ def load_config(path):
         raise DeployError('Invalid loopback port')
     if c['network'] != '3dprinta-auth-backend':
         raise DeployError('Only the separately provisioned dedicated network is allowed')
-    for k, kind in [('state_dir', 'dir'), ('env_file', 'file'), ('data_dir', 'dir')]:
+    for k, kind in [('state_dir', 'dir'), ('secret_dir', 'dir'), ('data_dir', 'dir')]:
         if not isinstance(c[k], str):
             raise DeployError('Invalid runtime path')
-        checked_path(c[k], kind, owner=10001 if k == 'data_dir' else None)
-    paths = [Path(c[k]).resolve() for k in ('state_dir', 'env_file', 'data_dir')]
+        checked_path(c[k], kind, owner=10001 if k in ('data_dir', 'secret_dir') else None)
+    paths = [Path(c[k]).resolve() for k in ('state_dir', 'secret_dir', 'data_dir')]
     if len(set(paths)) != 3 or paths[0] in paths[2].parents or paths[2] in paths[0].parents:
         raise DeployError('State and application data must be separate')
     data = paths[2]
     for protected in (path.resolve(), paths[0], paths[1]):
         if protected == data or data in protected.parents:
             raise DeployError('Config, state and secrets cannot be inside application data')
+    for name in ('session', 'vault-key', 'read-token-hash', 'smtp-password'):
+        checked_path(str(Path(c['secret_dir']) / name), 'file', owner=10001, private_parent=Path(c['secret_dir']))
     return c
 
 
@@ -178,11 +184,10 @@ class Release:
         try:
             self.d.call(['run', '-d', '--name', candidate, '--label', LABEL + '=' + NAME,
                          '--network', 'none', '--read-only', '--cap-drop=ALL',
-                         '--security-opt=no-new-privileges', '--memory=128m', '--cpus=.5',
+                         '--security-opt=no-new-privileges', '--memory=128m', '--cpus=.5', '--pids-limit=100',
                          '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m',
                          '--tmpfs', '/data:rw,noexec,nosuid,size=16m,uid=10001,gid=10001',
-                         '-e', 'BASE_URL=https://3dprinta.shop', '-e', 'DATABASE_PATH=/data/test.sqlite',
-                         '-e', 'SESSION_SECRET=' + secrets.token_hex(32), image])
+                         image, 'python', 'candidate.py'])
             if not self.d.health(candidate):
                 raise DeployError('Candidate failed readiness; current service is unchanged')
         except UncertainDockerOutcome:
@@ -237,7 +242,13 @@ class Release:
                          '--memory=192m', '--cpus=.5', '--pids-limit=100',
                          '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m',
                          '--mount', 'type=bind,src=' + self.c['data_dir'] + ',dst=/data',
-                         '--env-file', self.c['env_file'], '-e', 'BASE_URL=https://3dprinta.shop',
+                         '--mount', 'type=bind,src=' + self.c['secret_dir'] + ',dst=/run/secrets/portal,readonly',
+                         '-e', 'SESSION_SECRET_FILE=/run/secrets/portal/session',
+                         '-e', 'VAULT_KEY_FILE=/run/secrets/portal/vault-key',
+                         '-e', 'READ_TOKEN_HASH_FILE=/run/secrets/portal/read-token-hash',
+                         '-e', 'SMTP_PASSWORD_FILE=/run/secrets/portal/smtp-password',
+                         '-e', 'VAULT_PATH=/data/vault.sqlite',
+                         '-e', 'BASE_URL=https://3dprinta.shop',
                          '-e', 'DATABASE_PATH=/data/auth.sqlite',
                          '-p', '127.0.0.1:' + str(self.c['port']) + ':8000', image])
             if not self.d.health(NAME):

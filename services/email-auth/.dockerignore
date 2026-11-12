@@ -3,3 +3,6 @@
 !gunicorn.conf.py
 !requirements.txt
 !Dockerfile
+!portal.py
+!smoke.py
+!candidate.py

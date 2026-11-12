@@ -27,7 +27,7 @@ class FakeDocker:
             name = args[args.index('--name') + 1]
             if self.fail_run and name == r.NAME: raise r.DeployError('run failed')
             if name in self.items: raise r.DeployError('exists')
-            self.items[name] = {'owned': True, 'image': args[-1], 'running': True}
+            self.items[name] = {'owned': True, 'image': args[-3] if args[-1] == 'candidate.py' else args[-1], 'running': True}
         elif command == 'stop': self.items[args[-1]]['running'] = False
         elif command == 'start': self.items[args[-1]]['running'] = True
         elif command == 'rename': self.items[args[2]] = self.items.pop(args[1])
@@ -40,7 +40,7 @@ class ReleaseTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(); self.base = Path(self.tmp.name)
         (self.base / 'state').mkdir(mode=0o700)
         self.c = {'state_dir': str(self.base / 'state'), 'image_repository': REPO,
-                  'env_file': str(self.base / 'runtime.env'), 'data_dir': str(self.base / 'data'),
+                  'secret_dir': str(self.base / 'secrets'), 'data_dir': str(self.base / 'data'),
                   'port': 18731, 'network': '3dprinta-auth-backend'}
         self.d = FakeDocker(); self.e = r.Release(self.c, self.d)
     def tearDown(self): self.tmp.cleanup()
@@ -158,7 +158,7 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(r.DeployError, 'Parent directories'):
             r.checked_path(str(f), 'file')
     def test_runtime_secret_inside_data_rejected(self):
-        c = dict(self.c, env_file=str(self.base / 'data/runtime.env'))
+        c = dict(self.c, secret_dir=str(self.base / 'data/secrets'))
         f = self.base / 'config.json'; f.write_text(json.dumps(c)); f.chmod(0o600)
         with patch.object(r, 'checked_path', side_effect=lambda p, *a, **k: Path(p)):
             with self.assertRaisesRegex(r.DeployError, 'inside application data'): r.load_config(str(f))
@@ -199,3 +199,39 @@ class ReleaseTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+class PortalRuntimeContractTests(unittest.TestCase):
+    def test_container_entrypoint_and_no_plaintext_env(self):
+        root=Path(__file__).parent
+        dockerfile=(root/'Dockerfile').read_text()
+        self.assertIn('portal:create_portal()',dockerfile)
+        self.assertIn('portal.py smoke.py candidate.py',dockerfile)
+        ignore=(root/'.dockerignore').read_text()
+        for name in ('portal.py','smoke.py','candidate.py'): self.assertIn('!'+name,ignore)
+        source=(root/'deploy/release.py').read_text()
+        self.assertNotIn('--env-file',source)
+        self.assertNotIn('SESSION_SECRET=',source)
+        self.assertIn('dst=/run/secrets/portal,readonly',source)
+    def test_candidate_and_runtime_mount_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config={'state_dir':tmp,'image_repository':REPO,'data_dir':'/data-owned',
+                    'secret_dir':'/secrets-owned','port':18731,'network':'3dprinta-auth-backend'}
+            docker=FakeDocker(); r.Release(config,docker).deploy(A)
+            runs=[call for call in docker.calls if call[0]=='run']
+            candidate, live=runs
+            self.assertEqual(candidate[-2:],['python','candidate.py'])
+            self.assertEqual(candidate[candidate.index('--network')+1],'none')
+            self.assertNotIn('--mount',candidate)
+            self.assertIn('--pids-limit=100',candidate)
+            self.assertNotIn('--env-file',live)
+            self.assertIn('type=bind,src=/secrets-owned,dst=/run/secrets/portal,readonly',live)
+            self.assertIn('VAULT_PATH=/data/vault.sqlite',live)
+    def test_readiness_checks_both_auth_boundaries(self):
+        import smoke
+        from urllib.error import HTTPError
+        from unittest.mock import MagicMock
+        good=MagicMock();good.__enter__.return_value.status=200
+        with patch.object(smoke.urllib.request,'urlopen',side_effect=[good,HTTPError('',401,'',{},None),HTTPError('',401,'',{},None)]) as request:
+            smoke.check()
+        self.assertEqual([x.args[0].full_url for x in request.call_args_list],
+                         ['http://127.0.0.1:8000/','http://127.0.0.1:8000/settings','http://127.0.0.1:8000/api/read'])

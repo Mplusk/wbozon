@@ -1,10 +1,10 @@
-# SIDZEN isolated email-login prototype
+# SIDZEN email-login and read-only marketplace portal
 
 ## State
 Local prototype only. No email was sent, no real secret was used, no server was changed.
 This is NOT the existing Sites MCP and does not grant access to that MCP. A successful
-email session only opens an explicit prototype page. Marketplace credential storage,
-MCP OAuth, and marketplace routes are NOT implemented here.
+email session opens protected key settings. Encrypted credential storage and two
+read-only API operations are implemented. MCP OAuth/Sites bridging is NOT implemented.
 
 ## Implemented
 - Only `maksim@kuchermg.ru` can receive a login link.
@@ -22,19 +22,21 @@ MCP OAuth, and marketplace routes are NOT implemented here.
 - Generic response for unknown recipient and mail failure. Mail failure invalidates
   the created token and does not log SMTP exceptions.
 
-## Tests (no dependencies, no network)
-`python -m unittest -v`
+## Tests (synthetic data only)
+Install pinned requirements first: `python -m pip install -r requirements.txt`.
+Then `python -m unittest -v`; tests do not contact SMTP or provider APIs.
 
 ## Configuration (never paste values into chat)
 Required runtime variables:
 - DATABASE_PATH: dedicated writable SQLite file outside source/public directories.
-- SESSION_SECRET: independently generated cryptographic secret, >=32 characters.
-- SMTP_USER: no-reply@3dprinta.shop
-- SMTP_PASSWORD: new password entered via approved protected secret mechanism.
+- VAULT_PATH: separate encrypted credential SQLite file.
+- SESSION_SECRET_FILE, VAULT_KEY_FILE, READ_TOKEN_HASH_FILE, SMTP_PASSWORD_FILE:
+  paths to dedicated private files. See DEPLOYMENT.md for exact format/ownership.
+  Do not place secret values in environment variables.
 - BASE_URL: https://3dprinta.shop
 - PORT: confirmed free loopback-only port, example 18081 is NOT reserved.
 
-`gunicorn --config gunicorn.conf.py 'app:create_app()'`
+`gunicorn --config gunicorn.conf.py 'portal:create_portal()'`
 
 Do not run Python's development server on a public interface. Do not run as root.
 The database has security-sensitive token/session state and must be owned only by
@@ -77,10 +79,11 @@ access logs, shell history, screenshots or exported artifacts.
   A protected, redacted operational health/metrics mechanism is still needed.
 - IP rate limiting is deliberately conservative behind a proxy; deployments with
   trusted ingress may need a carefully reviewed IP extraction strategy.
-- No reauthentication/revocation dashboard, idle timeout, or multi-user support.
+- Key changes require recent login. No key deletion/revocation dashboard, idle
+  timeout, or multi-user support.
 - SQLite and WSGI deployment have only local tests, not a live shared-VPS test.
 - Browser UI and email clients have not been independently tested.
-- This does not solve current cloud-to-VPS networking: SSH remained unreachable.
+- This local change does not establish or test VPS connectivity.
 
 ## Mandatory ingress/logging and timeout review
 - Standard nginx `$request` and `$request_uri` contain the full query string and
