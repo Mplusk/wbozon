@@ -1,0 +1,41 @@
+{
+  "candidate_id": "cable-holder-printables-1830074",
+  "source": "https://www.printables.com/model/1830074-3d-printed-cable-holder-multi-cable-organizer/files",
+  "observed_at": "2026-11-12T13:20:16+00:00",
+  "candidate": {
+    "stage": "idea",
+    "idea": {
+      "model_url": "https://www.printables.com/model/1830074-3d-printed-cable-holder-multi-cable-organizer",
+      "author_url": "https://www.printables.com/@3DTimonAT",
+      "license": "Creative Commons — Public Domain (поисковая копия; требует повторной проверки)",
+      "photo_url": "https://media.printables.com/media/prints/eff7ef70-990d-491b-b7c8-fc5ce7694fc2/images/13717096_7005a3c1-baf7-412c-a1cd-53ff78e2f26c_401a70c9-cf8b-44c3-b1ca-bada1e3199ae/thumbs/cover/1200x630/png/03fd32a7-9e5a-42ea-9b38-468a8e5f47b0.png",
+      "print_profile_source": "https://www.printables.com/model/1830074-3d-printed-cable-holder-multi-cable-organizer/files",
+      "mass_g": 9,
+      "print_hours": 0.94,
+      "name": "3D Printed Cable Holder – Multi Cable Organizer",
+      "author": "3DTimon",
+      "profile_printer": "Prusa MK3/S/S+",
+      "profile_material": "PLA",
+      "profile_layer_height_mm": 0.2,
+      "profile_nozzle_mm": 0.4,
+      "profile_filename": "Cableholder 5x_0.2mm_PLA_MK3S_56m.gcode"
+    },
+    "rights": {
+      "status": "unchecked",
+      "owner_evidence": null
+    },
+    "demand": {
+      "score": null,
+      "source": null,
+      "price_min": null,
+      "price_max": null
+    },
+    "sample": {
+      "acceptable": null,
+      "mass_g": null,
+      "print_hours": null,
+      "defect_rate": null,
+      "evidence": null
+    }
+  }
+}

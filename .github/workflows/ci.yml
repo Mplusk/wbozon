@@ -19,11 +19,11 @@ jobs:
         with:
           persist-credentials: false
       - name: Verify Python syntax
-        run: python3 -m compileall -q calc collectors deploy operations pipeline production storage workcycle marketplace_check.py test_*.py
+        run: python3 -m compileall -q calc collectors daily demand deploy operations pipeline production reports scout storage workcycle marketplace_check.py test_*.py
       - name: Check JSON inputs
         run: |
           python3 -m json.tool config/production.yaml > /dev/null
-          for file in examples/*.json; do
+          for file in examples/*.json products/*/*.json; do
             python3 -m json.tool "$file" > /dev/null
           done
       - name: Run offline tests
