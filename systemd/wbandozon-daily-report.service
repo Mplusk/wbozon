@@ -1,0 +1,15 @@
+# Пример для пользовательского systemd. Пути и права нужно настроить на VPS.
+[Unit]
+Description=Generate a private local daily project report
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/wbandozon/current
+ExecStart=/usr/bin/python3 -m daily --db /var/lib/wbandozon/data/project.sqlite3 --output /var/lib/wbandozon/reports/latest.json
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/wbandozon/data
+ReadWritePaths=/var/lib/wbandozon/reports
+UMask=0077

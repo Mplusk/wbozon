@@ -1,0 +1,26 @@
+{
+  "inputs": {
+    "mass_g": "120",
+    "print_hours": "3.5",
+    "waste_rate": "0.05",
+    "plastic_rub_per_kg": "1200",
+    "power_kw": "0.12",
+    "electricity_rub_per_kwh": "7",
+    "depreciation_rub_per_hour": "12",
+    "maintenance_rub_per_hour": "3",
+    "manual_minutes": "4",
+    "labor_rub_per_hour": "500",
+    "defect_rate": "0.05",
+    "packaging_rub": "35",
+    "inbound_delivery_rub": "0",
+    "price_rub": "790",
+    "commission_rate": "0.25",
+    "outbound_logistics_rub": "60",
+    "return_logistics_rub": "50",
+    "buyout_rate": "0.90",
+    "storage_acceptance_rub": "3",
+    "acquiring_rate": "0.02",
+    "ad_rate": "0.12",
+    "tax_rate": "0.06"
+  }
+}
