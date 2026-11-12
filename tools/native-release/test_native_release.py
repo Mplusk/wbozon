@@ -139,6 +139,12 @@ class CommandTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as d:
    p=pathlib.Path(d)/'link';p.symlink_to('/etc')
    with self.assertRaises(n.Refused):n.secure(p)
+ def test_secure_rejects_fifo_after_trusted_parents(self):
+  import stat
+  good=type('S',(),{'st_mode':stat.S_IFDIR|0o755,'st_uid':0})()
+  bad=type('S',(),{'st_mode':stat.S_IFIFO|0o600,'st_uid':0})()
+  with patch.object(pathlib.Path,'lstat',autospec=True,side_effect=lambda p:bad if str(p)=='/trusted/file' else good):
+   with self.assertRaises(n.Refused):n.secure('/trusted/file')
  def test_secure_rejects_group_writable_leaf(self):
   import stat
   good=type('S',(),{'st_mode':stat.S_IFDIR|0o755,'st_uid':0})()
