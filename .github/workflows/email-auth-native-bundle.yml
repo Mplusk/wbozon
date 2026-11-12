@@ -1,0 +1,73 @@
+name: Native portal test bundle
+on:
+  push:
+    branches: [bender/email-auth-cicd]
+    paths: ['tools/native-test-bundle/**', '.github/workflows/email-auth-native-bundle.yml']
+permissions:
+  contents: read
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          path: inputs
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: 14b958081157b1c4b5f15ac67cb1f2cb45477a8f
+          persist-credentials: false
+          path: source
+      - name: Reconstruct hash-locked reviewed files without building packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c 'import sys,platform; assert sys.version_info[:2]==(3,12); assert platform.machine()=="x86_64"'
+          mkdir -p bundle/service bundle/wheelhouse artifact
+          cp inputs/tools/native-test-bundle/* bundle/
+          cp -a source/services/email-auth/. bundle/service/
+          python3 -m pip download --isolated --index-url https://pypi.org/simple \
+            --only-binary=:all: --require-hashes --no-deps \
+            --dest bundle/wheelhouse -r bundle/requirements-offline.lock
+          (cd bundle && sha256sum --check --strict SHA256SUMS)
+          python3 - <<'PY'
+          import pathlib
+          root=pathlib.Path("bundle")
+          expected={line.split("  ",1)[1] for line in (root/"SHA256SUMS").read_text().splitlines()}|{"SHA256SUMS"}
+          actual={str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()}
+          assert actual==expected, (actual-expected,expected-actual)
+          assert not any(p.is_symlink() for p in root.rglob("*"))
+          PY
+      - name: Test offline native runtime without production credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv test-venv
+          test-venv/bin/python -m pip install --isolated --no-index \
+            --find-links bundle/wheelhouse --require-hashes -r bundle/requirements-offline.lock
+          (cd bundle/service && PYTHONDONTWRITEBYTECODE=1 ../../test-venv/bin/python -m unittest -v)
+          PYTHONDONTWRITEBYTECODE=1 test-venv/bin/python bundle/test_native.py
+          (cd bundle && sha256sum --check --strict SHA256SUMS)
+      - name: Package reviewed files only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib,tarfile
+          root=pathlib.Path("bundle")
+          names=sorted({line.split("  ",1)[1] for line in (root/"SHA256SUMS").read_text().splitlines()}|{"SHA256SUMS"})
+          with tarfile.open("artifact/portal-native-reviewed.tar.gz","w:gz") as archive:
+              for name in names:
+                  archive.add(root/name, arcname=name, recursive=False)
+          PY
+          (cd artifact && sha256sum portal-native-reviewed.tar.gz > SHA256SUMS)
+          printf 'Source: 14b958081157b1c4b5f15ac67cb1f2cb45477a8f\nInputs: %s\nRun: %s\nTest only, not deployed.\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > artifact/provenance.txt
+      - name: Retain private native test bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: portal-native-reviewed-${{ github.sha }}
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
