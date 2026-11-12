@@ -46,3 +46,38 @@ jobs:
           done
           echo 'Isolated runtime did not become ready' >&2
           exit 1
+      - name: Export verified image for private isolated testing
+        if: github.event_name == 'push' && github.ref == 'refs/heads/bender/email-auth-cicd'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p image-artifact
+          docker save email-auth-ci | gzip -n > image-artifact/email-auth-image.tar.gz
+          (cd image-artifact && sha256sum email-auth-image.tar.gz > SHA256SUMS)
+          IMAGE_ID="$(docker image inspect --format '{{.Id}}' email-auth-ci)"
+          export IMAGE_ID
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          metadata = {
+              "source_commit": os.environ["GITHUB_SHA"],
+              "image_id": os.environ["IMAGE_ID"],
+              "image_tag": "email-auth-ci:latest",
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "platform": "linux/amd64",
+              "purpose": "isolated-test-only; not a production release",
+              "credentials": "none; candidate generates temporary synthetic test keys",
+          }
+          Path("image-artifact/metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+          PY
+      - name: Retain private tested image for three days
+        if: github.event_name == 'push' && github.ref == 'refs/heads/bender/email-auth-cicd'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: email-auth-image-${{ github.sha }}
+          path: image-artifact/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
