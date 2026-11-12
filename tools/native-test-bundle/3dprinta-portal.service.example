@@ -1,0 +1,60 @@
+# REVIEW-ONLY TEMPLATE. Do not install/start without host inventory and approval.
+# Requires systemd >= 250; paths and loopback port need host verification.
+[Unit]
+Description=SIDZEN read-only marketplace portal
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=exec
+DynamicUser=yes
+StateDirectory=3dprinta-portal
+StateDirectoryMode=0700
+RuntimeDirectory=3dprinta-portal
+RuntimeDirectoryMode=0700
+UMask=0077
+WorkingDirectory=/opt/3dprinta-portal/current/service
+ExecStart=/opt/3dprinta-portal/current/venv/bin/gunicorn --config gunicorn.conf.py --bind 127.0.0.1:18731 --worker-tmp-dir /run/3dprinta-portal portal:create_portal()
+Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+Environment=BASE_URL=https://3dprinta.shop
+Environment=DATABASE_PATH=/var/lib/3dprinta-portal/auth.sqlite
+Environment=VAULT_PATH=/var/lib/3dprinta-portal/vault.sqlite
+Environment=SESSION_SECRET_FILE=%d/session
+Environment=VAULT_KEY_FILE=%d/vault-key
+Environment=READ_TOKEN_HASH_FILE=%d/read-token-hash
+Environment=SMTP_PASSWORD_FILE=%d/smtp-password
+LoadCredential=session:/etc/3dprinta-portal/credentials/session
+LoadCredential=vault-key:/etc/3dprinta-portal/credentials/vault-key
+LoadCredential=read-token-hash:/etc/3dprinta-portal/credentials/read-token-hash
+LoadCredential=smtp-password:/etc/3dprinta-portal/credentials/smtp-password
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+MemoryMax=192M
+TasksMax=100
+CPUQuota=50%
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+# Gunicorn already suppresses access logging; never journal request bodies/headers.
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
