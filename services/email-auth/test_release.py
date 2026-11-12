@@ -5,6 +5,8 @@ from pathlib import Path
 import tempfile
 import unittest
 import subprocess
+import signal
+import sys
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('release', Path(__file__).parent / 'deploy/release.py')
@@ -160,6 +162,40 @@ class ReleaseTests(unittest.TestCase):
         f = self.base / 'config.json'; f.write_text(json.dumps(c)); f.chmod(0o600)
         with patch.object(r, 'checked_path', side_effect=lambda p, *a, **k: Path(p)):
             with self.assertRaisesRegex(r.DeployError, 'inside application data'): r.load_config(str(f))
+    def test_killed_candidate_run_leaves_durable_intent(self):
+        pid = os.fork()
+        if pid == 0:
+            original = self.d.call
+            def killed_call(args, timeout=60):
+                if args[0] == 'run': os.kill(os.getpid(), signal.SIGKILL)
+                return original(args, timeout)
+            self.d.call = killed_call
+            self.e.deploy(A)
+            os._exit(1)
+        _, status = os.waitpid(pid, 0)
+        self.assertTrue(os.WIFSIGNALED(status))
+        evidence = json.loads(self.e.uncertain_path.read_text())
+        self.assertEqual(evidence['stage'], 'candidate-intent')
+        self.assertTrue(evidence['candidate'].startswith(r.NAME + '-candidate-'))
+        with self.assertRaises(r.DeployError): self.e.deploy(A)
+        self.assertEqual(self.d.calls, [])
+    def test_uncertain_recovery_marker_written_before_unlock(self):
+        original_mark = self.e.mark_uncertain
+        def check_lock(*args, **kwargs):
+            fd = os.open(Path(self.c['state_dir']) / 'deploy.lock', os.O_RDWR)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    r.fcntl.flock(fd, r.fcntl.LOCK_EX | r.fcntl.LOCK_NB)
+            finally: os.close(fd)
+            original_mark(*args, **kwargs)
+        with patch.object(r, 'load_config', return_value=self.c), \
+             patch.object(r, 'Release', return_value=self.e), \
+             patch.object(self.e, 'recover', side_effect=r.UncertainDockerOutcome('synthetic')), \
+             patch.object(self.e, 'mark_uncertain', side_effect=check_lock), \
+             patch.object(sys, 'argv', ['release.py', '--config', 'unused', '--execute', 'recover']):
+            with self.assertRaises(SystemExit) as e: r.main()
+            self.assertEqual(e.exception.code, 2)
+        self.assertTrue(self.e.uncertain_path.exists())
 
 
 if __name__ == '__main__': unittest.main()
