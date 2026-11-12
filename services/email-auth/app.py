@@ -34,6 +34,10 @@ class LoginApp:
             data=body.encode(); start(code,[('Content-Type','text/html; charset=utf-8'),('Content-Length',str(len(data))),('Cache-Control','no-store'),('Referrer-Policy','no-referrer'),('X-Content-Type-Options','nosniff'),('Content-Security-Policy',"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"),*extra]); return [data]
         def cookie(name,value,age):return ('Set-Cookie',f'{name}={value}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={age}')
         def form(title,action,fields):return f'<!doctype html><meta charset="utf-8"><title>{title}</title><h1>{title}</h1><form method="post" action="{action}">{fields}<button>Продолжить</button></form>'
+        def recovery(title, message, code):
+            # Only fixed application text. Never reflect the link, token, email or cookies.
+            page='<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>'+title+' — SIDZEN</title></head><body><main><h1>'+title+'</h1><p>'+message+'</p><p>Ссылка действует 15 минут и подходит для одного входа. Новую ссылку нужно запросить вручную: письмо не отправляется автоматически.</p><p><a href="/">Запросить новую ссылку или открыть кабинет</a></p></main></body></html>'
+            return reply(page,code)
         if e.get('HTTP_HOST')!=urlsplit(self.origin).netloc:return reply('Invalid host','400 Bad Request')
         path=e.get('PATH_INFO','/'); method=e.get('REQUEST_METHOD','GET'); values={}
         if method not in ('GET','POST'):return reply('Method not allowed','405 Method Not Allowed')
@@ -69,24 +73,24 @@ class LoginApp:
                 # Never log exceptions: SMTP errors can contain authentication details.
             return reply(generic)
         if path=='/auth/link' and method=='GET':
-            if len(e.get('QUERY_STRING',''))>512:return reply('Invalid request','400 Bad Request')
+            if len(e.get('QUERY_STRING',''))>512:return recovery('Не удалось открыть ссылку','Ссылка повреждена или неполная. Откройте её целиком из письма либо запросите новую.','400 Bad Request')
             try: token=parse_qs(e.get('QUERY_STRING',''),max_num_fields=4).get('token',[''])[0]
-            except ValueError:return reply('Invalid request','400 Bad Request')
-            if not re.fullmatch(r'[A-Za-z0-9_-]{40,64}',token):return reply('Недействительная ссылка','400 Bad Request')
+            except ValueError:return recovery('Не удалось открыть ссылку','Ссылка повреждена или неполная. Откройте её целиком из письма либо запросите новую.','400 Bad Request')
+            if not re.fullmatch(r'[A-Za-z0-9_-]{40,64}',token):return recovery('Недействительная ссылка','Ссылка повреждена или неполная. Откройте её целиком из письма либо запросите новую.','400 Bad Request')
             nonce=secrets.token_urlsafe(24); signed=nonce+'.'+self.sign(nonce+':'+self.digest(token))
             fields=f'<input type="hidden" name="token" value="{html.escape(token,quote=True)}"><input type="hidden" name="csrf" value="{nonce}">'
             # GET does not consume or authenticate. Scanners must not log users in.
             return reply(form('Подтвердить вход','/auth/confirm',fields),extra=[cookie('__Host-login',signed,900)])
         if path=='/auth/confirm' and method=='POST':
             token=get('token'); nonce=get('csrf'); login_cookie=cs.get('__Host-login','')
-            if not re.fullmatch(r'[A-Za-z0-9_-]{43}',token) or not re.fullmatch(r'[A-Za-z0-9_-]{32}',nonce) or not re.fullmatch(r'[A-Za-z0-9_-]{32}\.[0-9a-f]{64}',login_cookie):return reply('Forbidden','403 Forbidden')
+            if not re.fullmatch(r'[A-Za-z0-9_-]{43}',token) or not re.fullmatch(r'[A-Za-z0-9_-]{32}',nonce) or not re.fullmatch(r'[A-Za-z0-9_-]{32}\.[0-9a-f]{64}',login_cookie):return recovery('Не удалось подтвердить вход','Откройте ссылку из письма заново в том же браузере и подтвердите вход. Если это не помогает, запросите новую ссылку.','403 Forbidden')
             expected=nonce+'.'+self.sign(nonce+':'+self.digest(token))
-            if not hmac.compare_digest(login_cookie,expected):return reply('Forbidden','403 Forbidden')
+            if not hmac.compare_digest(login_cookie,expected):return recovery('Не удалось подтвердить вход','Откройте ссылку из письма заново в том же браузере и подтвердите вход. Если это не помогает, запросите новую ссылку.','403 Forbidden')
             sid=secrets.token_urlsafe(32); csrf=secrets.token_urlsafe(24)
             with self.connect() as c:
                 c.execute('BEGIN IMMEDIATE')
                 cur=c.execute('DELETE FROM tokens WHERE hash=? AND expires>?',(self.digest(token),now))
-                if cur.rowcount!=1:return reply('Ссылка истекла или уже использована','400 Bad Request')
+                if cur.rowcount!=1:return recovery('Ссылка истекла или уже использована','По этой ссылке больше нельзя войти. Запросите новую ссылку; если вход уже выполнен, откройте кабинет.','400 Bad Request')
                 c.execute('INSERT INTO sessions VALUES(?,?,?)',(self.digest(sid),now+43200,csrf))
             return reply('Вход выполнен. <a href="/">Открыть</a>',extra=[cookie('__Host-sid',sid,43200),cookie('__Host-login','',0)])
         if path=='/logout' and method=='POST':
