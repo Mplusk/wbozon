@@ -1,5 +1,5 @@
 """Local integration prototype. Browser sessions never authenticate the read API."""
-import hashlib, hmac, html, json, os, re, secrets, sqlite3, ssl, urllib.request, urllib.error, smtplib
+import hashlib, hmac, html, json, math, os, re, secrets, sqlite3, ssl, urllib.request, urllib.error, smtplib
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from urllib.parse import parse_qs, urlsplit
@@ -47,6 +47,10 @@ class Vault:
             if not row or not hmac.compare_digest(hashlib.sha256(bytes(row[0])).hexdigest(),version): return False
             c.execute('INSERT OR REPLACE INTO connection_checks VALUES (?,?,?,?)',(provider,version,outcome,checked_at))
         return True
+    def version_matches(self, provider, version):
+        with sqlite3.connect(self.path) as c:
+            row=c.execute('SELECT blob FROM vault WHERE provider=?',(provider,)).fetchone()
+        return bool(row) and hmac.compare_digest(hashlib.sha256(bytes(row[0])).hexdigest(),version)
     def check_status(self, provider):
         # Read storage metadata only; rendering never decrypts credentials.
         with sqlite3.connect(self.path) as c:
@@ -85,7 +89,7 @@ def provider_read(operation, args, creds):
     else:
         rows=data.get('data',{}).get('listGoods')
         if not isinstance(rows,list): raise ValueError('Unexpected schema')
-        keys=('nmID','vendorCode','discount','clubDiscount')
+        keys=('nmID','vendorCode','discount','clubDiscount','currencyIsoCode4217')
     values=list(creds.values())
     def clean(v):
         if isinstance(v,str):
@@ -103,6 +107,55 @@ def provider_read(operation, args, creds):
         out.append(item)
     return {'items':out, 'first_page_only':True, 'untrusted_data':True, 'read_only':True}
 
+def render_preview(provider, result, fetched_at, sensitive_values=()):
+    """Render allowlisted normalized data only; upstream strings are untrusted text."""
+    rows=result.get('items')
+    if not isinstance(rows,list): raise ValueError('Invalid items')
+    title='Первые товары Ozon' if provider=='ozon' else 'Первые цены Wildberries'
+    stamp=datetime.fromtimestamp(fetched_at,timezone.utc).strftime('%d.%m.%Y %H:%M:%S UTC')
+    def text(value):
+        if value is None: return 'не указано'
+        if type(value) is bool: return 'да' if value else 'нет'
+        if not isinstance(value,(str,int,float)): return 'не указано'
+        rendered=str(value)
+        for secret in sensitive_values:
+            if isinstance(secret,str) and secret: rendered=rendered.replace(secret,'[REDACTED]')
+        return html.escape(rendered[:256],quote=True)
+    def field_text(key,value):
+        if key=='currencyIsoCode4217':
+            # Display the provider's code verbatim, never assume RUB or convert prices.
+            if not isinstance(value,str) or not re.fullmatch(r'[A-Z]{3}',value): return 'не указано'
+        if key in ('price','discountedPrice','clubDiscountedPrice','discount','clubDiscount'):
+            # WB prices are JSON numbers, not truth values or numeric strings.
+            # Reject nonfinite values accepted by Python's permissive JSON parser.
+            if type(value) not in (int,float): return 'не указано'
+            if type(value) is float and not math.isfinite(value): return 'не указано'
+            if value<0 or (key in ('discount','clubDiscount') and value>100): return 'не указано'
+        return text(value)
+    def fields(row,labels):
+        return '<dl>'+''.join('<dt>'+label+'</dt><dd>'+field_text(key,row.get(key))+'</dd>' for key,label in labels)+'</dl>'
+    content='<main><h1>'+title+'</h1><p>Получено: '+stamp+'.</p>'
+    content+='<p>Только первая страница, до 20 товаров. Это не полный ассортимент и не отчёт об остатках или продажах. Данные отображаются только для чтения; значения могут измениться после запроса.</p>'
+    content+='<p><a href="/settings">Вернуться к настройкам</a></p>'
+    if not rows: content+='<p>В первой странице ответа нет товаров. Это не доказывает отсутствие всех товаров в кабинете.</p>'
+    for index,row in enumerate(rows[:20],1):
+        if not isinstance(row,dict): raise ValueError('Invalid row')
+        content+='<section><h2>Товар '+str(index)+'</h2>'
+        if provider=='ozon':
+            content+=fields(row,(('product_id','ID товара'),('offer_id','Артикул продавца'),('archived','В архиве'),('is_fbo_visible','Видимость FBO по API'),('is_fbs_visible','Видимость FBS по API')))
+        else:
+            content+=fields(row,(('nmID','Артикул Wildberries'),('vendorCode','Артикул продавца'),('discount','Скидка по API, %'),('clubDiscount','Скидка WB Клуба по API, %'),('currencyIsoCode4217','Код валюты из API')))
+            sizes=row.get('sizes',[])
+            if not isinstance(sizes,list): raise ValueError('Invalid sizes')
+            content+='<p>Цены приведены без пересчёта, в валюте указанного кода из API. Если код не указан, валюту нужно уточнить в кабинете; рубли по умолчанию не подставляются. Показано не более 10 размеров на товар.</p>'
+            if not sizes: content+='<p>Информация о ценах и размерах не получена.</p>'
+            for size in sizes[:10]:
+                if not isinstance(size,dict): raise ValueError('Invalid size')
+                content+=fields(size,(('sizeID','ID размера'),('techSizeName','Размер'),('price','Цена'),('discountedPrice','Цена со скидкой'),('clubDiscountedPrice','Цена для WB Клуба')))
+        content+='</section>'
+    content+='</main>'
+    return '<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>'+title+' — SIDZEN</title></head><body>'+content+'</body></html>'
+
 class Portal:
     def __init__(self, login, vault, read_token_hash, gateway=provider_read):
         if not re.fullmatch(r'[0-9a-f]{64}',read_token_hash): raise ValueError('Expected SHA256 token hash')
@@ -116,7 +169,7 @@ class Portal:
                     present=c.execute('SELECT 1 FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),self.login.clock())).fetchone()
                 if present:
                     start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
-        if path not in ('/settings','/settings/check','/api/read','/healthz'):
+        if path not in ('/settings','/settings/check','/settings/preview','/api/read','/healthz'):
             return self.login(e,start)
         def reply(text,code='200 OK',json_response=False):
             body=(json.dumps(text) if json_response else text).encode()
@@ -158,7 +211,7 @@ class Portal:
                 result=self.gateway(op,args,creds)
                 return reply(result,json_response=True)
             except Exception: return reply({'error':'read_failed'},'502 Bad Gateway',True)
-        if path=='/settings/check' and method!='POST': return reply('Method not allowed','405 Method Not Allowed')
+        if path in ('/settings/check','/settings/preview') and method!='POST': return reply('Method not allowed','405 Method Not Allowed')
         if method not in ('GET','POST'): return reply('Method not allowed','405 Method Not Allowed')
         sid=self.login.cookies(e).get('__Host-sid','')
         if not re.fullmatch(r'[A-Za-z0-9_-]{43}',sid): return reply('Войдите заново на главной странице.','401 Unauthorized')
@@ -166,7 +219,7 @@ class Portal:
         with self.login.connect() as c:
             session=c.execute('SELECT expires,csrf FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),now)).fetchone()
         if not session: return reply('Войдите заново на главной странице.','401 Unauthorized')
-        if path=='/settings/check':
+        if path in ('/settings/check','/settings/preview'):
             if e.get('HTTP_ORIGIN')!=self.login.origin: return reply('Forbidden','403 Forbidden')
             try:
                 form=parse_qs(body('application/x-www-form-urlencoded'),max_num_fields=2,keep_blank_values=True,strict_parsing=True)
@@ -177,14 +230,14 @@ class Portal:
             except (ValueError,TypeError,UnicodeError): return reply('Некорректный запрос.','400 Bad Request')
             # Global owner-level buckets persist across workers/sessions and prevent click storms.
             if not self.login.permit('connection-check:'+provider,1,60) or not self.login.permit('connection-check:all',10,3600):
-                return reply('Слишком много проверок. Для одного кабинета доступна одна проверка в минуту, всего — не более 10 в час. <a href="/settings">Настройки</a>','429 Too Many Requests')
+                return reply('Слишком много запросов. Для проверки или просмотра одного кабинета доступен один запрос в минуту, всего — не более 10 в час. <a href="/settings">Настройки</a>','429 Too Many Requests')
             try:
                 snapshot=self.vault.snapshot(provider)
                 if not snapshot: return reply('Сначала сохраните ключ. <a href="/settings">Настройки</a>','409 Conflict')
                 creds,version=snapshot
             except Exception: return reply('Не удалось прочитать настройки. <a href="/settings">Настройки</a>','503 Service Unavailable')
             try:
-                result=self.gateway(CHECK_OPERATIONS[provider],{'limit':1},creds)
+                result=self.gateway(CHECK_OPERATIONS[provider],{'limit':20 if path=='/settings/preview' else 1},creds)
                 if not isinstance(result,dict) or not isinstance(result.get('items'),list): raise ValueError('Invalid response')
                 outcome='ok'
             except urllib.error.HTTPError as exc:
@@ -192,6 +245,23 @@ class Portal:
                 exc.close()
             except (TimeoutError,urllib.error.URLError): outcome='unavailable'
             except Exception: outcome='failed'
+            if path=='/settings/preview':
+                # Revalidate after the bounded upstream call: logout/expiry or key replacement
+                # must not return a snapshot from an old session/account.
+                try:
+                    with self.login.connect() as c:
+                        live=c.execute('SELECT 1 FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),self.login.clock())).fetchone()
+                    unchanged=self.vault.version_matches(provider,version)
+                except Exception:
+                    return reply('Не удалось проверить доступ к данным. Повторите позже. <a href="/settings">Настройки</a>','503 Service Unavailable')
+                if not live: return reply('Войдите заново на главной странице.','401 Unauthorized')
+                if not unchanged:
+                    return reply('Ключ изменился во время запроса. Повторите просмотр. <a href="/settings">Настройки</a>','409 Conflict')
+                if outcome!='ok': return reply(CHECK_MESSAGES[outcome]+' <a href="/settings">Настройки</a>','502 Bad Gateway')
+                try:
+                    return reply(render_preview(provider,result,self.login.clock(),creds.values()))
+                except (ValueError,TypeError,KeyError):
+                    return reply('Ответ маркетплейса не удалось отобразить. <a href="/settings">Настройки</a>','502 Bad Gateway')
             try:
                 if not self.vault.record_check(provider,version,outcome,self.login.clock()):
                     return reply('Ключ был заменён во время проверки. Проверьте новый ключ. <a href="/settings">Настройки</a>','409 Conflict')
@@ -241,7 +311,10 @@ class Portal:
                 content+='<p>Соединение с маркетплейсом: не проверено. '+('Срок действия и права ключа пока не подтверждены.' if saved else 'Сначала добавьте ключ.')+'</p>'
             if saved:
                 content+='<form method="post" action="/settings/check"><input type="hidden" name="provider" value="'+provider+'"><input type="hidden" name="csrf" value="'+html.escape(session[1],quote=True)+'"><button>Проверить подключение</button></form>'
-                content+='<p>Проверка прочитает до одной записи через API маркетплейса, не меняя товары, цены или заказы. Одна проверка кабинета в минуту, не более 10 проверок в час.</p>' 
+                content+='<p>Проверка прочитает до одной записи через API маркетплейса, не меняя товары, цены или заказы.</p>'
+                label='Показать первые товары Ozon' if provider=='ozon' else 'Показать первые цены Wildberries'
+                content+='<form method="post" action="/settings/preview"><input type="hidden" name="provider" value="'+provider+'"><input type="hidden" name="csrf" value="'+html.escape(session[1],quote=True)+'"><button>'+label+'</button></form>'
+                content+='<p>Просмотр загрузит только первую страницу, до 20 товаров. Данные не сохраняются в кабинете. Проверка и просмотр используют общий лимит: один запрос кабинета в минуту, всего не более 10 запросов в час.</p>' 
             if provider=='ozon': content+='<p>Введите Client ID и API-ключ из кабинета продавца Ozon. Оба значения нужно сохранить вместе.</p>'
             else: content+='<p>Введите API-токен из кабинета продавца Wildberries с правами чтения цен и скидок.</p>'
             content+='<form method="post" action="/settings"><input type="hidden" name="provider" value="'+provider+'"><input type="hidden" name="csrf" value="'+html.escape(session[1],quote=True)+'">'
