@@ -27,6 +27,10 @@ class DeployError(Exception):
     pass
 
 
+class UncertainDockerOutcome(DeployError):
+    """Daemon may still finish the command. No automatic compensating mutations."""
+
+
 def checked_path(value, kind, owner=None):
     p = Path(value)
     if any(c in value for c in ('\x00', '\n', '\r', ',')) or not p.is_absolute() or p == Path('/') or p.is_symlink():
@@ -36,6 +40,10 @@ def checked_path(value, kind, owner=None):
     # No symlink component may redirect the deployer into another project.
     if any(x.is_symlink() for x in (p, *p.parents)):
         raise DeployError('Symlink runtime paths are not allowed')
+    for parent in p.parents:
+        mode = parent.stat()
+        if mode.st_uid not in (0, os.geteuid()) or stat.S_IMODE(mode.st_mode) & 0o022:
+            raise DeployError('Parent directories must be controlled by the trusted operator and not writable by others')
     mode = p.stat()
     if mode.st_uid != (os.geteuid() if owner is None else owner) or stat.S_IMODE(mode.st_mode) & 0o077:
         raise DeployError('Config, state and secrets must be owned by the deploy identity and private')
@@ -65,6 +73,10 @@ def load_config(path):
     paths = [Path(c[k]).resolve() for k in ('state_dir', 'env_file', 'data_dir')]
     if len(set(paths)) != 3 or paths[0] in paths[2].parents or paths[2] in paths[0].parents:
         raise DeployError('State and application data must be separate')
+    data = paths[2]
+    for protected in (path.resolve(), paths[0], paths[1]):
+        if protected == data or data in protected.parents:
+            raise DeployError('Config, state and secrets cannot be inside application data')
     return c
 
 
@@ -76,7 +88,7 @@ class Docker:
         except (OSError, subprocess.TimeoutExpired):
             # The command may have taken effect. The caller must inspect/recover,
             # never blindly repeat a timed-out mutation.
-            raise DeployError('Docker command outcome is uncertain; inspect/recover before retrying') from None
+            raise UncertainDockerOutcome('Docker command outcome is uncertain; inspect before recovery') from None
         if r.returncode:
             raise DeployError('Docker command failed; provider output suppressed')
         return r.stdout
@@ -104,6 +116,14 @@ class Release:
     def __init__(self, config, docker):
         self.c, self.d = config, docker
         self.path = Path(config['state_dir']) / 'state.json'
+        self.uncertain_path = Path(config['state_dir']) / 'uncertain.json'
+
+    def mark_uncertain(self, stage, candidate=None):
+        # O_EXCL: never overwrite unresolved evidence from an earlier failure.
+        fd = os.open(self.uncertain_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'w') as f:
+            json.dump({'stage': stage, 'candidate': candidate}, f)
+            f.flush(); os.fsync(f.fileno())
 
     def state(self):
         if not self.path.exists():
@@ -142,6 +162,7 @@ class Release:
 
     def candidate(self, image):
         candidate = NAME + '-candidate-' + secrets.token_hex(8)
+        uncertain = False
         try:
             self.d.call(['run', '-d', '--name', candidate, '--label', LABEL + '=' + NAME,
                          '--network', 'none', '--read-only', '--cap-drop=ALL',
@@ -152,15 +173,26 @@ class Release:
                          '-e', 'SESSION_SECRET=' + secrets.token_hex(32), image])
             if not self.d.health(candidate):
                 raise DeployError('Candidate failed readiness; current service is unchanged')
+        except UncertainDockerOutcome:
+            uncertain = True
+            self.mark_uncertain('candidate', candidate)
+            raise
         finally:
-            obj = self.d.inspect(candidate)
-            if obj is not None:
-                if not obj['owned']: raise DeployError('Candidate identity mismatch')
-                self.d.call(['rm', '-f', candidate])
+            if not uncertain:
+                try:
+                    obj = self.d.inspect(candidate)
+                    if obj is not None:
+                        if not obj['owned']: raise DeployError('Candidate identity mismatch')
+                        self.d.call(['rm', '-f', candidate])
+                except UncertainDockerOutcome:
+                    self.mark_uncertain('candidate-cleanup', candidate)
+                    raise
 
     def deploy(self, digest):
         if not DIGEST.fullmatch(digest):
             raise DeployError('A sha256 image digest is required, not a tag')
+        if self.uncertain_path.exists():
+            raise DeployError('Uncertain Docker outcome requires independent inspection before any mutation')
         s = self.state()
         if s['pending'] is not None:
             raise DeployError('An interrupted deployment exists; run recover first')
@@ -175,7 +207,11 @@ class Release:
         if not current and s['active'] is not None:
             raise DeployError('Active state has no container; recover explicitly')
         self.d.call(['network', 'inspect', self.c['network']])
-        self.d.call(['pull', image], timeout=300)
+        try:
+            self.d.call(['pull', image], timeout=300)
+        except UncertainDockerOutcome:
+            self.mark_uncertain('image-pull')
+            raise
         self.candidate(image)
         backup = NAME + '-previous-' + secrets.token_hex(8) if current else None
         s['pending'] = {'target': image, 'backup': backup, 'before': s['active']}
@@ -197,11 +233,16 @@ class Release:
                 raise DeployError('New runtime failed readiness')
             self.save({'active': image, 'previous': backup, 'pending': None})
             return 'deployed'
+        except UncertainDockerOutcome:
+            self.mark_uncertain('activation')
+            raise
         except DeployError:
             self.recover()
             raise DeployError('Deployment failed; prior state was restored. Inspect before retrying') from None
 
     def recover(self):
+        if self.uncertain_path.exists():
+            raise DeployError('Verify Docker command has settled and reconcile uncertain evidence before recovery')
         s = self.state(); p = s['pending']
         if p is None: return 'nothing_pending'
         if set(p) != {'target', 'backup', 'before'} or (p['backup'] is not None and not BACKUP.fullmatch(p['backup'])):
@@ -259,6 +300,7 @@ def main():
     p.add_argument('action', choices=['check', 'deploy', 'rollback', 'recover'])
     p.add_argument('--digest')
     a = p.parse_args()
+    engine = None
     try:
         c = load_config(a.config)
         if a.action == 'check':
@@ -271,6 +313,11 @@ def main():
                 result = engine.deploy(a.digest)
             else: result = getattr(engine, a.action)()
         print(result)
+    except UncertainDockerOutcome:
+        if engine is not None and not engine.uncertain_path.exists():
+            engine.mark_uncertain('command')
+        print('Docker outcome uncertain. No automatic recovery. Verify the command has settled and reconcile protected state before continuing.')
+        raise SystemExit(2)
     except (DeployError, OSError, ValueError, TypeError, KeyError):
         # Never print Docker inspect, environment contents or raw provider errors.
         print('Operation failed. Inspect protected deployment state and service health; no secret details printed.')
