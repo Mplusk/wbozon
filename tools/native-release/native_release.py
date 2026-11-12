@@ -4,6 +4,11 @@ import argparse, contextlib, fcntl, hashlib, json, os, pathlib, re, stat, subpro
 UNIT = '3dprinta-portal.service'
 ROOT = pathlib.Path('/opt/3dprinta-portal')
 STATE = pathlib.Path('/var/lib/3dprinta-native-deployer')
+# Reviewed production hook contract; changing bytes requires a new review, not an auto-update.
+HELPER = pathlib.Path('/usr/local/libexec/3dprinta-wait-local-address.py')
+HELPER_SHA256 = '8ddb5c61cc2c3ee8e3e0e7c4978053ce7df42ad4424f2687a4f2c2f7a2370aa5'
+DROP_IN = pathlib.Path('/etc/systemd/system/3dprinta-portal.service.d/20-wait-bridge.conf')
+DROP_IN_SHA256 = '1160cc65d4b0f762d2f1de85802fc84f4ea370b5ac3654d3a54df6aa346cbebb'
 class Refused(Exception): pass
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -55,17 +60,38 @@ def verify_release(root, name, digest):
     return release
 
 class Controller:
-    def __init__(self,root=ROOT,state=STATE,runner=None,health=None):
+    def __init__(self,root=ROOT,state=STATE,runner=None,health=None,dependency=None):
         self.root,self.state=root,state
         self.runner=runner or self.command
         self.health=health or self.http_health
+        self.dependency=dependency or self.docker_ready
     @staticmethod
     def command(*args):
         try:
-            r=subprocess.run(['/usr/bin/systemctl',*args,UNIT],capture_output=True,text=True,timeout=60,check=False)
+            argv=['/usr/bin/systemctl',*args,UNIT]
+            if args[0]=='start':argv.insert(1,'--job-mode=ignore-dependencies')
+            timeout=100 if args[0]=='start' else (60 if args[0]=='stop' else 10)
+            r=subprocess.run(argv,capture_output=True,text=True,timeout=timeout,check=False)
         except (subprocess.TimeoutExpired,OSError): raise Refused('systemctl outcome unknown; journal retained; inspect host before recover') from None
         if r.returncode: raise Refused('systemctl failed; journal retained; inspect host before recover')
         return r.stdout
+    @staticmethod
+    def docker_ready():
+        # Read-only: never request start/stop/restart or any Docker daemon operation.
+        for args in [('is-active','--quiet'),('list-jobs','--no-legend','--no-pager')]:
+            try:
+                r=subprocess.run(['/usr/bin/systemctl',*args,'docker.service'],capture_output=True,text=True,timeout=5,check=False)
+            except (subprocess.TimeoutExpired,OSError):
+                raise Refused('Docker state unknown; do not start portal') from None
+            if r.returncode or (args[0]=='list-jobs' and r.stdout.strip()):
+                raise Refused('Docker not active and settled; no dependency activation attempted')
+    def start_checked(self):
+        self.dependency()
+        # command() suppresses dependency expansion for this transaction only.
+        # check_unit rejects Docker pull-in edges; automatic restarts are separate jobs.
+        self.runner('start')
+        self.ready()
+        self.dependency()  # A concurrent loss leaves pending, never restarts Docker.
     @staticmethod
     def http_health():
         opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
@@ -83,14 +109,35 @@ class Controller:
         if temp.exists() or temp.is_symlink(): raise Refused('stale symlink intent; inspect first')
         temp.symlink_to('releases/'+name)
         os.replace(temp,self.root/'current');syncdir(self.root)
+    @staticmethod
+    def verify_hooks():
+        for path, expected in ((HELPER,HELPER_SHA256),(DROP_IN,DROP_IN_SHA256)):
+            secure(path)
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest()!=expected:
+                raise Refused('unit hook bytes differ from reviewed contract')
     def check_unit(self,digest):
+        self.verify_hooks()
         if not re.fullmatch('[0-9a-f]{64}',digest): raise Refused('unit SHA256 required')
         unit=self.runner('cat','--no-pager')
         if hashlib.sha256(unit.encode()).hexdigest()!=digest: raise Refused('unit content mismatch')
         # Exact inspected unit hash covers drop-ins. Require release-based start, no writable app cwd.
-        shown=self.runner('show','--property=WorkingDirectory','--property=ExecStart','--property=NeedDaemonReload')
+        shown=self.runner('show','--property=WorkingDirectory','--property=ExecStart','--property=NeedDaemonReload','--property=ExecStartPre','--property=TimeoutStartUSec','--property=TimeoutStopUSec','--property=Wants','--property=Requires','--property=BindsTo','--property=Restart')
         if 'NeedDaemonReload=no' not in shown or f'WorkingDirectory={self.root}/current/service' not in shown or f'{self.root}/current/venv/bin/gunicorn' not in shown:
             raise Refused('unsupported loaded unit; no daemon-reload performed')
+        pre=[line for line in shown.splitlines() if line.startswith('ExecStartPre=')]
+        expected=f'/usr/bin/python3 {HELPER} 172.30.31.1 60'
+        if len(pre)!=1 or re.findall(r'argv\[\]=(.*?) ;',pre[0])!=[expected] or not pre[0].startswith('ExecStartPre={ path=/usr/bin/python3 ; '):
+            raise Refused('loaded startup hook differs from reviewed contract')
+        properties=dict(line.split('=',1) for line in shown.splitlines() if '=' in line)
+        # Automatic restart creates a new dependency-expanding job in systemd.
+        # Refuse the current unsafe pull-in contract rather than rely on a precheck race.
+        for relation in ('Wants','Requires','BindsTo'):
+            if relation not in properties or 'docker.service' in properties[relation].split():
+                raise Refused('Docker activation dependency requires separate unit adoption review')
+        if not properties.get('Restart'):
+            raise Refused('missing restart policy')
+        if properties.get('TimeoutStartUSec') not in {'1min 15s','75s','75000000us'} or properties.get('TimeoutStopUSec') not in {'40s','40000000us'}:
+            raise Refused('unreviewed systemd timeout; client budget contract does not apply')
     def ready(self):
         for attempt in range(20):
             self.runner('is-active','--quiet')
@@ -110,13 +157,14 @@ class Controller:
         verify_release(self.root,new,new_hash);verify_release(self.root,old,old_hash)
         self.check_unit(unit_hash)
         self.no_jobs()
+        self.dependency()
         self.runner('is-active','--quiet')
         write_json(pending,{'old':old,'new':new,'old_hash':old_hash,'new_hash':new_hash,'unit_hash':unit_hash})
         self.runner('stop')
         # Confirm shutdown before touching current; timeout/nonzero leaves intent intact.
         if self.runner('show','--property=ActiveState','--value').strip()!='inactive': raise Refused('unit not confirmed inactive')
         self.switch(new)
-        self.runner('start');self.ready()
+        self.start_checked()
         write_json(self.state/'last.json',json.loads(pending.read_text()))
         pending.unlink();syncdir(self.state)
     def recover(self):
@@ -126,13 +174,14 @@ class Controller:
         verify_release(self.root,data['new'],data['new_hash'])
         self.check_unit(data['unit_hash'])
         self.no_jobs()
+        self.dependency()
         if self.current() not in {data['old'],data['new']}: raise Refused('unexpected current release')
         self.runner('stop')
         if self.runner('show','--property=ActiveState','--value').strip()!='inactive': raise Refused('unit not confirmed inactive')
         temp=self.root/'current.pending'
         if temp.is_symlink() and temp.lstat().st_uid==0 and os.readlink(temp) in {'releases/'+data['old'],'releases/'+data['new']}:
             temp.unlink();syncdir(self.root)
-        self.switch(data['old']);self.runner('start');self.ready()
+        self.switch(data['old']);self.start_checked()
         pending.unlink();syncdir(self.state)
 
 @contextlib.contextmanager
@@ -167,7 +216,7 @@ def main():
                     if c.current()!=last['new']: raise Refused('last release no longer current')
                     c.deploy(last['old'],last['old_hash'],last['new_hash'],a.unit_sha256 or '')
                 else: c.deploy(a.release or '',a.manifest_sha256 or '',a.current_manifest_sha256 or '',a.unit_sha256 or '')
-        print('Completed; no credentials, data or other units modified.')
+        print('Completed. Verify service/dependency effects against the approved host plan.')
     except (Refused,OSError,ValueError,TypeError,KeyError):
         print('Refused or incomplete. Preserve journal and inspect trusted configuration/systemd state; no automatic retry.',file=sys.stderr);return 1
     return 0
