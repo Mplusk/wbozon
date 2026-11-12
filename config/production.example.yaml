@@ -1,0 +1,21 @@
+# Шаблон для данных владельца. Значения не заполнены и не используются автоматически.
+# Не храните здесь пароли, токены или другие секреты.
+printers:
+  - model: null
+    count: null
+    purchase_price_rub: null
+    useful_life_hours: null
+    power_kw: null
+    maintenance_rub_per_hour: null
+materials:
+  - name: null
+    color: null
+    price_rub_per_kg: null
+electricity_rub_per_kwh: null
+operator_rub_per_hour: null
+packaging_rub_per_unit: null
+tax_regime: null
+tax_rate: null  # Доля выручки; подтвердить с бухгалтером.
+marketplace: ozon  # Выбор владельца; остальные параметры ещё не заполнены.
+fulfillment_scheme: null
+warehouse: null

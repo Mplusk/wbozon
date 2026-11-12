@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Python checks and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify Python syntax
+        run: python3 -m compileall -q calc collectors deploy operations pipeline production storage workcycle marketplace_check.py test_*.py
+      - name: Check JSON inputs
+        run: |
+          python3 -m json.tool config/production.yaml > /dev/null
+          for file in examples/*.json; do
+            python3 -m json.tool "$file" > /dev/null
+          done
+      - name: Run offline tests
+        run: python3 -m unittest -v

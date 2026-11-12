@@ -8,3 +8,9 @@ __pycache__/
 *.py[cod]
 .venv/
 secrets/
+# Local working data may include sensitive marketplace information.
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+data/
