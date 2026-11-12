@@ -1,0 +1,17 @@
+{
+  "status": "PASS",
+  "portal": {
+    "tests": 59,
+    "success": true
+  },
+  "native_cd": {
+    "tests": 46,
+    "success": true
+  },
+  "portal_manifest_sha256": "7d03a2e8e78c8dd98a791650c55e725b1ead586860d5d511fe8736ff5c091ff8",
+  "native_manifest_sha256": "75e32f89f5eed9a2ee34621d749014d0433767836b668211203b3e529ad9c151",
+  "network": "Python audit denies socket events in install/tests; no OS network sandbox",
+  "production": "not accessed",
+  "systemd": "mocked in tests",
+  "limitations": "not GitHub CI success; no real HTTP or systemd activation test"
+}
