@@ -153,16 +153,30 @@ class Portal:
             except Exception: return reply('Не удалось сохранить настройки.','503 Service Unavailable')
             return reply('Ключ сохранён зашифрованно. Соединение ещё не проверено. <a href="/settings">Настройки</a>')
         configured=self.vault.present()
-        content='<h1>Подключение кабинетов</h1><p>Только ключи с минимальными правами чтения. Значения после сохранения не отображаются.</p>'
+        content='<main><h1>Подключение кабинетов</h1>'
+        content+='<p>Здесь можно сохранить ключи Wildberries и Ozon. Используйте отдельные ключи только с необходимыми правами чтения. Права на изменение товаров, цен и заказов не нужны.</p>'
+        content+='<p>Ключи хранятся зашифрованно и не отображаются после сохранения. Сохранение ключа не подтверждает его действительность и не подключает MCP автоматически.</p>'
+        content+='<section aria-labelledby="mcp-title"><h2 id="mcp-title">Связь с MCP</h2><p>Статус подключения MCP здесь не проверяется. Наличие ключей в кабинете не означает, что ассистент уже получает данные.</p></section>'
+        content+='<p>Сохранить или заменить ключи можно в течение первых 5 минут после входа по письму. Затем выйдите и запросите новую ссылку. Уже сохранённые ключи останутся на сервере.</p>'
         content+='<form method="post" action="/logout"><input type="hidden" name="csrf" value="'+html.escape(session[1],quote=True)+'"><button>Выйти для повторного входа</button></form>'
         if session[0]-43200 < now-300:
-            content+='<p>Для сохранения ключей сначала выйдите и получите новую ссылку входа.</p>'
+            content+='<p role="status">Время для изменения ключей истекло. Для сохранения ключей сначала выйдите и получите новую ссылку входа.</p>'
+        names={'ozon':'Ozon','wb':'Wildberries'}
+        labels={'client_id':'Идентификатор продавца (Client ID)', 'api_key':'API-ключ Ozon', 'api_token':'API-токен Wildberries'}
         for provider,fields in FIELDS.items():
-            content+=f'<h2>{provider.upper()}: '+('настроено' if provider in configured else 'не настроено')+'</h2>'
+            saved=provider in configured
+            content+=f'<section aria-labelledby="{provider}-title"><h2 id="{provider}-title">{names[provider]}</h2>'
+            content+='<p>Ключ: '+('сохранён зашифрованно' if saved else 'не добавлен')+'.</p>'
+            content+='<p>Соединение с маркетплейсом: не проверено. '+('Срок действия и права ключа пока не подтверждены.' if saved else 'Сначала добавьте ключ.')+'</p>'
+            if provider=='ozon': content+='<p>Введите Client ID и API-ключ из кабинета продавца Ozon. Оба значения нужно сохранить вместе.</p>'
+            else: content+='<p>Введите API-токен из кабинета продавца Wildberries с правами чтения цен и скидок.</p>'
             content+='<form method="post" action="/settings"><input type="hidden" name="provider" value="'+provider+'"><input type="hidden" name="csrf" value="'+html.escape(session[1],quote=True)+'">'
-            for field in fields: content+=f'<label>{field}<input type="password" name="{field}" autocomplete="off" required maxlength="2048"></label>'
-            content+='<button>Сохранить</button></form>'
-        return reply('<!doctype html><meta charset="utf-8"><title>SIDZEN</title>'+content)
+            for field in fields:
+                ident=provider+'-'+field
+                content+=f'<p><label for="{ident}">{labels[field]}</label><br><input id="{ident}" type="password" name="{field}" autocomplete="off" required maxlength="2048"></p>'
+            content+='<button>'+('Заменить сохранённый ключ' if saved else 'Сохранить ключ')+'</button></form></section>'
+        content+='</main>'
+        return reply('<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Подключение кабинетов — SIDZEN</title></head><body>'+content+'</body></html>')
 
 def secret_file(name, binary=False):
     path=os.environ[name]
