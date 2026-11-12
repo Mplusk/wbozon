@@ -86,12 +86,22 @@ class Portal:
                     present=c.execute('SELECT 1 FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),self.login.clock())).fetchone()
                 if present:
                     start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
-        if path not in ('/settings','/api/read'):
+        if path not in ('/settings','/api/read','/healthz'):
             return self.login(e,start)
         def reply(text,code='200 OK',json_response=False):
             body=(json.dumps(text) if json_response else text).encode()
             start(code,[('Content-Type','application/json' if json_response else 'text/html; charset=utf-8'),('Content-Length',str(len(body))),('Cache-Control','no-store'),('Referrer-Policy','no-referrer'),('X-Content-Type-Options','nosniff'),('Content-Security-Policy',"default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")]); return [body]
         if e.get('HTTP_HOST')!=urlsplit(self.login.origin).netloc: return reply('Invalid host','400 Bad Request')
+        if path=='/healthz':
+            # Liveness only: no session, credential, database, SMTP or seller access.
+            # This does not assert that downstream integrations are configured/healthy.
+            status='200 OK' if method in ('GET','HEAD') else '405 Method Not Allowed'
+            payload=b'{"status":"ok"}' if status=='200 OK' else b'{"error":"method"}'
+            headers=[('Content-Type','application/json'),('Content-Length',str(len(payload))),
+                     ('Cache-Control','no-store'),('X-Content-Type-Options','nosniff')]
+            if status!='200 OK': headers.append(('Allow','GET, HEAD'))
+            start(status,headers)
+            return [b''] if method=='HEAD' else [payload]
         def body(kind):
             if e.get('CONTENT_TYPE','').split(';')[0]!=kind: raise ValueError()
             n=int(e.get('CONTENT_LENGTH','0'))
