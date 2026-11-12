@@ -1,28 +1,58 @@
 """Local integration prototype. Browser sessions never authenticate the read API."""
-import hashlib, hmac, html, json, os, re, secrets, sqlite3, ssl, urllib.request, smtplib
+import hashlib, hmac, html, json, os, re, secrets, sqlite3, ssl, urllib.request, urllib.error, smtplib
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from urllib.parse import parse_qs, urlsplit
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from app import LoginApp, smtp_mailer
 
 FIELDS = {'ozon': ('client_id', 'api_key'), 'wb': ('api_token',)}
+CHECK_OPERATIONS = {'ozon':'ozon_products', 'wb':'wb_prices'}
+CHECK_MESSAGES = {
+    'ok':'Проверка чтения данных выполнена успешно.',
+    'denied':'Маркетплейс отклонил доступ. Проверьте ключ, срок действия и права чтения.',
+    'rate_limited':'Маркетплейс временно ограничил запросы. Повторите проверку позже.',
+    'unavailable':'Маркетплейс временно недоступен. Повторите проверку позже.',
+    'failed':'Не удалось подтвердить соединение. Проверьте настройки и повторите позже.',
+}
+
 class Vault:
     def __init__(self, path, key):
         if len(key) != 32: raise ValueError('32-byte vault key required')
         self.path, self.aead = path, AESGCM(key)
         with sqlite3.connect(path) as c:
             c.execute('CREATE TABLE IF NOT EXISTS vault(provider TEXT PRIMARY KEY, blob BLOB NOT NULL)')
+            c.execute('CREATE TABLE IF NOT EXISTS connection_checks(provider TEXT PRIMARY KEY, version TEXT NOT NULL, outcome TEXT NOT NULL, checked_at REAL NOT NULL)')
     def save(self, provider, values):
         nonce = secrets.token_bytes(12)
         blob = nonce + self.aead.encrypt(nonce, json.dumps(values).encode(), provider.encode())
         with sqlite3.connect(self.path) as c:
             c.execute('INSERT OR REPLACE INTO vault VALUES (?,?)', (provider, blob))
-    def read(self, provider):
+            c.execute('DELETE FROM connection_checks WHERE provider=?',(provider,))
+    def snapshot(self, provider):
         with sqlite3.connect(self.path) as c:
             row = c.execute('SELECT blob FROM vault WHERE provider=?', (provider,)).fetchone()
         if not row: return None
         blob = bytes(row[0])
-        return json.loads(self.aead.decrypt(blob[:12], blob[12:], provider.encode()))
+        values=json.loads(self.aead.decrypt(blob[:12], blob[12:], provider.encode()))
+        return values, hashlib.sha256(blob).hexdigest()
+    def read(self, provider):
+        snapshot=self.snapshot(provider)
+        return snapshot[0] if snapshot else None
+    def record_check(self, provider, version, outcome, checked_at):
+        if outcome not in CHECK_MESSAGES: raise ValueError('Invalid outcome')
+        with sqlite3.connect(self.path) as c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute('SELECT blob FROM vault WHERE provider=?',(provider,)).fetchone()
+            if not row or not hmac.compare_digest(hashlib.sha256(bytes(row[0])).hexdigest(),version): return False
+            c.execute('INSERT OR REPLACE INTO connection_checks VALUES (?,?,?,?)',(provider,version,outcome,checked_at))
+        return True
+    def check_status(self, provider):
+        # Read storage metadata only; rendering never decrypts credentials.
+        with sqlite3.connect(self.path) as c:
+            row=c.execute('SELECT v.blob,c.version,c.outcome,c.checked_at FROM vault v JOIN connection_checks c ON v.provider=c.provider WHERE v.provider=?',(provider,)).fetchone()
+        if not row or row[2] not in CHECK_MESSAGES or not hmac.compare_digest(hashlib.sha256(bytes(row[0])).hexdigest(),row[1]): return None
+        return row[2],row[3]
     def present(self):
         with sqlite3.connect(self.path) as c:
             return {r[0] for r in c.execute('SELECT provider FROM vault')}
@@ -86,7 +116,7 @@ class Portal:
                     present=c.execute('SELECT 1 FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),self.login.clock())).fetchone()
                 if present:
                     start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
-        if path not in ('/settings','/api/read','/healthz'):
+        if path not in ('/settings','/settings/check','/api/read','/healthz'):
             return self.login(e,start)
         def reply(text,code='200 OK',json_response=False):
             body=(json.dumps(text) if json_response else text).encode()
@@ -128,6 +158,7 @@ class Portal:
                 result=self.gateway(op,args,creds)
                 return reply(result,json_response=True)
             except Exception: return reply({'error':'read_failed'},'502 Bad Gateway',True)
+        if path=='/settings/check' and method!='POST': return reply('Method not allowed','405 Method Not Allowed')
         if method not in ('GET','POST'): return reply('Method not allowed','405 Method Not Allowed')
         sid=self.login.cookies(e).get('__Host-sid','')
         if not re.fullmatch(r'[A-Za-z0-9_-]{43}',sid): return reply('Войдите заново на главной странице.','401 Unauthorized')
@@ -135,6 +166,38 @@ class Portal:
         with self.login.connect() as c:
             session=c.execute('SELECT expires,csrf FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),now)).fetchone()
         if not session: return reply('Войдите заново на главной странице.','401 Unauthorized')
+        if path=='/settings/check':
+            if e.get('HTTP_ORIGIN')!=self.login.origin: return reply('Forbidden','403 Forbidden')
+            try:
+                form=parse_qs(body('application/x-www-form-urlencoded'),max_num_fields=2,keep_blank_values=True,strict_parsing=True)
+                if set(form)!={'provider','csrf'} or any(len(v)!=1 for v in form.values()): raise ValueError()
+                provider=form['provider'][0]; csrf=form['csrf'][0]
+                if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
+                if provider not in CHECK_OPERATIONS: raise ValueError()
+            except (ValueError,TypeError,UnicodeError): return reply('Некорректный запрос.','400 Bad Request')
+            # Global owner-level buckets persist across workers/sessions and prevent click storms.
+            if not self.login.permit('connection-check:'+provider,1,60) or not self.login.permit('connection-check:all',10,3600):
+                return reply('Слишком много проверок. Для одного кабинета доступна одна проверка в минуту, всего — не более 10 в час. <a href="/settings">Настройки</a>','429 Too Many Requests')
+            try:
+                snapshot=self.vault.snapshot(provider)
+                if not snapshot: return reply('Сначала сохраните ключ. <a href="/settings">Настройки</a>','409 Conflict')
+                creds,version=snapshot
+            except Exception: return reply('Не удалось прочитать настройки. <a href="/settings">Настройки</a>','503 Service Unavailable')
+            try:
+                result=self.gateway(CHECK_OPERATIONS[provider],{'limit':1},creds)
+                if not isinstance(result,dict) or not isinstance(result.get('items'),list): raise ValueError('Invalid response')
+                outcome='ok'
+            except urllib.error.HTTPError as exc:
+                outcome='denied' if exc.code in (401,403) else 'rate_limited' if exc.code==429 else 'unavailable' if 500<=exc.code<=599 else 'failed'
+                exc.close()
+            except (TimeoutError,urllib.error.URLError): outcome='unavailable'
+            except Exception: outcome='failed'
+            try:
+                if not self.vault.record_check(provider,version,outcome,self.login.clock()):
+                    return reply('Ключ был заменён во время проверки. Проверьте новый ключ. <a href="/settings">Настройки</a>','409 Conflict')
+            except Exception: return reply('Не удалось сохранить результат проверки. <a href="/settings">Настройки</a>','503 Service Unavailable')
+            # Never render/log upstream payloads or exception strings. PRG prevents refresh resubmission.
+            start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]); return [b'']
         if method=='POST':
             if e.get('HTTP_ORIGIN')!=self.login.origin: return reply('Forbidden','403 Forbidden')
             if session[0]-43200 < now-300: return reply('Для изменения ключей войдите заново по письму.','403 Forbidden')
@@ -167,7 +230,18 @@ class Portal:
             saved=provider in configured
             content+=f'<section aria-labelledby="{provider}-title"><h2 id="{provider}-title">{names[provider]}</h2>'
             content+='<p>Ключ: '+('сохранён зашифрованно' if saved else 'не добавлен')+'.</p>'
-            content+='<p>Соединение с маркетплейсом: не проверено. '+('Срок действия и права ключа пока не подтверждены.' if saved else 'Сначала добавьте ключ.')+'</p>'
+            check=self.vault.check_status(provider) if saved else None
+            if check:
+                outcome,checked_at=check
+                stamp=datetime.fromtimestamp(checked_at,timezone.utc).strftime('%d.%m.%Y %H:%M:%S UTC')
+                scope='список товаров Ozon' if provider=='ozon' else 'цены и скидки Wildberries'
+                content+='<p>Последняя проверка: '+stamp+'. '+CHECK_MESSAGES[outcome]+'</p>'
+                content+='<p>Область проверки — только операция чтения: '+scope+'. Это результат на указанное время, не подтверждение всех прав или подключения MCP.</p>'
+            else:
+                content+='<p>Соединение с маркетплейсом: не проверено. '+('Срок действия и права ключа пока не подтверждены.' if saved else 'Сначала добавьте ключ.')+'</p>'
+            if saved:
+                content+='<form method="post" action="/settings/check"><input type="hidden" name="provider" value="'+provider+'"><input type="hidden" name="csrf" value="'+html.escape(session[1],quote=True)+'"><button>Проверить подключение</button></form>'
+                content+='<p>Проверка прочитает до одной записи через API маркетплейса, не меняя товары, цены или заказы. Одна проверка кабинета в минуту, не более 10 проверок в час.</p>' 
             if provider=='ozon': content+='<p>Введите Client ID и API-ключ из кабинета продавца Ozon. Оба значения нужно сохранить вместе.</p>'
             else: content+='<p>Введите API-токен из кабинета продавца Wildberries с правами чтения цен и скидок.</p>'
             content+='<form method="post" action="/settings"><input type="hidden" name="provider" value="'+provider+'"><input type="hidden" name="csrf" value="'+html.escape(session[1],quote=True)+'">'
