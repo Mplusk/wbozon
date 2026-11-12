@@ -124,6 +124,15 @@ class Release:
         with os.fdopen(fd, 'w') as f:
             json.dump({'stage': stage, 'candidate': candidate}, f)
             f.flush(); os.fsync(f.fileno())
+        dfd = os.open(self.uncertain_path.parent, os.O_RDONLY)
+        try: os.fsync(dfd)
+        finally: os.close(dfd)
+
+    def clear_candidate_intent(self):
+        self.uncertain_path.unlink()
+        dfd = os.open(self.uncertain_path.parent, os.O_RDONLY)
+        try: os.fsync(dfd)
+        finally: os.close(dfd)
 
     def state(self):
         if not self.path.exists():
@@ -163,6 +172,9 @@ class Release:
     def candidate(self, image):
         candidate = NAME + '-candidate-' + secrets.token_hex(8)
         uncertain = False
+        # Persist intent before run; SIGKILL cannot leave an untracked candidate.
+        # Any surviving intent blocks the next mutation until independent inspection.
+        self.mark_uncertain('candidate-intent', candidate)
         try:
             self.d.call(['run', '-d', '--name', candidate, '--label', LABEL + '=' + NAME,
                          '--network', 'none', '--read-only', '--cap-drop=ALL',
@@ -175,7 +187,6 @@ class Release:
                 raise DeployError('Candidate failed readiness; current service is unchanged')
         except UncertainDockerOutcome:
             uncertain = True
-            self.mark_uncertain('candidate', candidate)
             raise
         finally:
             if not uncertain:
@@ -184,8 +195,8 @@ class Release:
                     if obj is not None:
                         if not obj['owned']: raise DeployError('Candidate identity mismatch')
                         self.d.call(['rm', '-f', candidate])
+                    self.clear_candidate_intent()
                 except UncertainDockerOutcome:
-                    self.mark_uncertain('candidate-cleanup', candidate)
                     raise
 
     def deploy(self, digest):
@@ -308,14 +319,17 @@ def main():
         if not a.execute: raise DeployError('Mutations require --execute; nothing performed')
         with locked(c):
             engine = Release(c, Docker())
-            if a.action == 'deploy':
-                if not a.digest: raise DeployError('--digest is required')
-                result = engine.deploy(a.digest)
-            else: result = getattr(engine, a.action)()
+            try:
+                if a.action == 'deploy':
+                    if not a.digest: raise DeployError('--digest is required')
+                    result = engine.deploy(a.digest)
+                else: result = getattr(engine, a.action)()
+            except UncertainDockerOutcome:
+                if not engine.uncertain_path.exists():
+                    engine.mark_uncertain('command')
+                raise
         print(result)
     except UncertainDockerOutcome:
-        if engine is not None and not engine.uncertain_path.exists():
-            engine.mark_uncertain('command')
         print('Docker outcome uncertain. No automatic recovery. Verify the command has settled and reconcile protected state before continuing.')
         raise SystemExit(2)
     except (DeployError, OSError, ValueError, TypeError, KeyError):
