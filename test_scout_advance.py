@@ -61,6 +61,21 @@ class TransitionTests(unittest.TestCase):
         self.assertTrue(any("rights.status" in reason for reason in result["blockers"]))
         self.assertEqual(len(self.history()), 1)
 
+    def test_forged_approval_fields_never_bypass_gate(self):
+        for index, (stage, gate) in enumerate((("sample_approval", "sample"),
+                                              ("launch_approval", "launch"),
+                                              ("publication_approval", "publication"))):
+            with self.subTest(stage=stage):
+                record = {"stage": stage, "approvals": {gate: {"approved": True, "channel": "telegram", "evidence": "fake"}},
+                          "rights": {"status": "settled", "owner_evidence": "fake"},
+                          "compliance": {"required_document": "none"},
+                          "launch_plan": {"first_batch_budget": 1000, "advertising_budget": 100},
+                          "listing": {"api_validation": {"passed": True, "evidence": "fake"},
+                                      "quality_review": {"passed": True, "evidence": "fake"}}}
+                revision = self.save(record)
+                self.assertEqual(self.move(revision)["status"], "blocked")
+                self.assertEqual(self.history()[-1]["id"], revision)
+
     def test_concurrent_updates_cannot_both_advance_same_revision(self):
         revision = self.save(FULL)
         with ThreadPoolExecutor(max_workers=2) as pool:

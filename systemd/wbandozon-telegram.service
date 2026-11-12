@@ -1,0 +1,22 @@
+# Образец пользовательской службы. Не установлен; пути и доступы настроить на VPS.
+[Unit]
+Description=Owner-only Telegram decision bot (long polling)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/wbandozon/current
+EnvironmentFile=/var/lib/wbandozon/secrets/telegram.env
+ExecStart=/opt/wbandozon/venv/bin/python -m bot poll
+Restart=on-failure
+RestartSec=10s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/wbandozon/gates /var/lib/wbandozon/gateway /var/lib/wbandozon/bot
+UMask=0077
+
+[Install]
+WantedBy=default.target

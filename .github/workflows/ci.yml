@@ -18,8 +18,13 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - name: Install pinned Python dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --disable-pip-version-check -r requirements.txt
+          .venv/bin/python -m pip check
       - name: Verify Python syntax
-        run: python3 -m compileall -q calc collectors daily demand deploy operations pipeline production reports scout storage workcycle marketplace_check.py test_*.py
+        run: .venv/bin/python -m compileall -q bot calc collectors daily demand deploy gates gateway operations pipeline production reports scout storage workcycle marketplace_check.py test_*.py
       - name: Check JSON inputs
         run: |
           python3 -m json.tool config/production.yaml > /dev/null
@@ -27,4 +32,4 @@ jobs:
             python3 -m json.tool "$file" > /dev/null
           done
       - name: Run offline tests
-        run: python3 -m unittest -v
+        run: .venv/bin/python -m unittest -v

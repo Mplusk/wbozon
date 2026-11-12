@@ -47,6 +47,10 @@ def transition(db_path, candidate_id, expected_revision, *, source, observed_at)
                             "message": "Кандидат изменился; проверьте актуальную версию и повторите запрос."}
                 candidate = latest["candidate"]
                 reasons = blockers(candidate)
+                if candidate.get("stage") in {"sample_approval", "launch_approval", "publication_approval"}:
+                    store.connection.rollback()
+                    return {"status": "blocked", "current_revision": latest["id"],
+                            "blockers": reasons + ["Ворота требуют подтверждённого серверного перехода через GateStore"]}
                 if reasons:
                     store.connection.rollback()
                     return {"status": "blocked", "current_revision": latest["id"], "blockers": reasons}

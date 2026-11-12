@@ -8,6 +8,7 @@ credentials. See deploy/README.md before enabling on a real server.
 
 import argparse
 import fcntl
+import importlib.metadata
 import os
 from pathlib import Path
 import re
@@ -22,6 +23,52 @@ GITHUB_REPO = re.compile(r"(?:git@github\.com:|ssh://git@github\.com/)[A-Za-z0-9
 
 class DeployError(Exception):
     pass
+
+
+# Dependencies needed by the gateway and its HTTP tests must never be omitted.
+REQUIRED_DISTRIBUTIONS = {"fastapi", "uvicorn", "httpx"}
+REQUIREMENT = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9][A-Za-z0-9._+!-]*)\Z")
+
+
+def check_candidate_requirements(candidate):
+    """Verify locked versions without executing project code or installing packages.
+
+    Only simple exact `name==version` lines and full-line comments are accepted.
+    Version lookup uses the deploy controller's interpreter and trusted venv,
+    not a Python process in the candidate checkout.
+    """
+    path = Path(candidate) / "requirements.txt"
+    if path.is_symlink() or not path.is_file():
+        raise DeployError("Нет обычного файла requirements.txt")
+    try:
+        content = path.read_bytes()
+        if len(content) > 65536:
+            raise ValueError
+        lines = content.decode("utf-8").splitlines()
+    except (OSError, UnicodeError, ValueError):
+        raise DeployError("Не удалось безопасно прочитать requirements.txt") from None
+    pins = {}
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = REQUIREMENT.fullmatch(line)
+        if match is None or len(line) > 256:
+            raise DeployError("requirements.txt содержит неподдерживаемую запись")
+        name, expected = match.groups()
+        canonical = re.sub(r"[-_.]+", "-", name).lower()
+        if canonical in pins:
+            raise DeployError("requirements.txt содержит повторяющееся имя пакета")
+        pins[canonical] = expected
+    if not REQUIRED_DISTRIBUTIONS <= pins.keys():
+        raise DeployError("requirements.txt не содержит обязательные зависимости шлюза")
+    for name, expected in pins.items():
+        try:
+            actual = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            raise DeployError(f"В доверенном окружении отсутствует пакет {name}") from None
+        if actual != expected:
+            raise DeployError(f"Версия пакета {name} не совпадает с требованиями релиза")
 
 
 def safe_environment():
@@ -80,6 +127,7 @@ def deploy(repo, base, allow_local=False):
                 if (active.parent == releases.resolve() and active.is_dir()
                         and re.fullmatch(re.escape(commit) + r"-[0-9a-f]{12}", active.name)):
                     return commit, False
+            check_candidate_requirements(candidate)
             test_env = dict(env, WBANDOZON_DEPLOY_TEST_STAGE="1")
             # Explicit suites prevent a zero-test checkout from being deployed.
             command([sys.executable, "-m", "unittest", "-v", "test_economics", "test_candidate_pipeline"], candidate, test_env)

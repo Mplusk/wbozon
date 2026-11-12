@@ -1,4 +1,5 @@
 import os
+from importlib.metadata import version
 from pathlib import Path
 import subprocess
 import sys
@@ -26,6 +27,7 @@ class DeployIntegrationTests(unittest.TestCase):
         self.git("config", "user.email", "test@example.invalid")
         (self.repo / "test_economics.py").write_text(GOOD_TEST)
         (self.repo / "test_candidate_pipeline.py").write_text(GOOD_TEST)
+        (self.repo / "requirements.txt").write_text("".join(f"{name}=={version(name)}\n" for name in ("fastapi", "httpx", "uvicorn")))
         self.commit()
         self.base = self.root / "deploy"
 
@@ -89,6 +91,38 @@ class DeployIntegrationTests(unittest.TestCase):
             with self.assertRaisesRegex(deploy_module.DeployError, "root"):
                 deploy_module.deploy("git@github.com:owner/repo.git", self.base)
         self.assertFalse(self.base.exists())
+
+    def test_wrong_dependency_keeps_active_release(self):
+        self.assertEqual(self.deploy().returncode, 0)
+        before = (self.base / "current").resolve()
+        (self.repo / "requirements.txt").write_text(
+            f"fastapi==0.0.0\nhttpx=={version('httpx')}\nuvicorn=={version('uvicorn')}\n")
+        self.commit()
+        failed = self.deploy()
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("не совпадает", failed.stderr)
+        self.assertEqual((self.base / "current").resolve(), before)
+
+    def test_requirements_never_execute_options_or_allow_unpinned_packages(self):
+        requirement = self.repo / "requirements.txt"
+        original = requirement.read_text()
+        for bad in ("--extra-index-url https://bad.example\n", "other>=1\n", "fastapi==1.0\n", "missing-package==1.0\n"):
+            with self.subTest(bad=bad):
+                requirement.write_text(original + bad)
+                self.commit()
+                self.assertEqual(self.deploy().returncode, 1)
+                self.assertFalse((self.base / "current").exists())
+
+    def test_missing_or_linked_requirements_are_rejected(self):
+        requirement = self.repo / "requirements.txt"
+        requirement.unlink()
+        self.commit()
+        self.assertEqual(self.deploy().returncode, 1)
+        self.assertFalse((self.base / "current").exists())
+        requirement.symlink_to("/etc/passwd")
+        self.commit()
+        self.assertEqual(self.deploy().returncode, 1)
+        self.assertFalse((self.base / "current").exists())
 
     def test_insecure_repository_url_rejected(self):
         result = self.deploy("https://example.com/repo.git")

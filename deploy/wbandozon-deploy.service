@@ -5,7 +5,7 @@ Description=Pull and verify a wbandozon release (does not restart services)
 Type=oneshot
 # Run as a dedicated unprivileged user. Set paths and the SSH URL on this VPS.
 WorkingDirectory=/opt/wbandozon-deployer
-ExecStart=/usr/bin/python3 /opt/wbandozon-deployer/deploy.py --repo git@github.com:OWNER/REPOSITORY.git --base /srv/wbandozon
+ExecStart=/opt/wbandozon-deployer/venv/bin/python -I /opt/wbandozon-deployer/deploy.py --repo git@github.com:OWNER/REPOSITORY.git --base /srv/wbandozon
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
