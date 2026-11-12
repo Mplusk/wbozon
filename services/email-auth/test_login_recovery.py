@@ -20,7 +20,7 @@ class RecoveryTests(unittest.TestCase):
         for value in forbidden:self.assertNotIn(value,response['body'])
         headers=dict(response['headers'])
         self.assertEqual(headers['Cache-Control'],'no-store')
-        self.assertEqual(headers['Referrer-Policy'],'no-referrer')
+        self.assertEqual(headers['Referrer-Policy'],'strict-origin')
         self.assertIn("frame-ancestors 'none'",headers['Content-Security-Policy'])
         self.assertNotIn('Set-Cookie',headers)
     def test_expired_has_safe_recovery_without_mail_or_session(self):

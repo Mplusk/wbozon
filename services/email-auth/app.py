@@ -31,7 +31,7 @@ class LoginApp:
     def __call__(self,e,start):
         status='200 OK'; headers=[]
         def reply(body,code='200 OK',extra=()):
-            data=body.encode(); start(code,[('Content-Type','text/html; charset=utf-8'),('Content-Length',str(len(data))),('Cache-Control','no-store'),('Referrer-Policy','no-referrer'),('X-Content-Type-Options','nosniff'),('Content-Security-Policy',"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"),*extra]); return [data]
+            data=body.encode(); start(code,[('Content-Type','text/html; charset=utf-8'),('Content-Length',str(len(data))),('Cache-Control','no-store'),('Referrer-Policy','strict-origin'),('X-Content-Type-Options','nosniff'),('Content-Security-Policy',"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"),*extra]); return [data]
         def cookie(name,value,age):return ('Set-Cookie',f'{name}={value}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={age}')
         def form(title,action,fields):return f'<!doctype html><meta charset="utf-8"><title>{title}</title><h1>{title}</h1><form method="post" action="{action}">{fields}<button>Продолжить</button></form>'
         def recovery(title, message, code):
