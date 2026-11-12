@@ -97,3 +97,56 @@ success, rollback, recovery, corrupt artifacts, foreign current, stale intent,
 timeout stop/start, readiness failure, lock exclusion and single-unit command scope.
 Production acceptance must additionally verify actual systemd sandbox, venv layout,
 unit hooks/dependencies, DB compatibility, health identity and operational recovery.
+
+## Current production hook contract (local controller not activated)
+
+The separately authorized host correction removed only Wants=docker.service from
+20-wait-bridge.conf. Ordering, readiness helper and automatic retries remain.
+`check_unit` requires secure root-owned regular files and exact hashes:
+
+- `/usr/local/libexec/3dprinta-wait-local-address.py`:
+  `8ddb5c61cc2c3ee8e3e0e7c4978053ce7df42ad4424f2687a4f2c2f7a2370aa5`
+- `/etc/systemd/system/3dprinta-portal.service.d/20-wait-bridge.conf`:
+  `1160cc65d4b0f762d2f1de85802fc84f4ea370b5ac3654d3a54df6aa346cbebb`
+
+Loaded ExecStartPre must contain exactly one `/usr/bin/python3` command running the
+helper with `172.30.31.1 60`. Full systemctl-cat fingerprint must be independently
+captured and approved, not inferred from the main-unit file hash. No helper is
+executed by check. Changes require another review, not copying live hashes blindly.
+
+## Dependency races and bounded timeouts
+
+Docker checks use only is-active/list-jobs, each max5s, before stopping portal,
+immediately before start and after readiness. Inactive/pending/unknown refuses;
+loss after mutation leaves journal without retries, rollback or Docker restart.
+Portal start uses `--job-mode=ignore-dependencies` to avoid dependency expansion in
+its initial transaction. Host acceptance must account for suppressed ordering.
+
+Automatic Restart=on-failure is a new systemd transaction that can expand
+activation dependencies. Thus loaded Wants/Requires/BindsTo containing docker.service
+or missing dependency properties refuse BEFORE intent/stop, even when Docker is
+active. This guards against regression to the former unsafe drop-in. It is not a
+complete graph proof. The host operator reports a99-unit recursive graph inspection
+across Wants/Requires/BindsTo/Upholds/OnSuccess/OnFailure/Triggers with no Docker or
+containerd reachable. This supplied host snapshot must be rechecked after unit or
+dependency changes and before first activation. Ordering-only After does not pull
+Docker in; Docker must already be running for this workflow.
+
+Client start budget100s exceeds verified loaded systemd75s; stop60s exceeds40s;
+read-only portal queries max10s. Missing/different/infinite systemd budgets refuse
+before mutation. A timeout still means UNKNOWN because systemd may continue:
+preserve pending journal, inspect actual jobs and reconcile before explicit recovery.
+
+## Remaining adoption gates
+
+- Fresh full systemctl-cat fingerprint including corrected drop-in.
+- Sealed manifest-compatible baseline/candidate, not copied or modified live venv.
+- Independently reviewed bootstrap from old unsealed release, consistent backup
+  and explicit data compatibility; no automatic migration/restore.
+- Actual systemd sandbox/lifecycle/recovery acceptance during authorized window.
+- Recheck activation graph for concurrent host/dependency changes.
+
+The controller does not maintain a permanent guarantee about root operators or
+systemd configuration changes outside its lock. No server mutation, repository push
+or automation activation was performed by this local contract update.46 local tests
+pass; these tests do not constitute host acceptance.
