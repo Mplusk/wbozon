@@ -15,7 +15,7 @@ def secure(path, directory=False):
     if not path.is_absolute() or '..' in path.parts: raise Refused('absolute normalized path required')
     for p in [*reversed(path.parents), path]:
         s = p.lstat()
-        if stat.S_ISLNK(s.st_mode) or s.st_uid != 0 or s.st_mode & 0o022:
+        if not (stat.S_ISREG(s.st_mode) or stat.S_ISDIR(s.st_mode)) or s.st_uid != 0 or s.st_mode & 0o022:
             raise Refused('untrusted path')
     if directory and not path.is_dir(): raise Refused('directory required')
     return path
