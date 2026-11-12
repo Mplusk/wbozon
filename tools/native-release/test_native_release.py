@@ -14,18 +14,19 @@ class ReleaseTests(unittest.TestCase):
     p=r/f;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(name);files[f]=hashlib.sha256(name.encode()).hexdigest()
    raw=json.dumps(files).encode();(r/'MANIFEST.json').write_bytes(raw);self.hashes[name]=hashlib.sha256(raw).hexdigest()
   (self.root/'current').symlink_to('releases/old')
-  self.calls=[];self.fail=None;self.healthfail=False
-  self.c=n.Controller(self.root,self.state,self.fake_run,self.health)
+  self.calls=[];self.command_failure=None;self.healthfail=False
+  self.c=n.Controller(self.root,self.state,self.fake_run,self.health,dependency=lambda:None)
+  self.hooks=patch.object(n.Controller,'verify_hooks');self.hooks.start();self.addCleanup(self.hooks.stop)
   self.sec=patch.object(n,'secure',side_effect=lambda p,*_:pathlib.Path(p));self.sec.start();self.addCleanup(self.sec.stop)
   self.sleep=patch.object(n.time,'sleep');self.sleep.start();self.addCleanup(self.sleep.stop)
   self.unit_hash=hashlib.sha256(b'approved unit').hexdigest()
  def fake_run(self,*args):
   self.calls.append(args)
-  if args==self.fail: raise n.Refused('uncertain')
+  if args==self.command_failure: raise n.Refused('uncertain')
   if args[0]=='cat':return 'approved unit'
   if args[0]=='show':
    if '--value' in args:return 'inactive\n'
-   return f'NeedDaemonReload=no\nWorkingDirectory={self.root}/current/service\nExecStart={self.root}/current/venv/bin/gunicorn'
+   return f'NeedDaemonReload=no\nWorkingDirectory={self.root}/current/service\nExecStart={self.root}/current/venv/bin/gunicorn\nExecStartPre={{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 {n.HELPER} 172.30.31.1 60 ; ignore_errors=no ; }}\nTimeoutStartUSec=1min 15s\nTimeoutStopUSec=40s\nWants=\nRequires=\nBindsTo=\nRestart=on-failure'
   return ''
  def health(self):
   if self.healthfail:raise OSError('not ready')
@@ -33,11 +34,11 @@ class ReleaseTests(unittest.TestCase):
  def test_success(self):
   self.deploy();self.assertEqual(self.c.current(),'new');self.assertFalse((self.state/'pending.json').exists());self.assertTrue((self.state/'last.json').exists())
  def test_timeout_stop_retains_journal_without_start(self):
-  self.fail=('stop',)
+  self.command_failure=('stop',)
   with self.assertRaises(n.Refused):self.deploy()
   self.assertEqual(self.c.current(),'old');self.assertTrue((self.state/'pending.json').exists());self.assertNotIn(('start',),self.calls)
  def test_timeout_start_does_not_rollback(self):
-  self.fail=('start',)
+  self.command_failure=('start',)
   with self.assertRaises(n.Refused):self.deploy()
   self.assertEqual(self.c.current(),'new');self.assertTrue((self.state/'pending.json').exists());self.assertEqual(self.calls.count(('stop',)),1)
  def test_health_failure_keeps_intent(self):
@@ -48,6 +49,61 @@ class ReleaseTests(unittest.TestCase):
   (self.state/'pending.json').write_text('{}')
   with self.assertRaises(n.Refused):self.deploy()
   self.assertEqual(self.calls,[])
+ def test_current_production_wants_docker_refused_before_mutation(self):
+  original=self.c.runner
+  self.c.runner=lambda *args:original(*args).replace('Wants=\n','Wants=docker.service\n') if args[0]=='show' else original(*args)
+  with self.assertRaises(n.Refused):self.deploy()
+  self.assertNotIn(('stop',),self.calls);self.assertFalse((self.state/'pending.json').exists())
+ def test_requires_docker_also_refused(self):
+  original=self.c.runner
+  self.c.runner=lambda *args:original(*args).replace('Requires=\n','Requires=docker.service\n') if args[0]=='show' else original(*args)
+  with self.assertRaises(n.Refused):self.deploy()
+  self.assertNotIn(('stop',),self.calls)
+ def test_docker_inactive_preflight_no_stop(self):
+  def missing():raise n.Refused('Docker inactive')
+  self.c.dependency=missing
+  with self.assertRaises(n.Refused):self.deploy()
+  self.assertNotIn(('stop',),self.calls);self.assertFalse((self.state/'pending.json').exists())
+ def test_docker_lost_before_start_keeps_pending(self):
+  calls=[]
+  def loses():
+   calls.append(1)
+   if len(calls)>1:raise n.Refused('Docker lost')
+  self.c.dependency=loses
+  with self.assertRaises(n.Refused):self.deploy()
+  self.assertNotIn(('start',),self.calls);self.assertTrue((self.state/'pending.json').exists())
+ def test_docker_lost_after_start_no_automatic_rollback(self):
+  calls=[]
+  def loses():
+   calls.append(1)
+   if len(calls)>2:raise n.Refused('Docker lost')
+  self.c.dependency=loses
+  with self.assertRaises(n.Refused):self.deploy()
+  self.assertEqual(self.c.current(),'new');self.assertEqual(self.calls.count(('stop',)),1);self.assertTrue((self.state/'pending.json').exists())
+ def test_timeout_contract_mismatch_prevents_stop(self):
+  original=self.c.runner
+  self.c.runner=lambda *args:original(*args).replace('TimeoutStartUSec=1min 15s','TimeoutStartUSec=infinity') if args[0]=='show' else original(*args)
+  with self.assertRaises(n.Refused):self.deploy()
+  self.assertNotIn(('stop',),self.calls)
+ def test_hook_mismatch_no_stop(self):
+  self.c.verify_hooks.side_effect=n.Refused('hook mismatch')
+  with self.assertRaises(n.Refused):self.deploy()
+  self.assertNotIn(('stop',),self.calls);self.assertFalse((self.state/'pending.json').exists())
+ def test_loaded_hook_timeout_suffix_refused(self):
+  original=self.c.runner
+  self.c.runner=lambda *args:original(*args).replace('172.30.31.1 60 ;','172.30.31.1 600 ;') if args[0]=='show' else original(*args)
+  with self.assertRaises(n.Refused):self.deploy()
+  self.assertNotIn(('stop',),self.calls)
+ def test_additional_loaded_hook_refused(self):
+  original=self.c.runner
+  self.c.runner=lambda *args:original(*args).replace('ignore_errors=no ; }','ignore_errors=no ; } { path=/evil ; argv[]=/evil ; }') if args[0]=='show' else original(*args)
+  with self.assertRaises(n.Refused):self.deploy()
+  self.assertNotIn(('stop',),self.calls)
+ def test_loaded_hook_missing_no_stop(self):
+  original=self.c.runner
+  self.c.runner=lambda *args:original(*args).replace(str(n.HELPER),'unexpected-helper') if args[0]=='show' else original(*args)
+  with self.assertRaises(n.Refused):self.deploy()
+  self.assertNotIn(('stop',),self.calls)
  def test_unit_mismatch_no_stop(self):
   self.unit_hash='0'*64
   with self.assertRaises(n.Refused):self.deploy()
@@ -123,12 +179,50 @@ class ReleaseTests(unittest.TestCase):
   p=self.root/'releases/new/MANIFEST.json';p.write_text('{"../../bad":"'+'0'*64+'"}');self.hashes['new']=hashlib.sha256(p.read_bytes()).hexdigest()
   with self.assertRaises(n.Refused):self.deploy()
 
+class HookTests(unittest.TestCase):
+ def test_reviewed_production_hook_contract_constants(self):
+  self.assertEqual(n.DROP_IN_SHA256,'1160cc65d4b0f762d2f1de85802fc84f4ea370b5ac3654d3a54df6aa346cbebb')
+  self.assertEqual(n.HELPER_SHA256,'8ddb5c61cc2c3ee8e3e0e7c4978053ce7df42ad4424f2687a4f2c2f7a2370aa5')
+ def test_helper_and_dropin_bytes_verified(self):
+  with tempfile.TemporaryDirectory() as d:
+   helper=pathlib.Path(d)/'helper';dropin=pathlib.Path(d)/'dropin'
+   helper.write_text('reviewed helper');dropin.write_text('reviewed dropin')
+   with patch.object(n,'HELPER',helper),patch.object(n,'DROP_IN',dropin),patch.object(n,'HELPER_SHA256',hashlib.sha256(helper.read_bytes()).hexdigest()),patch.object(n,'DROP_IN_SHA256',hashlib.sha256(dropin.read_bytes()).hexdigest()),patch.object(n,'secure') as secure:
+    n.Controller.verify_hooks();self.assertEqual(secure.call_count,2)
+    helper.write_text('tampered helper')
+    with self.assertRaises(n.Refused):n.Controller.verify_hooks()
+ def test_dropin_tampering_refused(self):
+  with tempfile.TemporaryDirectory() as d:
+   helper=pathlib.Path(d)/'helper';dropin=pathlib.Path(d)/'dropin'
+   helper.write_text('reviewed helper');dropin.write_text('reviewed dropin')
+   with patch.object(n,'HELPER',helper),patch.object(n,'DROP_IN',dropin),patch.object(n,'HELPER_SHA256',hashlib.sha256(helper.read_bytes()).hexdigest()),patch.object(n,'DROP_IN_SHA256','0'*64),patch.object(n,'secure'):
+    with self.assertRaises(n.Refused):n.Controller.verify_hooks()
+ def test_untrusted_hook_path_refused_before_systemctl(self):
+  with patch.object(n,'secure',side_effect=n.Refused('untrusted')),patch.object(n.subprocess,'run') as run:
+   with self.assertRaises(n.Refused):n.Controller().check_unit('0'*64)
+   run.assert_not_called()
+
 class CommandTests(unittest.TestCase):
  def test_timeout_sanitized(self):
   import subprocess
   with patch.object(n.subprocess,'run',side_effect=subprocess.TimeoutExpired('secret',60)):
    with self.assertRaises(n.Refused) as caught:n.Controller.command('stop')
   self.assertNotIn('secret',str(caught.exception))
+ def test_start_never_expands_dependencies_and_budget_exceeds75(self):
+  with patch.object(n.subprocess,'run',return_value=type('R',(),{'returncode':0,'stdout':''})()) as run:
+   n.Controller.command('start')
+  self.assertEqual(run.call_args.args[0],['/usr/bin/systemctl','--job-mode=ignore-dependencies','start','3dprinta-portal.service'])
+  self.assertEqual(run.call_args.kwargs['timeout'],100)
+ def test_docker_check_readonly_and_bounded(self):
+  with patch.object(n.subprocess,'run',return_value=type('R',(),{'returncode':0,'stdout':''})()) as run:n.Controller.docker_ready()
+  self.assertEqual([c.args[0][1] for c in run.call_args_list],['is-active','list-jobs'])
+  self.assertTrue(all(c.args[0][-1]=='docker.service' and c.kwargs['timeout']==5 for c in run.call_args_list))
+ def test_pending_docker_job_refused(self):
+  with patch.object(n.subprocess,'run',return_value=type('R',(),{'returncode':0,'stdout':'1 docker.service restart running'})()):
+   with self.assertRaises(n.Refused):n.Controller.docker_ready()
+ def test_docker_query_timeout_refused(self):
+  with patch.object(n.subprocess,'run',side_effect=n.subprocess.TimeoutExpired('query',5)):
+   with self.assertRaises(n.Refused):n.Controller.docker_ready()
  def test_no_other_unit(self):
   with patch.object(n.subprocess,'run',return_value=type('R',(),{'returncode':0,'stdout':''})()) as run:
    n.Controller.command('stop')
