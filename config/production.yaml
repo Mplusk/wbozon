@@ -1,0 +1,25 @@
+{
+  "marketplace": "ozon",
+  "materials": [
+    {
+      "name": "PLA",
+      "color": null,
+      "price_rub_per_kg": 1000,
+      "price_source": "Владелец, 2026-11-12"
+    },
+    {
+      "name": "PETG",
+      "color": null,
+      "price_rub_per_kg": 1000,
+      "price_source": "Владелец, 2026-11-12"
+    }
+  ],
+  "printers": [],
+  "electricity_rub_per_kwh": null,
+  "operator_rub_per_hour": null,
+  "packaging_rub_per_unit": null,
+  "tax_regime": null,
+  "tax_rate": null,
+  "fulfillment_scheme": null,
+  "warehouse": null
+}

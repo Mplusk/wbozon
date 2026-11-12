@@ -1,0 +1,11 @@
+# Шаблон, не устанавливается и не активируется автоматически.
+[Unit]
+Description=Daily local readiness snapshot
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+Unit=wbandozon-readiness.service
+
+[Install]
+WantedBy=timers.target

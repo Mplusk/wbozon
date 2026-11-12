@@ -1,0 +1,12 @@
+# Пример: настройте WorkingDirectory перед установкой. Сервис не запускает агентов.
+[Unit]
+Description=WB and Ozon project local readiness snapshot
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/wbandozon
+ExecStart=/usr/bin/python3 -m operations.readiness
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
