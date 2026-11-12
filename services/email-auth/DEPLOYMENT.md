@@ -1,7 +1,7 @@
 # Deployment status and proposed CD
 
 The canonical service source is this directory. It is the standard-library WSGI
-prototype, not a separate Flask experiment on the VPS. CI runs its 31 application/deployment regression
+prototype, not a separate Flask experiment on the VPS. CI runs its 36 application/deployment regression
 tests and builds/smoke-tests its container. CI never connects to the VPS, sends
 email, or reads production credentials. Existing repository CI is unchanged.
 
@@ -95,3 +95,19 @@ merge reviewed code first; a draft PR is not a production release.
 Tests cover deployment state, idempotency, candidate/activation failure, rollback,
 interrupted recovery, concurrency, foreign-container refusal, paths and secret-free
 candidate arguments. These mocks are not a substitute for real isolated VPS tests.
+
+## Uncertain command outcome
+
+A Docker timeout is not treated as a confirmed failure. The deployer writes a
+private uncertain.json marker and leaves the activation journal intact. It does
+not automatically stop, rename, remove, retry or roll back while the daemon may
+still be finishing the original command. Further deploy/recover operations refuse
+to run. An operator must independently verify that the command has settled, inspect
+exact service-owned containers and reconcile the journal. Only then may that
+operator clear the marker and request explicit recovery. There is intentionally
+no automatic marker-clear flag or timer.
+
+Every parent directory of config/state/secrets must be controlled by the trusted
+operator (root or the invoking identity) and not group/other-writable. The app-owned
+data directory cannot contain config, state or the runtime env file. Temporary
+world-writable paths such as /tmp are not accepted for production configuration.
