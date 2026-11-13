@@ -1,4 +1,5 @@
 """Isolated email-login prototype. No marketplace data or credentials included."""
+from ui import document, CSP
 import hashlib, hmac, html, os, re, secrets, smtplib, sqlite3, ssl, time
 from email.message import EmailMessage
 from urllib.parse import parse_qs, urlsplit
@@ -31,12 +32,13 @@ class LoginApp:
     def __call__(self,e,start):
         status='200 OK'; headers=[]
         def reply(body,code='200 OK',extra=()):
-            data=body.encode(); start(code,[('Content-Type','text/html; charset=utf-8'),('Content-Length',str(len(data))),('Cache-Control','no-store'),('Referrer-Policy','strict-origin'),('X-Content-Type-Options','nosniff'),('Content-Security-Policy',"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"),*extra]); return [data]
+            if not body.lstrip().lower().startswith('<!doctype'): body=document('Кабинет', '<h1>Кабинет</h1><p>'+body+'</p>', auth=True)
+            data=body.encode(); start(code,[('Content-Type','text/html; charset=utf-8'),('Content-Length',str(len(data))),('Cache-Control','no-store'),('Referrer-Policy','strict-origin'),('X-Content-Type-Options','nosniff'),('Content-Security-Policy',CSP),*extra]); return [data]
         def cookie(name,value,age):return ('Set-Cookie',f'{name}={value}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={age}')
-        def form(title,action,fields):return f'<!doctype html><meta charset="utf-8"><title>{title}</title><h1>{title}</h1><form method="post" action="{action}">{fields}<button>Продолжить</button></form>'
+        def form(title,action,fields):return document(title,f'<p class="eyebrow">Личный кабинет</p><h1>{title}</h1><p>Войдите по одноразовой ссылке из письма. Пароль не нужен.</p><form method="post" action="{action}">{fields}<button>Продолжить</button></form><p class="fineprint">Ссылка действует 15 минут и работает один раз. Используйте тот же браузер для подтверждения входа.</p>',auth=True)
         def recovery(title, message, code):
             # Only fixed application text. Never reflect the link, token, email or cookies.
-            page='<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>'+title+' — SIDZEN</title></head><body><main><h1>'+title+'</h1><p>'+message+'</p><p>Ссылка действует 15 минут и подходит для одного входа. Новую ссылку нужно запросить вручную: письмо не отправляется автоматически.</p><p><a href="/">Запросить новую ссылку или открыть кабинет</a></p></main></body></html>'
+            page=document(title,'<p class="eyebrow">Вход в кабинет</p><h1>'+title+'</h1><p>'+message+'</p><p>Ссылка действует 15 минут и подходит для одного входа. Новую ссылку нужно запросить вручную: письмо не отправляется автоматически.</p><p><a class="button" href="/">Запросить новую ссылку или открыть кабинет</a></p>',auth=True)
             return reply(page,code)
         if e.get('HTTP_HOST')!=urlsplit(self.origin).netloc:return reply('Invalid host','400 Bad Request')
         path=e.get('PATH_INFO','/'); method=e.get('REQUEST_METHOD','GET'); values={}
@@ -55,9 +57,9 @@ class LoginApp:
             sid=cs.get('__Host-sid','')
             with self.connect() as c: row=c.execute('SELECT csrf FROM sessions WHERE hash=? AND expires>?',(self.digest(sid),now)).fetchone() if sid else None
             if row:return reply(form('Вход выполнен','/logout',f'<input type="hidden" name="csrf" value="{row[0]}">')+'<p>Это прототип авторизации, не кабинет маркетплейса.</p>')
-            return reply(form('Вход','/auth/request','<input name="email" type="email" required autocomplete="email">'))
+            return reply(form('Вход','/auth/request','<label for="login-email">Электронная почта</label><input id="login-email" name="email" type="email" required autocomplete="email" placeholder="you@example.ru">'))
         if path=='/auth/request' and method=='POST':
-            generic='Если адрес разрешён, письмо со ссылкой отправлено. Ссылка действует 15 минут.'
+            generic=document('Проверьте почту','<p class="eyebrow">Следующий шаг</p><h1>Проверьте почту</h1><p>Если адрес разрешён и отправка доступна, вы получите письмо со ссылкой. Ссылка действует 15 минут.</p><p class="fineprint">Нет письма? Проверьте папку «Спам» или повторите запрос позже.</p><a href="/">Вернуться ко входу</a>',auth=True)
             allowed=self.permit('ip:'+self.digest(e.get('REMOTE_ADDR','unknown')),5,900)
             if not allowed:return reply(generic,'200 OK')
             if get('email').strip().lower()!=self.recipient:return reply(generic)
@@ -92,7 +94,7 @@ class LoginApp:
                 cur=c.execute('DELETE FROM tokens WHERE hash=? AND expires>?',(self.digest(token),now))
                 if cur.rowcount!=1:return recovery('Ссылка истекла или уже использована','По этой ссылке больше нельзя войти. Запросите новую ссылку; если вход уже выполнен, откройте кабинет.','400 Bad Request')
                 c.execute('INSERT INTO sessions VALUES(?,?,?)',(self.digest(sid),now+43200,csrf))
-            return reply('Вход выполнен. <a href="/">Открыть</a>',extra=[cookie('__Host-sid',sid,43200),cookie('__Host-login','',0)])
+            return reply(document('Вход выполнен','<p class="eyebrow">Готово</p><h1>Вход выполнен</h1><p>Теперь можно перейти к подключению кабинетов.</p><a class="button" href="/">Открыть кабинет</a>',auth=True),extra=[cookie('__Host-sid',sid,43200),cookie('__Host-login','',0)])
         if path=='/logout' and method=='POST':
             sid=cs.get('__Host-sid',''); csrf=get('csrf')
             if not re.fullmatch(r'[A-Za-z0-9_-]{43}',sid) or not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf):return reply('Forbidden','403 Forbidden')
@@ -100,7 +102,7 @@ class LoginApp:
                 row=c.execute('SELECT csrf FROM sessions WHERE hash=? AND expires>?',(self.digest(sid),now)).fetchone()
                 if not row or not hmac.compare_digest(row[0],csrf):return reply('Forbidden','403 Forbidden')
                 c.execute('DELETE FROM sessions WHERE hash=?',(self.digest(sid),))
-            return reply('Вы вышли. <a href="/">Войти снова</a>',extra=[cookie('__Host-sid','',0)])
+            return reply(document('Вы вышли','<h1>Вы вышли.</h1><p>Сеанс завершён. Сохранённые ключи остались на сервере.</p><a class="button" href="/">Войти снова</a>',auth=True),extra=[cookie('__Host-sid','',0)])
         return reply('Not found','404 Not Found')
 
 def smtp_mailer(recipient,link):
