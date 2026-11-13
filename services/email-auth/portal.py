@@ -8,6 +8,8 @@ from app import LoginApp, smtp_mailer
 
 FIELDS = {'ozon': ('client_id', 'api_key'), 'wb': ('api_token',)}
 CHECK_OPERATIONS = {'ozon':'ozon_products', 'wb':'wb_prices'}
+CHECK_PROVIDER_LIMIT, CHECK_PROVIDER_WINDOW = 1, 60
+CHECK_GLOBAL_LIMIT, CHECK_GLOBAL_WINDOW = 10, 3600
 CHECK_MESSAGES = {
     'ok':'Проверка чтения данных выполнена успешно.',
     'denied':'Маркетплейс отклонил доступ. Проверьте ключ, срок действия и права чтения.',
@@ -160,6 +162,23 @@ class Portal:
     def __init__(self, login, vault, read_token_hash, gateway=provider_read):
         if not re.fullmatch(r'[0-9a-f]{64}',read_token_hash): raise ValueError('Expected SHA256 token hash')
         self.login,self.vault,self.token_hash,self.gateway=login,vault,read_token_hash,gateway
+    def request_budget(self, provider, now):
+        """Read-only local limiter snapshot. It neither reserves nor grants a request."""
+        if provider not in CHECK_OPERATIONS: raise ValueError('Invalid provider')
+        with self.login.connect() as c:
+            c.execute('BEGIN')
+            local=[row[0] for row in c.execute(
+                'SELECT at FROM attempts WHERE bucket=? AND at>? ORDER BY at DESC LIMIT ?',
+                ('connection-check:'+provider,now-CHECK_PROVIDER_WINDOW,CHECK_PROVIDER_LIMIT))]
+            shared=[row[0] for row in c.execute(
+                'SELECT at FROM attempts WHERE bucket=? AND at>? ORDER BY at DESC LIMIT ?',
+                ('connection-check:all',now-CHECK_GLOBAL_WINDOW,CHECK_GLOBAL_LIMIT))]
+        ready_at=now
+        if len(local)==CHECK_PROVIDER_LIMIT: ready_at=max(ready_at,local[-1]+CHECK_PROVIDER_WINDOW)
+        if len(shared)==CHECK_GLOBAL_LIMIT: ready_at=max(ready_at,shared[-1]+CHECK_GLOBAL_WINDOW)
+        return {'retry_seconds':math.ceil(ready_at-now),
+                'hourly_remaining':CHECK_GLOBAL_LIMIT-len(shared)}
+
     def __call__(self,e,start):
         path=e.get('PATH_INFO','/'); method=e.get('REQUEST_METHOD','GET')
         if path == '/' and method == 'GET' and e.get('HTTP_HOST') == urlsplit(self.login.origin).netloc:
@@ -229,7 +248,7 @@ class Portal:
                 if provider not in CHECK_OPERATIONS: raise ValueError()
             except (ValueError,TypeError,UnicodeError): return reply('Некорректный запрос.','400 Bad Request')
             # Global owner-level buckets persist across workers/sessions and prevent click storms.
-            if not self.login.permit('connection-check:'+provider,1,60) or not self.login.permit('connection-check:all',10,3600):
+            if not self.login.permit('connection-check:'+provider,CHECK_PROVIDER_LIMIT,CHECK_PROVIDER_WINDOW) or not self.login.permit('connection-check:all',CHECK_GLOBAL_LIMIT,CHECK_GLOBAL_WINDOW):
                 return reply('Слишком много запросов. Для проверки или просмотра одного кабинета доступен один запрос в минуту, всего — не более 10 в час. <a href="/settings">Настройки</a>','429 Too Many Requests')
             try:
                 snapshot=self.vault.snapshot(provider)
@@ -310,6 +329,16 @@ class Portal:
             else:
                 content+='<p>Соединение с маркетплейсом: не проверено. '+('Срок действия и права ключа пока не подтверждены.' if saved else 'Сначала добавьте ключ.')+'</p>'
             if saved:
+                try:
+                    budget=self.request_budget(provider,self.login.clock())
+                    content+='<p>Локальный лимит портала на момент загрузки страницы: осталось до '+str(budget['hourly_remaining'])+' из '+str(CHECK_GLOBAL_LIMIT)+' запросов за скользящий час для обоих кабинетов вместе.</p>'
+                    if budget['retry_seconds']:
+                        content+='<p>Следующая попытка для этого кабинета по локальному лимиту — не раньше чем через '+str(budget['retry_seconds'])+' с после загрузки этой страницы.</p>'
+                    else:
+                        content+='<p>Локальный лимит сейчас допускает попытку запроса.</p>'
+                    content+='<p>Это не резервирование запроса и не гарантия доступности API. Другая вкладка может израсходовать лимит. <a href="/settings">Обновить сведения о лимите</a>. Обновление страницы не обращается к маркетплейсам.</p>'
+                except (sqlite3.Error,ValueError,TypeError,OverflowError):
+                    content+='<p>Не удалось оценить локальный лимит. Он будет проверен при отправке запроса. <a href="/settings">Обновить страницу</a>.</p>'
                 content+='<form method="post" action="/settings/check"><input type="hidden" name="provider" value="'+provider+'"><input type="hidden" name="csrf" value="'+html.escape(session[1],quote=True)+'"><button>Проверить подключение</button></form>'
                 content+='<p>Проверка прочитает до одной записи через API маркетплейса, не меняя товары, цены или заказы.</p>'
                 label='Показать первые товары Ozon' if provider=='ozon' else 'Показать первые цены Wildberries'
