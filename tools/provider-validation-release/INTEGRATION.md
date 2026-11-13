@@ -1,0 +1,3 @@
+# Provider validation on deployed design/lookup
+
+Base eb6322a238ef2d291e6c52d3da66f0b3ff48b462. Clean three-way integration of provider-validation parser/envelope delta only. Runtime change portal.py, plus test_provider_payload.py. app.py/ui.py/CSP and lookup/input/auth/session/CSRF guards preserved. 166 tests and real Gunicorn synthetic smoke PASS. Independent settings_ux review PASS:166 tests plus native smoke and extra lookup raw-error/overflow cases sanitized502; no blockers. No actual API keys, seller requests, email, GitHub Actions or VPS changes. No publication performed. Code-only rollback to eb6322; no schema/dependency/config changes. Browser visual acceptance remains unverified.

@@ -68,6 +68,17 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
+def decode_provider_payload(raw):
+    """Reject non-JSON constants and numeric overflow before normalizing data."""
+    def reject_constant(value): raise ValueError('Invalid provider JSON number')
+    def finite_float(value):
+        number=float(value)
+        if not math.isfinite(number): raise ValueError('Invalid provider JSON number')
+        return number
+    payload=json.loads(raw,parse_constant=reject_constant,parse_float=finite_float)
+    if not isinstance(payload,dict): raise ValueError('Invalid provider response')
+    return payload
+
 def provider_read(operation, args, creds):
     limit = args.get('limit', 20)
     allowed={'limit','nm_id'} if operation=='wb_prices' else {'limit'}
@@ -88,12 +99,15 @@ def provider_read(operation, args, creds):
     with opener.open(req, timeout=15) as resp:
         raw=resp.read(512001)
         if len(raw)>512000: raise ValueError('Response too large')
-        data=json.loads(raw)
+        data=decode_provider_payload(raw)
     if operation=='ozon_products':
         rows=data.get('result',{}).get('items')
         if not isinstance(rows,list): raise ValueError('Unexpected schema')
         keys=('product_id','offer_id','archived','is_fbo_visible','is_fbs_visible')
     else:
+        # WB reports an error flag in its envelope; data must not override it.
+        if ('error' in data and data['error'] is not False) or data.get('errorText') not in (None,''):
+            raise ValueError('Provider reported an error')
         rows=data.get('data',{}).get('listGoods')
         if not isinstance(rows,list): raise ValueError('Unexpected schema')
         keys=('nmID','vendorCode','discount','clubDiscount','currencyIsoCode4217')
