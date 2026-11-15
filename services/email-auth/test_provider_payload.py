@@ -3,7 +3,7 @@ import json
 import unittest
 from unittest.mock import patch
 import test_portal
-from portal import provider_read, decode_provider_payload
+from portal import _provider_read as provider_read, decode_provider_payload
 
 class ProviderPayloadTests(unittest.TestCase):
     def read(self,payload,operation='wb_prices'):

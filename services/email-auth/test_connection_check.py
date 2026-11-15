@@ -2,7 +2,7 @@
 import io, json, sqlite3, unittest, urllib.error
 from unittest.mock import patch
 import test_portal
-from portal import Vault, provider_read
+from portal import Vault, _provider_read as provider_read
 
 class ConnectionCheckTests(unittest.TestCase):
     setUp=test_portal.Tests.setUp
@@ -56,6 +56,43 @@ class ConnectionCheckTests(unittest.TestCase):
         self.assertTrue(self.check()['status'].startswith('429'))
         self.assertEqual(len(self.calls),1)
         self.now+=61;self.assertTrue(self.check()['status'].startswith('303'))
+    def test_locked_limiter_fails_closed_with_actionable_status(self):
+        self.save()
+        lock=sqlite3.connect(self.login.db, timeout=0.05)
+        try:
+            lock.execute('BEGIN IMMEDIATE')
+            self.login.connect=lambda: sqlite3.connect(self.login.db, timeout=0.05)
+            for path,data in (
+                ('/settings/check',{'provider':'wb','csrf':self.csrf}),
+                ('/settings/preview',{'provider':'wb','csrf':self.csrf}),
+                ('/settings/wb-lookup',{'nm_id':'123','csrf':self.csrf}),
+            ):
+                with self.subTest(path=path):
+                    response=self.request(path,'POST',data)
+                    self.assertEqual(response['status'],'503 Service Unavailable')
+                    self.assertIn('Проверка временно недоступна',response['body'])
+                    self.assertNotIn('locked',response['body'])
+                    self.assertFalse(self.calls)
+        finally:
+            lock.rollback(); lock.close()
+    def test_locked_vault_settings_fail_closed_with_503(self):
+        self.save()
+        lock=sqlite3.connect(self.vault.path, timeout=0.05)
+        try:
+            lock.execute('BEGIN EXCLUSIVE')
+            for stage in ('present','status'):
+                with self.subTest(stage=stage):
+                    if stage == 'status':
+                        with patch.object(self.vault,'present',return_value={'wb'}):
+                            response=self.request()
+                    else:
+                        response=self.request()
+                    self.assertEqual(response['status'],'503 Service Unavailable')
+                    self.assertIn('Настройки временно недоступны',response['body'])
+                    self.assertNotIn('locked',response['body'])
+                    self.assertNotIn('test-secret-value',response['body'])
+        finally:
+            lock.rollback(); lock.close()
     def test_hourly_limit(self):
         self.save()
         for i in range(10):

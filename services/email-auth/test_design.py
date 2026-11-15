@@ -1,6 +1,6 @@
 import base64,hashlib,re,unittest
 from pathlib import Path
-from ui import CSS,CSP,document
+from ui import CSS,CSP,SCRIPT,document
 import test_portal
 class DesignTests(unittest.TestCase):
     def test_runtime_includes_styles_module(self):
@@ -8,7 +8,9 @@ class DesignTests(unittest.TestCase):
     def test_csp_exact_static_css(self):
         expected=base64.b64encode(hashlib.sha256(CSS.encode()).digest()).decode()
         self.assertIn("style-src 'sha256-"+expected+"'",CSP)
-        for forbidden in ('unsafe-inline','unsafe-eval','https:','script-src'): self.assertNotIn(forbidden,CSP)
+        script_hash=base64.b64encode(hashlib.sha256(SCRIPT.encode()).digest()).decode()
+        self.assertIn("script-src 'sha256-"+script_hash+"'",CSP)
+        for forbidden in ('unsafe-inline','unsafe-eval','https:'): self.assertNotIn(forbidden,CSP)
         self.assertIn("default-src 'none'",CSP)
     def test_template_no_external_resources(self):
         page=document('<bad>','<main id="content">Test</main>')
@@ -30,6 +32,7 @@ class DesignTests(unittest.TestCase):
             self.assertNotIn('unsafe-inline',r['headers']['Content-Security-Policy'])
             self.assertIn('label for="ozon-client_id"',r['body'])
             x.save();self.assertNotIn('test-secret-value',x.request()['body'])
+            self.assertIn('<script>'+SCRIPT+'</script>',x.request()['body'])
         finally:x.tearDown()
     def test_login_label_and_policy(self):
         x=test_portal.Tests();x.setUp()

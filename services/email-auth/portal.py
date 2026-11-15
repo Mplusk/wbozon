@@ -1,6 +1,6 @@
 """Local integration prototype. Browser sessions never authenticate the read API."""
 from ui import document, CSP
-import hashlib, hmac, html, json, math, os, re, secrets, sqlite3, ssl, urllib.request, urllib.error, smtplib
+import hashlib, hmac, html, json, math, os, re, secrets, sqlite3, ssl, subprocess, sys, urllib.request, urllib.error, smtplib
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from urllib.parse import parse_qs, urlsplit
@@ -33,7 +33,7 @@ class Vault:
             c.execute('INSERT OR REPLACE INTO vault VALUES (?,?)', (provider, blob))
             c.execute('DELETE FROM connection_checks WHERE provider=?',(provider,))
     def snapshot(self, provider):
-        with sqlite3.connect(self.path) as c:
+        with sqlite3.connect(self.path, timeout=0.5) as c:
             row = c.execute('SELECT blob FROM vault WHERE provider=?', (provider,)).fetchone()
         if not row: return None
         blob = bytes(row[0])
@@ -44,24 +44,24 @@ class Vault:
         return snapshot[0] if snapshot else None
     def record_check(self, provider, version, outcome, checked_at):
         if outcome not in CHECK_MESSAGES: raise ValueError('Invalid outcome')
-        with sqlite3.connect(self.path) as c:
+        with sqlite3.connect(self.path, timeout=0.5) as c:
             c.execute('BEGIN IMMEDIATE')
             row=c.execute('SELECT blob FROM vault WHERE provider=?',(provider,)).fetchone()
             if not row or not hmac.compare_digest(hashlib.sha256(bytes(row[0])).hexdigest(),version): return False
             c.execute('INSERT OR REPLACE INTO connection_checks VALUES (?,?,?,?)',(provider,version,outcome,checked_at))
         return True
     def version_matches(self, provider, version):
-        with sqlite3.connect(self.path) as c:
+        with sqlite3.connect(self.path, timeout=0.5) as c:
             row=c.execute('SELECT blob FROM vault WHERE provider=?',(provider,)).fetchone()
         return bool(row) and hmac.compare_digest(hashlib.sha256(bytes(row[0])).hexdigest(),version)
     def check_status(self, provider):
         # Read storage metadata only; rendering never decrypts credentials.
-        with sqlite3.connect(self.path) as c:
+        with sqlite3.connect(self.path, timeout=0.5) as c:
             row=c.execute('SELECT v.blob,c.version,c.outcome,c.checked_at FROM vault v JOIN connection_checks c ON v.provider=c.provider WHERE v.provider=?',(provider,)).fetchone()
         if not row or row[2] not in CHECK_MESSAGES or not hmac.compare_digest(hashlib.sha256(bytes(row[0])).hexdigest(),row[1]): return None
         return row[2],row[3]
     def present(self):
-        with sqlite3.connect(self.path) as c:
+        with sqlite3.connect(self.path, timeout=0.5) as c:
             return {r[0] for r in c.execute('SELECT provider FROM vault')}
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -79,7 +79,7 @@ def decode_provider_payload(raw):
     if not isinstance(payload,dict): raise ValueError('Invalid provider response')
     return payload
 
-def provider_read(operation, args, creds):
+def _provider_read(operation, args, creds):
     limit = args.get('limit', 20)
     allowed={'limit','nm_id'} if operation=='wb_prices' else {'limit'}
     nm_id=args.get('nm_id')
@@ -127,6 +127,55 @@ def provider_read(operation, args, creds):
             item['sizes']=[{k:clean(s[k]) for k in ('sizeID','techSizeName','price','discountedPrice','clubDiscountedPrice') if k in s} for s in sizes[:100] if isinstance(s,dict)]
         out.append(item)
     return {'items':out, 'first_page_only':True, 'untrusted_data':True, 'read_only':True}
+
+PROVIDER_DEADLINE_SECONDS = 15
+PROVIDER_WORKER = os.path.abspath(__file__)
+
+def provider_read(operation, args, creds):
+    """Bound the entire provider operation, including DNS and response reads.
+
+    Credentials go over a private stdin pipe, never argv or the environment.
+    Killing the subprocess on timeout also stops a stuck resolver/socket call.
+    """
+    env = {'PATH': os.defpath, 'PYTHONDONTWRITEBYTECODE': '1'}
+    # Preserve standard outbound network settings; never pass unrelated app secrets.
+    for name in ('SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'HTTPS_PROXY', 'HTTP_PROXY',
+                 'ALL_PROXY', 'NO_PROXY', 'https_proxy', 'http_proxy', 'all_proxy',
+                 'no_proxy', 'SSL_CERT_FILE', 'SSL_CERT_DIR'):
+        if name in os.environ: env[name] = os.environ[name]
+    try:
+        process = subprocess.run([sys.executable, PROVIDER_WORKER, '--provider-worker'],
+            input=json.dumps({'operation':operation, 'args':args, 'creds':creds}).encode(),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=PROVIDER_DEADLINE_SECONDS,
+            env=env, check=False)
+    except subprocess.TimeoutExpired:
+        raise TimeoutError('Marketplace request timed out') from None
+    if process.returncode:
+        raise urllib.error.URLError('Marketplace worker failed')
+    try:
+        result=json.loads(process.stdout)
+        if result.get('kind') == 'http' and type(result.get('status')) is int:
+            raise urllib.error.HTTPError('', result['status'], 'Marketplace request failed', {}, None)
+        if result.get('kind') == 'unavailable': raise urllib.error.URLError('Marketplace unavailable')
+        if result.get('kind') != 'ok' or not isinstance(result.get('result'),dict):
+            raise ValueError('Marketplace response failed')
+        return result['result']
+    except (UnicodeError, json.JSONDecodeError, AttributeError, TypeError):
+        raise ValueError('Invalid marketplace worker response') from None
+
+def _provider_worker():
+    """Private child entry point; exceptions and upstream bodies are not logged."""
+    try:
+        request=json.load(sys.stdin)
+        result={'kind':'ok', 'result':_provider_read(request['operation'],request['args'],request['creds'])}
+    except urllib.error.HTTPError as exc:
+        result={'kind':'http', 'status':exc.code}
+        exc.close()
+    except (TimeoutError,urllib.error.URLError):
+        result={'kind':'unavailable'}
+    except Exception:
+        result={'kind':'failed'}
+    sys.stdout.write(json.dumps(result,ensure_ascii=True,allow_nan=False))
 
 def render_preview(provider, result, fetched_at, sensitive_values=(), lookup_nm_id=None):
     """Render allowlisted normalized data only; upstream strings are untrusted text."""
@@ -261,8 +310,13 @@ class Portal:
         sid=self.login.cookies(e).get('__Host-sid','')
         if not re.fullmatch(r'[A-Za-z0-9_-]{43}',sid): return reply('Войдите заново на главной странице.','401 Unauthorized')
         now=self.login.clock()
-        with self.login.connect() as c:
-            session=c.execute('SELECT expires,csrf FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),now)).fetchone()
+        try:
+            with self.login.connect() as c:
+                if path in ('/settings/check','/settings/preview','/settings/wb-lookup'):
+                    c.execute('PRAGMA busy_timeout=500')
+                session=c.execute('SELECT expires,csrf FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),now)).fetchone()
+        except sqlite3.Error:
+            return reply('Сервис временно недоступен. Повторите позже. <a href="/settings">Настройки</a>','503 Service Unavailable')
         if not session: return reply('Войдите заново на главной странице.','401 Unauthorized')
         if path in ('/settings/check','/settings/preview','/settings/wb-lookup'):
             if e.get('HTTP_ORIGIN')!=self.login.origin: return reply('Forbidden','403 Forbidden')
@@ -280,7 +334,11 @@ class Portal:
                 if provider not in CHECK_OPERATIONS: raise ValueError()
             except (ValueError,TypeError,UnicodeError): return reply('Некорректный запрос.','400 Bad Request')
             # Global owner-level buckets persist across workers/sessions and prevent click storms.
-            if not self.login.permit('connection-check:'+provider,CHECK_PROVIDER_LIMIT,CHECK_PROVIDER_WINDOW) or not self.login.permit('connection-check:all',CHECK_GLOBAL_LIMIT,CHECK_GLOBAL_WINDOW):
+            try:
+                allowed=self.login.permit('connection-check:'+provider,CHECK_PROVIDER_LIMIT,CHECK_PROVIDER_WINDOW,busy_timeout_ms=500) and self.login.permit('connection-check:all',CHECK_GLOBAL_LIMIT,CHECK_GLOBAL_WINDOW,busy_timeout_ms=500)
+            except sqlite3.Error:
+                return reply('Проверка временно недоступна. Повторите позже. <a href="/settings">Настройки</a>','503 Service Unavailable')
+            if not allowed:
                 return reply('Слишком много запросов. Для проверки или просмотра одного кабинета доступен один запрос в минуту, всего — не более 10 в час. <a href="/settings">Настройки</a>','429 Too Many Requests')
             try:
                 snapshot=self.vault.snapshot(provider)
@@ -305,6 +363,7 @@ class Portal:
                 # must not return a snapshot from an old session/account.
                 try:
                     with self.login.connect() as c:
+                        c.execute('PRAGMA busy_timeout=500')
                         live=c.execute('SELECT 1 FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),self.login.clock())).fetchone()
                     unchanged=self.vault.version_matches(provider,version)
                 except Exception:
@@ -340,7 +399,10 @@ class Portal:
             except (ValueError,TypeError,UnicodeError): return reply('Проверьте введённые значения.','400 Bad Request')
             except Exception: return reply('Не удалось сохранить настройки.','503 Service Unavailable')
             return reply('Ключ сохранён зашифрованно. Соединение ещё не проверено. <a href="/settings">Настройки</a>')
-        configured=self.vault.present()
+        try:
+            configured=self.vault.present()
+        except sqlite3.Error:
+            return reply('Настройки временно недоступны. Повторите позже.','503 Service Unavailable')
         content='<main id="content"><p class="eyebrow">Интеграции</p><h1>Подключение кабинетов</h1>'
         content+='<p class="intro">Здесь можно сохранить ключи Wildberries и Ozon. Используйте отдельные ключи только с необходимыми правами чтения. Права на изменение товаров, цен и заказов не нужны.</p>'
         content+='<p>Ключи хранятся зашифрованно и не отображаются после сохранения. Сохранение ключа не подтверждает его действительность и не подключает MCP автоматически.</p>'
@@ -356,7 +418,10 @@ class Portal:
             saved=provider in configured
             content+=f'<section class="market-card {provider}" aria-labelledby="{provider}-title"><div class="market-head"><span class="market-icon" aria-hidden="true">{"O" if provider=="ozon" else "WB"}</span><div><h2 id="{provider}-title">{names[provider]}</h2><small>КАБИНЕТ ПРОДАВЦА</small></div></div>'
             content+='<p class="status '+('status-saved' if saved else '')+'">Ключ: '+('сохранён зашифрованно' if saved else 'не добавлен')+'.</p>'
-            check=self.vault.check_status(provider) if saved else None
+            try:
+                check=self.vault.check_status(provider) if saved else None
+            except sqlite3.Error:
+                return reply('Настройки временно недоступны. Повторите позже.','503 Service Unavailable')
             if check:
                 outcome,checked_at=check
                 stamp=datetime.fromtimestamp(checked_at,timezone.utc).strftime('%d.%m.%Y %H:%M:%S UTC')
@@ -393,7 +458,7 @@ class Portal:
                 content+=f'<p class="field"><label for="{ident}">{labels[field]}</label><input id="{ident}" type="password" name="{field}" autocomplete="off" required maxlength="2048"></p>'
             content+='<button>'+('Заменить сохранённый ключ' if saved else 'Сохранить ключ')+'</button></form></section>'
         content+='</div><section class="mcp-card" aria-labelledby="mcp-title"><h2 id="mcp-title">Связь с MCP</h2><p>Статус подключения MCP здесь не проверяется. Наличие ключей в кабинете не означает, что ассистент уже получает данные.</p></section></main>'
-        return reply(document('Подключение кабинетов',content))
+        return reply(document('Подключение кабинетов',content,progress=True))
 
 def secret_file(name, binary=False):
     path=os.environ[name]
@@ -413,3 +478,6 @@ def create_portal():
     login=LoginApp(os.environ['DATABASE_PATH'],secret_file('SESSION_SECRET_FILE'),os.environ.get('BASE_URL','https://3dprinta.shop'),mailer=file_smtp_mailer)
     vault=Vault(os.environ['VAULT_PATH'],secret_file('VAULT_KEY_FILE',True))
     return Portal(login,vault,secret_file('READ_TOKEN_HASH_FILE'))
+
+if __name__ == '__main__' and sys.argv[1:] == ['--provider-worker']:
+    _provider_worker()

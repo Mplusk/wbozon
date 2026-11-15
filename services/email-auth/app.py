@@ -22,9 +22,10 @@ class LoginApp:
         try:c.load(e.get('HTTP_COOKIE',''))
         except Exception:return {}
         return {k:v.value for k,v in c.items()}
-    def permit(self,bucket,limit,window):
+    def permit(self,bucket,limit,window,busy_timeout_ms=None):
         now=self.clock()
         with self.connect() as c:
+            if busy_timeout_ms is not None: c.execute('PRAGMA busy_timeout='+str(int(busy_timeout_ms)))
             c.execute('BEGIN IMMEDIATE'); c.execute('DELETE FROM attempts WHERE at < ?', (now-86400,))
             n=c.execute('SELECT count(*) FROM attempts WHERE bucket=? AND at>?',(bucket,now-window)).fetchone()[0]
             if n>=limit:return False
