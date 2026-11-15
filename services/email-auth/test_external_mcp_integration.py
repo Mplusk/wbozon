@@ -40,7 +40,7 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
         result['body']=b''.join(self.app(env,start)).decode()
         return result
 
-    def test_session_origin_csrf_and_recent_login_are_required(self):
+    def test_session_origin_and_csrf_are_required(self):
         form=self.creation_form()
         for kwargs in ({'cookie':False},{'origin':False},
                        {'headers':{'HTTP_ORIGIN':'https://attacker.invalid'}}):
@@ -51,10 +51,26 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
         bad={**form,'csrf':secrets.token_urlsafe(24)}
         self.assertTrue(self.create(bad)['status'].startswith('403'))
         self.assertEqual(self.app.external_keys.list_active(),[])
+
+    def test_mcp_keys_work_for_all_active_session_but_marketplace_keys_require_recent_login(self):
         self.now+=301
-        self.assertTrue(self.create(form)['status'].startswith('403'))
-        self.assertEqual(self.app.external_keys.list_active(),[])
-        self.assertIn('disabled',self.request()['body'])
+        page=self.request()['body']
+        self.assertIn('Создание и отзыв ключей для ИИ по-прежнему доступны.',page)
+        section=page.split('id="external-mcp-title"',1)[1].split('</section>',1)[0]
+        self.assertNotIn('disabled',section)
+        self.assertTrue(self.request('/settings','POST',{'provider':'wb','csrf':self.csrf,'api_token':'synthetic'})['status'].startswith('403'))
+        created=self.create()
+        self.assertTrue(created['status'].startswith('200'))
+        token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',created['body']).group(1)
+        key_id=self.app.external_keys.list_active()[0][0]
+        self.assertTrue(self.mcp({'jsonrpc':'2.0','id':1,'method':'ping'},token)['status'].startswith('200'))
+        invalid=self.request('/settings/mcp/revoke','POST',{'csrf':secrets.token_urlsafe(24),'key_id':key_id})
+        self.assertTrue(invalid['status'].startswith('403'))
+        revoked=self.request('/settings/mcp/revoke','POST',{'csrf':self.csrf,'key_id':key_id})
+        self.assertTrue(revoked['status'].startswith('303'))
+        self.assertTrue(self.mcp({'jsonrpc':'2.0','id':2,'method':'ping'},token)['status'].startswith('401'))
+        self.now+=43200
+        self.assertTrue(self.create({'csrf':self.csrf,'request_id':secrets.token_urlsafe(16),'name':'Expired session'})['status'].startswith('401'))
 
     def test_token_shown_once_replay_denied_and_subsequent_get_is_clean(self):
         form=self.creation_form(); form['name']='<script>client</script>'

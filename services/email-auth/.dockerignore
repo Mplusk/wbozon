@@ -8,6 +8,7 @@
 !wb_mcp.py
 !external_keys.py
 !external_mcp.py
+!oauth_mcp.py
 !ui.py
 !smoke.py
 !candidate.py

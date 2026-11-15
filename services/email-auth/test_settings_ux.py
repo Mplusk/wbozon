@@ -34,7 +34,7 @@ class SettingsUXTests(unittest.TestCase):
     def test_recent_and_stale_help(self):
         self.assertIn('первых 5 минут',self.request()['body'])
         self.now+=301
-        self.assertIn('Время для изменения ключей истекло.',self.request()['body'])
+        self.assertIn('Время для изменения ключей маркетплейсов истекло.',self.request()['body'])
         self.assertTrue(self.save()['status'].startswith('403'))
 
     def test_ux_does_not_decrypt_vault_or_call_gateway(self):

@@ -33,7 +33,8 @@ def _tool(name, description, properties, required=()):
     return {'name':name, 'description':description,
             'inputSchema':{'type':'object', 'properties':properties,
                            'required':list(required), 'additionalProperties':False},
-            'annotations':dict(ANNOTATIONS)}
+            'annotations':dict(ANNOTATIONS),
+            '_meta':{'securitySchemes':[{'type':'oauth2','scopes':['mcp:read']}]}}
 
 TOOLS = [
     _tool('ozon_products', 'Чтение страницы собственных товаров Ozon.',
@@ -101,13 +102,13 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
     auth = environ.get('HTTP_AUTHORIZATION','')
     match = re.fullmatch(r'(?i:Bearer) (mcp_[A-Za-z0-9_-]{43})',auth)
     if not match or not TOKEN_PATTERN.fullmatch(match.group(1)):
-        return reply('401 Unauthorized', {'error':'unauthorized'}, [('WWW-Authenticate','Bearer')])
+        return reply('401 Unauthorized', {'error':'unauthorized'}, [('WWW-Authenticate','Bearer resource_metadata="'+expected_origin+'/.well-known/oauth-protected-resource/mcp"')])
     try:
         key_id = authenticate(match.group(1))
     except Exception:
         return reply('503 Service Unavailable', {'error':'authentication_unavailable'})
     if not key_id:
-        return reply('401 Unauthorized', {'error':'unauthorized'}, [('WWW-Authenticate','Bearer')])
+        return reply('401 Unauthorized', {'error':'unauthorized'}, [('WWW-Authenticate','Bearer resource_metadata="'+expected_origin+'/.well-known/oauth-protected-resource/mcp"')])
     if environ.get('REQUEST_METHOD','GET') != 'POST':
         return reply('405 Method Not Allowed', {'error':'method_not_allowed'}, [('Allow','POST')])
     media_type = environ.get('CONTENT_TYPE','').split(';',1)[0].strip().lower()

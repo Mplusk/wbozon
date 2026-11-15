@@ -79,7 +79,7 @@ class ExternalKeysTests(unittest.TestCase):
         for bad in ('', 'mcp_bad', '\u2603', 123, None):
             self.assertIsNone(self.store.check_token(bad))
         key_id, token = self.create('<script>alert(1)</script>')
-        page = render_section(self.store, 'a'*32, True, 'https://3dprinta.shop')
+        page = render_section(self.store, 'a'*32, 'https://3dprinta.shop')
         self.assertIn('&lt;script&gt;', page)
         self.assertNotIn('<script>', page)
         self.assertNotIn(token, page)
@@ -88,8 +88,8 @@ class ExternalKeysTests(unittest.TestCase):
         once = render_created('<script>alert(1)</script>', token, 'https://3dprinta.shop')
         self.assertIn(token,once)
         self.assertNotIn('<script>',once)
-        self.assertNotIn(token,render_section(self.store, 'a'*32,False,'https://3dprinta.shop'))
-        self.assertIn('disabled',render_section(self.store, 'a'*32,False,'https://3dprinta.shop'))
+        self.assertNotIn(token,render_section(self.store, 'a'*32,'https://3dprinta.shop'))
+        self.assertNotIn('disabled',render_section(self.store, 'a'*32,'https://3dprinta.shop'))
 
     def test_storage_can_be_reopened_without_schema_changes(self):
         key_id, token = self.create()

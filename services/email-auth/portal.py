@@ -6,7 +6,7 @@ from email.message import EmailMessage
 from urllib.parse import parse_qs, urlsplit
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from app import LoginApp, smtp_mailer
-import ozon_mcp, wb_mcp, external_keys, external_mcp
+import ozon_mcp, wb_mcp, external_keys, external_mcp, oauth_mcp
 
 FIELDS = {'ozon': ('client_id', 'api_key'), 'wb': ('api_token',)}
 CHECK_OPERATIONS = {'ozon':'ozon_products', 'wb':'wb_prices'}
@@ -23,6 +23,9 @@ BRIDGE_OPERATIONS = {'unknown':'операция не определена', 'oz
     'ozon_prices':'цены Ozon', 'wb_products':'товары Wildberries',
     'wb_prices':'цены Wildberries', 'wb_commissions':'комиссии Wildberries',
     'wb_box_tariffs':'тарифы Wildberries'}
+OAUTH_PATHS = frozenset(('/.well-known/oauth-protected-resource',
+    '/.well-known/oauth-protected-resource/mcp', '/.well-known/oauth-authorization-server',
+    '/oauth/register', '/oauth/authorize', '/oauth/token'))
 BRIDGE_OUTCOMES = {'ok':'данные получены', 'not_configured':'ключ не добавлен', 'failed':'не удалось получить данные', 'rate_limited':'превышен лимит запросов'}
 
 class Vault:
@@ -216,13 +219,14 @@ def render_preview(provider, result, fetched_at, sensitive_values=(), lookup_nm_
     return document(title,content)
 
 class Portal:
-    def __init__(self, login, vault, read_token_hash, gateway=provider_read, mcp_read_token_hash=None, external_key_store=None):
+    def __init__(self, login, vault, read_token_hash, gateway=provider_read, mcp_read_token_hash=None, external_key_store=None, oauth_store=None):
         if not re.fullmatch(r'[0-9a-f]{64}',read_token_hash): raise ValueError('Expected SHA256 token hash')
         if mcp_read_token_hash is not None and (not re.fullmatch(r'[0-9a-f]{64}',mcp_read_token_hash) or hmac.compare_digest(read_token_hash,mcp_read_token_hash)):
             raise ValueError('Expected distinct SHA256 MCP token hash')
         self.login,self.vault,self.token_hash,self.gateway=login,vault,read_token_hash,gateway
         self.mcp_token_hash=mcp_read_token_hash
         self.external_keys=external_key_store if external_key_store is not None else external_keys.KeyStore(vault.path)
+        self.oauth=oauth_store if oauth_store is not None else oauth_mcp.OAuthStore(vault.path,signing_secret=login.secret,clock=login.clock)
     def request_budget(self, provider, now):
         """Read-only local limiter snapshot. It neither reserves nor grants a request."""
         if provider not in CHECK_OPERATIONS: raise ValueError('Invalid provider')
@@ -249,16 +253,18 @@ class Portal:
                     present=c.execute('SELECT 1 FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),self.login.clock())).fetchone()
                 if present:
                     start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
-        if path not in ('/settings','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/mcp','/api/read','/healthz'):
+        if path not in OAUTH_PATHS and path not in ('/settings','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/mcp','/api/read','/healthz'):
             return self.login(e,start)
         def reply(text,code='200 OK',json_response=False):
             if not json_response and not text.lstrip().lower().startswith('<!doctype'): text=document('Кабинет', '<main id="content" class="error-card"><h1>Кабинет</h1><p>'+text+'</p></main>')
             body=(json.dumps(text) if json_response else text).encode()
             start(code,[('Content-Type','application/json' if json_response else 'text/html; charset=utf-8'),('Content-Length',str(len(body))),('Cache-Control','no-store'),('Referrer-Policy','no-referrer' if json_response else 'strict-origin'),('X-Content-Type-Options','nosniff'),('Content-Security-Policy',CSP)]); return [body]
         if e.get('HTTP_HOST')!=urlsplit(self.login.origin).netloc: return reply('Invalid host','400 Bad Request')
+        if path in OAUTH_PATHS:
+            return oauth_mcp.handle(e,start,self.oauth,self.external_keys,self.login.origin)
         if path=='/mcp':
             def authenticate(token):
-                key_id=self.external_keys.check_token(token)
+                key_id=self.external_keys.check_token(token) or self.oauth.verify(token,self.login.origin+'/mcp')
                 return key_id if key_id and self.external_keys.mark_used(key_id,self.login.clock()) else None
             def execute(key_id,operation,args):
                 try:
@@ -357,7 +363,6 @@ class Portal:
         if path in ('/settings/mcp/create','/settings/mcp/revoke'):
             if method!='POST': return reply('Method not allowed','405 Method Not Allowed')
             if e.get('HTTP_ORIGIN')!=self.login.origin: return reply('Forbidden','403 Forbidden')
-            if session[0]-43200 < now-300: return reply('Для изменения ключей войдите заново по письму.','403 Forbidden')
             try:
                 form=parse_qs(body('application/x-www-form-urlencoded'),max_num_fields=3,keep_blank_values=True,strict_parsing=True)
                 if any(len(v)!=1 for v in form.values()): raise ValueError()
@@ -467,10 +472,10 @@ class Portal:
         content+='<p class="intro">Здесь можно сохранить ключи Wildberries и Ozon. Используйте отдельные ключи только с необходимыми правами чтения. Права на изменение товаров, цен и заказов не нужны.</p>'
         content+='<p>Ключи хранятся зашифрованно и не отображаются после сохранения. Сохранение ключа не подтверждает его действительность и не подключает MCP автоматически.</p>'
         content+='<div class="steps" aria-label="Порядок подключения"><div class="step"><b><span>01</span>Добавьте ключ</b>Доступ только на чтение</div><div class="step"><b><span>02</span>Проверьте связь</b>Один безопасный запрос</div><div class="step"><b><span>03</span>Откройте данные</b>Первые товары и цены</div></div>'
-        content+='<div class="session-note"><p>Сохранить или заменить ключи можно в течение первых 5 минут после входа по письму. Затем выйдите и запросите новую ссылку. Уже сохранённые ключи останутся на сервере.</p>'
+        content+='<div class="session-note"><p>Сохранить или заменить ключи Ozon и Wildberries можно в течение первых 5 минут после входа по письму. Затем выйдите и запросите новую ссылку. Ключи для подключения ИИ можно создавать и отзывать в течение всего сеанса.</p>'
         content+='<form method="post" action="/logout"><input type="hidden" name="csrf" value="'+html.escape(session[1],quote=True)+'"><button>Выйти для повторного входа</button></form></div>'
         if session[0]-43200 < now-300:
-            content+='<p role="status">Время для изменения ключей истекло. Для сохранения ключей сначала выйдите и получите новую ссылку входа.</p>'
+            content+='<p role="status">Время для изменения ключей маркетплейсов истекло. Для их сохранения сначала выйдите и получите новую ссылку входа. Создание и отзыв ключей для ИИ по-прежнему доступны.</p>'
         names={'ozon':'Ozon','wb':'Wildberries'}
         labels={'client_id':'Идентификатор продавца (Client ID)', 'api_key':'API-ключ Ozon', 'api_token':'API-токен Wildberries'}
         content+='<div class="market-grid">'
@@ -531,7 +536,7 @@ class Portal:
             content+='<p>Не удалось загрузить сведения об обращениях к API кабинета.</p>'
         content+='<p>Показаны последние завершённые обращения к API кабинета с момента включения учёта. MCP определяется по отдельному ключу доступа и появится здесь, только если интеграция использует этот API; проверки и просмотр в кабинете не учитываются. Это не проверка текущего подключения MCP. <a href="/settings">Обновить сведения</a>.</p></div></section>'
         try:
-            content+=external_keys.render_section(self.external_keys,session[1],session[0]-43200 >= now-300,self.login.origin)
+            content+=external_keys.render_section(self.external_keys,session[1],self.login.origin)
         except (sqlite3.Error,ValueError,TypeError,OverflowError,OSError):
             content+='<p>Не удалось загрузить ключи для других ИИ. Повторите позже.</p>'
         content+='</main>'

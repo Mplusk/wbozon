@@ -40,6 +40,7 @@ class ExternalMCPTests(unittest.TestCase):
         tools=out['body']['result']['tools']
         self.assertEqual({t['name'] for t in tools}, {'ozon_products','ozon_prices','wb_products','wb_prices','wb_commissions','wb_box_tariffs'})
         self.assertTrue(all(t['annotations']['readOnlyHint'] and not t['annotations']['destructiveHint'] for t in tools))
+        self.assertTrue(all(t['_meta']['securitySchemes']==[{'type':'oauth2','scopes':['mcp:read']}] for t in tools))
     def test_notifications_are_accepted_without_response_body_or_execution(self):
         out=self.request({'jsonrpc':'2.0','method':'notifications/initialized'})
         self.assertEqual(out['status'],'202 Accepted');self.assertIsNone(out['body']);self.assertFalse(self.calls)
@@ -62,7 +63,7 @@ class ExternalMCPTests(unittest.TestCase):
         for token in (False,'mcp_'+'B'*43,'A'*43,'mcp_x'):
             out=self.request(self.rpc('tools/list'),token=token)
             self.assertEqual(out['status'],'401 Unauthorized')
-            self.assertEqual(out['headers']['WWW-Authenticate'],'Bearer')
+            self.assertEqual(out['headers']['WWW-Authenticate'],'Bearer resource_metadata="https://3dprinta.shop/.well-known/oauth-protected-resource/mcp"')
         self.assertEqual(self.request(self.rpc('tools/list'),auth=lambda t:None)['status'],'401 Unauthorized')
         self.assertEqual(self.request(self.rpc('tools/list'),headers={'HTTP_AUTHORIZATION':'bearer '+self.token})['status'],'200 OK')
         def broken(_): raise RuntimeError('secret')

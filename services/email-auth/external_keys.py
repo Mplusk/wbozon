@@ -96,18 +96,15 @@ def _stamp(value):
     return datetime.fromtimestamp(value, timezone.utc).strftime('%d.%m.%Y %H:%M:%S UTC')
 
 
-def render_section(store, csrf, editable, origin):
+def render_section(store, csrf, origin):
     """Return the owner settings fragment; no credential is recovered here."""
     request_id = secrets.token_urlsafe(16)
-    disabled = '' if editable else ' disabled'
     endpoint = _escape(origin.rstrip('/') + '/mcp')
     content = '<section class="mcp-card" aria-labelledby="external-mcp-title"><div><h2 id="external-mcp-title">Подключение других ИИ</h2>'
     content += '<p>Адрес MCP: <strong>' + endpoint + '</strong>. Тип подключения: Streamable HTTP. Доступ только для чтения.</p>'
     content += '<p>Создайте отдельный ключ для каждого приложения. Передайте его приложению как заголовок <code>Authorization: Bearer КЛЮЧ</code>. Поддержка заголовка зависит от приложения; ссылка без ключа не даёт доступ.</p>'
-    content += '<p>Claude: в настройках собственного коннектора выберите отсутствие входа и добавьте этот заголовок в Request headers. Grok: используйте клиент или API, поддерживающий заголовки MCP. Для ChatGPT уже подключено приложение SIDZEN · WB и Ozon MCP.</p>'
-    if not editable:
-        content += '<p>Чтобы создать или отозвать ключ, войдите заново по ссылке из письма.</p>'
-    content += '<form method="post" action="/settings/mcp/create"><input type="hidden" name="csrf" value="'+_escape(csrf)+'"><input type="hidden" name="request_id" value="'+_escape(request_id)+'"><label for="external-mcp-name">Название приложения</label><input id="external-mcp-name" type="text" name="name" maxlength="60" required'+disabled+'><button'+disabled+'>Создать ключ</button></form>'
+    content += '<p>Для Claude, Grok и ChatGPT используйте адрес MCP при добавлении коннектора. Если откроется страница подключения SIDZEN, введите на ней созданный ключ и разрешите чтение. Клиенты с ручной настройкой заголовков могут передать ключ через Bearer.</p>'
+    content += '<form method="post" action="/settings/mcp/create"><input type="hidden" name="csrf" value="'+_escape(csrf)+'"><input type="hidden" name="request_id" value="'+_escape(request_id)+'"><label for="external-mcp-name">Название приложения</label><input id="external-mcp-name" type="text" name="name" maxlength="60" required><button>Создать ключ</button></form>'
     rows = store.list_active()
     if not rows:
         content += '<p>Ключей для других ИИ пока нет.</p>'
@@ -116,7 +113,7 @@ def render_section(store, csrf, editable, origin):
         for key_id, name, created_at, last_used_at in rows:
             content += '<div><p><strong>'+_escape(name)+'</strong> — создан '+_escape(_stamp(created_at))
             content += '; последнее обращение: '+(_escape(_stamp(last_used_at)) if last_used_at is not None else 'пока не было')+'.</p>'
-            content += '<form class="secondary" method="post" action="/settings/mcp/revoke"><input type="hidden" name="csrf" value="'+_escape(csrf)+'"><input type="hidden" name="key_id" value="'+_escape(key_id)+'"><button'+disabled+'>Отозвать ключ</button></form></div>'
+            content += '<form class="secondary" method="post" action="/settings/mcp/revoke"><input type="hidden" name="csrf" value="'+_escape(csrf)+'"><input type="hidden" name="key_id" value="'+_escape(key_id)+'"><button>Отозвать ключ</button></form></div>'
     return content + '</div></section>'
 
 
@@ -127,4 +124,4 @@ def render_created(name, token, origin):
     return ('<main id="content"><h1>Ключ создан</h1><p>Для приложения: '+_escape(name)+'. Скопируйте ключ сейчас: после закрытия этой страницы он больше не показывается.</p>'
         '<label for="external-mcp-url">Адрес MCP</label><input id="external-mcp-url" type="text" readonly value="'+_escape(origin.rstrip('/')+'/mcp')+'">'
         '<label for="external-mcp-token">Ключ доступа</label><input id="external-mcp-token" type="text" readonly value="'+_escape(token)+'" autocomplete="off" spellcheck="false">'
-        '<p>Если приложение запрашивает заголовок, укажите Authorization: Bearer, пробел и этот ключ. Храните ключ как пароль; вы сможете отозвать его в кабинете.</p><p><a href="/settings">Вернуться к настройкам</a></p></main>')
+        '<p>Добавьте адрес MCP в Claude, Grok или ChatGPT. На странице подключения SIDZEN введите этот ключ и разрешите доступ. Если клиент запрашивает заголовок, укажите Authorization: Bearer, пробел и ключ. Храните ключ как пароль; вы сможете отозвать его в кабинете.</p><p><a href="/settings">Вернуться к настройкам</a></p></main>')
