@@ -33,6 +33,20 @@ class OzonBridgeTests(unittest.TestCase):
         self.assertEqual(result['items'][0]['commissions'], {'sales_percent_fbo': 17.5})
         self.assertNotIn('private', json.dumps(result))
 
+    def test_declared_price_object_and_additional_commissions(self):
+        response = {'cursor': '', 'items': [{'product_id': 10,
+            'price': {'declared_price': {'amount': '123.45', 'currency': 'RUB', 'private': 'api-secret'}},
+            'commissions': {'sales_percent_rfbs': 12.5, 'sales_percent_fbp': 7, 'private': 'api-secret'}}]}
+        result = ozon.project_response('ozon_prices', {'limit': 1}, response, self.creds)
+        self.assertEqual(result['items'][0]['price']['declared_price'], {'amount': '123.45', 'currency': 'RUB'})
+        self.assertEqual(result['items'][0]['commissions'], {'sales_percent_rfbs': 12.5, 'sales_percent_fbp': 7})
+        self.assertNotIn('api-secret', json.dumps(result))
+        response['items'][0]['price']['declared_price'] = {'amount': 'api-secret', 'currency': 'RUB'}
+        result = ozon.project_response('ozon_prices', {'limit': 1}, response, self.creds)
+        self.assertEqual(result['items'][0]['price']['declared_price']['amount'], '[REDACTED]')
+        response['items'][0]['price']['declared_price'] = {'amount': {'unsafe': 1}}
+        with self.assertRaises(ValueError): ozon.project_response('ozon_prices', {'limit': 1}, response, self.creds)
+
     def test_credentials_are_redacted_in_projected_fields_and_never_in_cursor(self):
         result = ozon.project_response('ozon_prices', {'limit': 1},
             {'cursor': 'next-page', 'items': [{'offer_id': 'api-secret',

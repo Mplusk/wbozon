@@ -11,13 +11,14 @@ import urllib.request
 OPERATIONS = frozenset({'ozon_products', 'ozon_prices'})
 PRICE_FIELDS = ('auto_action_enabled', 'currency_code', 'marketing_seller_price',
                 'min_price', 'net_price', 'old_price', 'price', 'retail_price',
-                'vat', 'declared_price')
+                'vat')
 COMMISSION_FIELDS = ('fbo_deliv_to_customer_amount', 'fbo_direct_flow_trans_max_amount',
                      'fbo_direct_flow_trans_min_amount', 'fbo_return_flow_amount',
                      'fbs_deliv_to_customer_amount', 'fbs_direct_flow_trans_max_amount',
                      'fbs_direct_flow_trans_min_amount', 'fbs_first_mile_max_amount',
                      'fbs_first_mile_min_amount', 'fbs_return_flow_amount',
-                     'sales_percent_fbo', 'sales_percent_fbs')
+                     'sales_percent_fbo', 'sales_percent_fbs', 'sales_percent_rfbs',
+                     'sales_percent_fbp')
 PRODUCT_FIELDS = ('product_id', 'offer_id', 'archived', 'is_fbo_visible',
                   'is_fbs_visible', 'has_fbo_stocks', 'has_fbs_stocks', 'is_discounted')
 PRICE_ITEM_FIELDS = ('product_id', 'offer_id', 'acquiring', 'volume_weight')
@@ -90,6 +91,12 @@ def project_response(operation, args, data, creds):
         if operation == 'ozon_prices':
             for key, fields in (('price', PRICE_FIELDS), ('commissions', COMMISSION_FIELDS)):
                 if key in row and row[key] is not None: item[key] = pick(row[key], fields)
+            if isinstance(row.get('price'), dict) and 'declared_price' in row['price']:
+                declared = row['price']['declared_price']
+                # Current API returns a currency/amount object; preserve null or
+                # scalar legacy values without accepting arbitrary nested data.
+                item['price']['declared_price'] = (pick(declared, ('amount', 'currency'))
+                    if isinstance(declared, dict) else clean(declared))
         out.append(item)
     cursor_key = 'last_id' if operation == 'ozon_products' else 'cursor'
     cursor = parent.get(cursor_key, '')
