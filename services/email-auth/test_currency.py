@@ -2,7 +2,7 @@
 import json
 import unittest
 from unittest.mock import patch
-from portal import provider_read, render_preview
+from portal import _provider_read as provider_read, render_preview
 import test_portal
 
 class CurrencyTests(unittest.TestCase):

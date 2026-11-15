@@ -6,7 +6,7 @@ import threading
 import unittest
 from unittest.mock import patch
 import test_portal
-from portal import provider_read
+from portal import _provider_read as provider_read
 
 class LookupTests(unittest.TestCase):
     setUp=test_portal.Tests.setUp
