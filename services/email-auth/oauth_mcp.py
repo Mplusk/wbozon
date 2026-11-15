@@ -283,10 +283,10 @@ def handle(environ,start,store,keys,origin):
     """Handle only OAuth and metadata routes; caller validates the Host first."""
     path=environ.get('PATH_INFO',''); method=environ.get('REQUEST_METHOD','GET')
     resource=origin+'/mcp'
-    def reply(status,body,kind='application/json; charset=utf-8',extra=(),csp=CSP):
+    def reply(status,body,kind='application/json; charset=utf-8',extra=(),csp=CSP,referrer_policy='no-referrer'):
         raw=(json.dumps(body,ensure_ascii=False,separators=(',',':')) if kind.startswith('application/json') else body).encode('utf-8')
         start(status,[('Content-Type',kind),('Content-Length',str(len(raw))),('Cache-Control','no-store'),
-            ('Pragma','no-cache'),('Referrer-Policy','no-referrer'),('X-Content-Type-Options','nosniff'),
+            ('Pragma','no-cache'),('Referrer-Policy',referrer_policy),('X-Content-Type-Options','nosniff'),
             ('Content-Security-Policy',csp),*extra])
         return [raw]
     def error(code,status='400 Bad Request'):
@@ -334,7 +334,10 @@ def handle(environ,start,store,keys,origin):
             expired=[('Set-Cookie',name+'=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax')
                      for name in _obsolete_pending_cookies(environ.get('HTTP_COOKIE',''))]
             expired.append(('Set-Cookie','__Host-mcp-oauth-'+nonce+'='+nonce+'; Path=/; Max-Age=900; Secure; HttpOnly; SameSite=Lax'))
-            return reply('200 OK',document('Подключение MCP',page),kind='text/html; charset=utf-8',extra=expired,csp=OAUTH_CSP)
+            # Chromium sends Origin: null on an HTML form POST originating from
+            # a no-referrer document. same-origin preserves the Origin for our
+            # exact-origin CSRF check while withholding it from external sites.
+            return reply('200 OK',document('Подключение MCP',page),kind='text/html; charset=utf-8',extra=expired,csp=OAUTH_CSP,referrer_policy='same-origin')
         if path=='/oauth/authorize' and method=='POST':
             if environ.get('HTTP_ORIGIN')!=origin: _reject('origin')
             try: data=params(read_body('application/x-www-form-urlencoded'))
@@ -361,7 +364,7 @@ def handle(environ,start,store,keys,origin):
                     '<form method="post" action="/oauth/authorize"><input type="hidden" name="csrf" value="'+csrf+'"><input type="hidden" name="ticket" value="'+ticket+'">'
                     '<label for="mcp-key">Ключ MCP из кабинета</label><input id="mcp-key" type="password" name="key" required autocomplete="off" maxlength="47">'
                     '<button>Разрешить доступ</button></form><p><a href="/settings">Настройки ключей</a></p></main>')
-                return reply('403 Forbidden',document('Ключ не подошёл',page),kind='text/html; charset=utf-8',csp=OAUTH_CSP)
+                return reply('403 Forbidden',document('Ключ не подошёл',page),kind='text/html; charset=utf-8',csp=OAUTH_CSP,referrer_policy='same-origin')
             try: code,redirect,state=store.approve(ticket,csrf,key_id)
             except OAuthError: _reject('ticket')
             query={'code':code,'iss':origin}

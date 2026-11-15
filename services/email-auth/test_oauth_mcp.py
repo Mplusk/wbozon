@@ -33,12 +33,14 @@ class Tests(unittest.TestCase):
     def approve(self):
         r=self.request('/oauth/authorize',query=urlencode(self.auth_params()))
         self.assertEqual(r['status'],'200 OK');self.assertEqual(r['headers']['Cache-Control'],'no-store')
+        self.assertEqual(r['headers']['Referrer-Policy'],'same-origin')
         cookie=r['headers']['Set-Cookie'].split(';')[0];nonce=cookie.split('=',1)[1]
         import re
         ticket=re.search(r'name="ticket" value="([A-Za-z0-9_.-]+)"',r['body']).group(1)
         body=urlencode({'csrf':nonce,'ticket':ticket,'key':self.secret}).encode()
         result=self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=cookie,origin=self.origin)
         self.assertEqual(result['status'],'303 See Other')
+        self.assertEqual(result['headers']['Referrer-Policy'],'no-referrer')
         parts=urlsplit(result['headers']['Location']);q=parse_qs(parts.query)
         self.assertEqual(parts.scheme+'://'+parts.netloc+parts.path,self.redirect)
         self.assertEqual(q['iss'],[self.origin]);self.assertEqual(q['state'],['state123'])
@@ -74,7 +76,7 @@ class Tests(unittest.TestCase):
         import re
         ticket=re.search(r'name="ticket" value="([A-Za-z0-9_.-]+)"',r['body']).group(1)
         body=urlencode({'csrf':nonce,'ticket':ticket,'key':self.secret}).encode()
-        for origin,ck in [(None,cookie),('https://evil.example',cookie),(self.origin,''),(self.origin,'__Host-mcp-oauth=bad')]:
+        for origin,ck in [(None,cookie),('null',cookie),('https://evil.example',cookie),(self.origin,''),(self.origin,'__Host-mcp-oauth=bad')]:
             self.assertEqual(self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=ck,origin=origin)['status'],'400 Bad Request')
         self.assertEqual(self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=cookie,origin=self.origin)['status'],'303 See Other')
         self.assertEqual(self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=cookie,origin=self.origin)['status'],'400 Bad Request')
@@ -91,8 +93,10 @@ class Tests(unittest.TestCase):
         retry=self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=cookie,origin=self.origin)
         self.assertEqual(retry['status'],'403 Forbidden')
         self.assertEqual(retry['headers']['Content-Security-Policy'],policy)
+        self.assertEqual(retry['headers']['Referrer-Policy'],'same-origin')
         self.assertIn('name="ticket" value="'+ticket+'"',retry['body'])
         self.assertEqual(self.request('/.well-known/oauth-authorization-server')['headers']['Content-Security-Policy'],CSP)
+        self.assertEqual(self.request('/.well-known/oauth-authorization-server')['headers']['Referrer-Policy'],'no-referrer')
     def test_stateless_pending_resists_flood_tamper_and_concurrent_replay(self):
         for _ in range(1100): self.store.begin(self.auth_params(),self.resource)
         with sqlite3.connect(self.path) as c:self.assertEqual(c.execute('select count(*) from oauth_pending_used').fetchone()[0],0)
