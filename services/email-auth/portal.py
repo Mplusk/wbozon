@@ -22,7 +22,7 @@ CHECK_MESSAGES = {
     'failed':'Не удалось подтвердить соединение. Проверьте настройки и повторите позже.',
 }
 BRIDGE_OPERATIONS = {'unknown':'операция не определена', 'ozon_products':'товары Ozon',
-    'ozon_prices':'цены Ozon', 'ozon_orders_analytics':'заказы Ozon', 'wb_products':'товары Wildberries',
+    'ozon_prices':'цены Ozon', 'ozon_orders_analytics':'заказы Ozon', 'ozon_posting_status':'статусы отправлений Ozon', 'wb_products':'товары Wildberries',
     'wb_prices':'цены Wildberries', 'wb_commissions':'комиссии Wildberries',
     'wb_box_tariffs':'тарифы Wildberries', 'wb_sales_summary':'заказы и выкупы Wildberries'}
 OAUTH_PATHS = frozenset(('/.well-known/oauth-protected-resource',

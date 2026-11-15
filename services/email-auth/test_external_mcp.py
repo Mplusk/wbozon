@@ -38,7 +38,7 @@ class ExternalMCPTests(unittest.TestCase):
     def test_read_only_tool_list_and_matching_validation(self):
         out=self.request(self.rpc('tools/list'),headers={'HTTP_MCP_PROTOCOL_VERSION':'2025-11-25'})
         tools=out['body']['result']['tools']
-        self.assertEqual({t['name'] for t in tools}, {'ozon_products','ozon_prices','ozon_orders_analytics','wb_products','wb_prices','wb_commissions','wb_box_tariffs','wb_sales_summary'})
+        self.assertEqual({t['name'] for t in tools}, {'ozon_products','ozon_prices','ozon_orders_analytics','ozon_posting_status','wb_products','wb_prices','wb_commissions','wb_box_tariffs','wb_sales_summary'})
         self.assertTrue(all(t['annotations']['readOnlyHint'] and not t['annotations']['destructiveHint'] for t in tools))
         self.assertTrue(all(t['_meta']['securitySchemes']==[{'type':'oauth2','scopes':['mcp:read']}] for t in tools))
         self.assertTrue(all(t['securitySchemes']==t['_meta']['securitySchemes'] for t in tools))
@@ -62,6 +62,15 @@ class ExternalMCPTests(unittest.TestCase):
                 invalid=self.request(self.rpc('tools/call',{'name':name,'arguments':{'date_from':'invalid','date_to':'2026-11-08'}}))
                 self.assertTrue(invalid['body']['result']['isError'])
                 self.assertEqual(len(self.calls),before)
+    def test_ozon_posting_status_requires_a_valid_scheme(self):
+        args={'date_from':'2026-11-02','date_to':'2026-11-08','scheme':'FBO'}
+        out=self.request(self.rpc('tools/call',{'name':'ozon_posting_status','arguments':args}))
+        self.assertNotIn('isError',out['body']['result'])
+        self.assertEqual(self.calls[-1],('key-id','ozon_posting_status',args))
+        before=len(self.calls)
+        out=self.request(self.rpc('tools/call',{'name':'ozon_posting_status','arguments':{**args,'scheme':'bad'}}))
+        self.assertTrue(out['body']['result']['isError'])
+        self.assertEqual(len(self.calls),before)
     def test_seller_errors_are_safe_and_not_jsonrpc_errors(self):
         def fail(*_): raise mcp.MCPToolError('provider_access_denied')
         out=self.request(self.rpc('tools/call',{'name':'wb_prices'}),execute=fail)
@@ -117,7 +126,7 @@ class ExternalMCPTests(unittest.TestCase):
         self.assertIn('2025-11-25',result['supportedVersions'])
         self.assertEqual(result['_meta']['io.modelcontextprotocol/serverInfo']['name'],'sidzen-marketplace-readonly')
         listed=self.modern('tools/list')['body']['result']
-        self.assertEqual(listed['resultType'],'complete');self.assertEqual(len(listed['tools']),8)
+        self.assertEqual(listed['resultType'],'complete');self.assertEqual(len(listed['tools']),9)
         self.assertEqual((listed['ttlMs'],listed['cacheScope']),(0,'private'))
         call=self.modern('tools/call',{'name':'ozon_products','arguments':{'limit':1}})
         self.assertEqual(call['body']['result']['resultType'],'complete')

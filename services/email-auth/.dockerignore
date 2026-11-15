@@ -5,6 +5,7 @@
 !Dockerfile
 !portal.py
 !ozon_mcp.py
+!ozon_posting_status.py
 !wb_mcp.py
 !external_keys.py
 !external_mcp.py

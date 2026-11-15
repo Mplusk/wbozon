@@ -9,8 +9,9 @@ import re
 import urllib.request
 from datetime import date
 from decimal import Decimal, localcontext
+import ozon_posting_status
 
-OPERATIONS = frozenset({'ozon_products', 'ozon_prices', 'ozon_orders_analytics'})
+OPERATIONS = frozenset({'ozon_products', 'ozon_prices', 'ozon_orders_analytics', 'ozon_posting_status'})
 PRICE_FIELDS = ('auto_action_enabled', 'currency_code', 'marketing_seller_price',
                 'min_price', 'net_price', 'old_price', 'price', 'retail_price',
                 'vat')
@@ -51,6 +52,8 @@ def _string(value, maximum):
 def validate_args(operation, args):
     """Reject unexpected keys and types. One request reads at most 100 rows."""
     if operation not in OPERATIONS or not isinstance(args, dict): raise ValueError('Invalid Ozon operation')
+    if operation == 'ozon_posting_status':
+        return ozon_posting_status.validate_args(args)
     if operation == 'ozon_orders_analytics':
         if set(args) != {'date_from', 'date_to'}: raise ValueError('Invalid arguments')
         try:
@@ -75,6 +78,8 @@ def validate_args(operation, args):
 def build_request(operation, args, creds):
     """Construct a request to a fixed Ozon endpoint with credentials in headers."""
     validate_args(operation, args)
+    if operation == 'ozon_posting_status':
+        return ozon_posting_status.build_request(args, creds)
     filt = {'visibility': 'ALL'}
     if operation == 'ozon_orders_analytics':
         url = 'https://api-seller.ozon.ru/v1/analytics/data'
@@ -98,6 +103,8 @@ def project_response(operation, args, data, creds):
     """Return allowlisted fields and an intact next-page cursor without secrets."""
     validate_args(operation, args)
     if not isinstance(data, dict): raise ValueError('Invalid provider response')
+    if operation == 'ozon_posting_status':
+        return ozon_posting_status.project_response(args, data, creds)
     if operation == 'ozon_orders_analytics':
         return _project_orders_analytics(args, data, creds)
     parent = data.get('result') if operation == 'ozon_products' else data
