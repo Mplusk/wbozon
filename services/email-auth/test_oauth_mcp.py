@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode, urlsplit, parse_qs
 from external_keys import KeyStore
 from oauth_mcp import OAuthStore,OAuthError,handle,SCOPE
+from ui import CSP
 
 class Tests(unittest.TestCase):
     def setUp(self):
@@ -75,6 +76,21 @@ class Tests(unittest.TestCase):
             self.assertEqual(self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=ck,origin=origin)['status'],'400 Bad Request')
         self.assertEqual(self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=cookie,origin=self.origin)['status'],'303 See Other')
         self.assertEqual(self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=cookie,origin=self.origin)['status'],'400 Bad Request')
+    def test_consent_csp_allows_only_registered_provider_origins_and_keeps_ticket(self):
+        import re
+        r=self.request('/oauth/authorize',query=urlencode(self.auth_params()))
+        policy=r['headers']['Content-Security-Policy']
+        directive=next(x.strip() for x in policy.split(';') if x.strip().startswith('form-action '))
+        self.assertEqual(set(directive.split()[1:]),{"'self'",'https://chatgpt.com','https://claude.ai','https://grok.com','https://console.x.ai'})
+        self.assertNotIn('https://evil.example',policy)
+        ticket=re.search(r'name="ticket" value="([A-Za-z0-9_.-]+)"',r['body']).group(1)
+        cookie=r['headers']['Set-Cookie'].split(';')[0];nonce=cookie.split('=',1)[1]
+        body=urlencode({'csrf':nonce,'ticket':ticket,'key':'wrong'}).encode()
+        retry=self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=cookie,origin=self.origin)
+        self.assertEqual(retry['status'],'403 Forbidden')
+        self.assertEqual(retry['headers']['Content-Security-Policy'],policy)
+        self.assertIn('name="ticket" value="'+ticket+'"',retry['body'])
+        self.assertEqual(self.request('/.well-known/oauth-authorization-server')['headers']['Content-Security-Policy'],CSP)
     def test_stateless_pending_resists_flood_tamper_and_concurrent_replay(self):
         for _ in range(1100): self.store.begin(self.auth_params(),self.resource)
         with sqlite3.connect(self.path) as c:self.assertEqual(c.execute('select count(*) from oauth_pending_used').fetchone()[0],0)

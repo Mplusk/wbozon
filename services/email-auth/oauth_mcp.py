@@ -34,6 +34,11 @@ VALUE_RE = re.compile(r'[A-Za-z0-9_-]{43}\Z')
 VERIFIER_RE = re.compile(r'[A-Za-z0-9._~-]{43,128}\Z')
 CLIENT_RE = re.compile(r'client_[A-Za-z0-9_-]{32}\Z')
 SCOPE = 'mcp:read'
+# A successful authorization form redirects to a validated provider callback.
+# Chromium enforces form-action across that redirect, so the consent page must
+# allow the approved callback origins in addition to its same-origin POST.
+# Other pages and all non-HTML OAuth responses keep the stricter shared CSP.
+OAUTH_CSP = CSP.replace("form-action 'self'", "form-action 'self' https://chatgpt.com https://claude.ai https://grok.com https://console.x.ai")
 
 def _hash(value):
     return hashlib.sha256(value.encode('ascii')).hexdigest()
@@ -245,11 +250,11 @@ def handle(environ,start,store,keys,origin):
     """Handle only OAuth and metadata routes; caller validates the Host first."""
     path=environ.get('PATH_INFO',''); method=environ.get('REQUEST_METHOD','GET')
     resource=origin+'/mcp'
-    def reply(status,body,kind='application/json; charset=utf-8',extra=()):
+    def reply(status,body,kind='application/json; charset=utf-8',extra=(),csp=CSP):
         raw=(json.dumps(body,ensure_ascii=False,separators=(',',':')) if kind.startswith('application/json') else body).encode('utf-8')
         start(status,[('Content-Type',kind),('Content-Length',str(len(raw))),('Cache-Control','no-store'),
             ('Pragma','no-cache'),('Referrer-Policy','no-referrer'),('X-Content-Type-Options','nosniff'),
-            ('Content-Security-Policy',CSP),*extra])
+            ('Content-Security-Policy',csp),*extra])
         return [raw]
     def error(code,status='400 Bad Request'):
         return reply(status,{'error':code})
@@ -293,7 +298,7 @@ def handle(environ,start,store,keys,origin):
                 '<input type="hidden" name="csrf" value="'+nonce+'"><input type="hidden" name="ticket" value="'+ticket+'"><label for="mcp-key">Ключ MCP из кабинета</label>'
                 '<input id="mcp-key" type="password" name="key" required autocomplete="off" maxlength="47">'
                 '<button>Разрешить доступ</button></form><p><a href="/settings">Открыть настройки ключей</a></p></main>')
-            return reply('200 OK',document('Подключение MCP',page),kind='text/html; charset=utf-8',extra=[('Set-Cookie','__Host-mcp-oauth='+nonce+'; Path=/; Max-Age=300; Secure; HttpOnly; SameSite=Lax')])
+            return reply('200 OK',document('Подключение MCP',page),kind='text/html; charset=utf-8',extra=[('Set-Cookie','__Host-mcp-oauth='+nonce+'; Path=/; Max-Age=300; Secure; HttpOnly; SameSite=Lax')],csp=OAUTH_CSP)
         if path=='/oauth/authorize' and method=='POST':
             if environ.get('HTTP_ORIGIN')!=origin: raise OAuthError('invalid_request')
             data=params(read_body('application/x-www-form-urlencoded'))
@@ -310,11 +315,11 @@ def handle(environ,start,store,keys,origin):
                     '<form method="post" action="/oauth/authorize"><input type="hidden" name="csrf" value="'+csrf+'"><input type="hidden" name="ticket" value="'+ticket+'">'
                     '<label for="mcp-key">Ключ MCP из кабинета</label><input id="mcp-key" type="password" name="key" required autocomplete="off" maxlength="47">'
                     '<button>Разрешить доступ</button></form><p><a href="/settings">Настройки ключей</a></p></main>')
-                return reply('403 Forbidden',document('Ключ не подошёл',page),kind='text/html; charset=utf-8')
+                return reply('403 Forbidden',document('Ключ не подошёл',page),kind='text/html; charset=utf-8',csp=OAUTH_CSP)
             code,redirect,state=store.approve(ticket,csrf,key_id)
             query={'code':code,'iss':origin}
             if state:query['state']=state
-            return reply('303 See Other','',kind='text/html; charset=utf-8',extra=[('Location',redirect+'?'+urlencode(query)),('Set-Cookie','__Host-mcp-oauth=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax')])
+            return reply('303 See Other','',kind='text/html; charset=utf-8',extra=[('Location',redirect+'?'+urlencode(query)),('Set-Cookie','__Host-mcp-oauth=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax')],csp=OAUTH_CSP)
         if path=='/oauth/token' and method=='POST':
             data=params(read_body('application/x-www-form-urlencoded'))
             basic=None; auth=environ.get('HTTP_AUTHORIZATION','')
