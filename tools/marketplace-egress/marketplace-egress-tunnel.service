@@ -1,0 +1,32 @@
+[Unit]
+Description=Loopback SSH tunnel to marketplace relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=marketplace-tunnel
+Group=marketplace-tunnel
+WorkingDirectory=/
+ExecStart=/usr/bin/ssh -F /dev/null -N -T -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/marketplace-egress/known_hosts -o GlobalKnownHostsFile=/dev/null -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=2 -i /etc/marketplace-egress/tunnel-key -L 127.0.0.1:18761:127.0.0.1:18761 wb-egress-tunnel@92.63.101.127
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+UMask=0077
+MemoryMax=64M
+TasksMax=8
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target
