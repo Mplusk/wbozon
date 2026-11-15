@@ -4,5 +4,6 @@
 !requirements.txt
 !Dockerfile
 !portal.py
+!ui.py
 !smoke.py
 !candidate.py

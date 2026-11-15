@@ -17,7 +17,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Verify checkout revision
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Verify Python syntax
         run: python3 -m compileall -q calc collectors daily demand deploy operations pipeline production reports scout storage workcycle marketplace_check.py test_*.py
       - name: Check JSON inputs
@@ -28,3 +31,96 @@ jobs:
           done
       - name: Run offline tests
         run: python3 -m unittest -v
+
+  email-auth:
+    name: Email auth tests and isolated smoke
+    needs: [verify, native-release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify checkout revision
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Syntax and offline security regressions
+        working-directory: services/email-auth
+        run: |
+          python3 -m pip install -r requirements.txt
+          python3 -m compileall -q portal.py smoke.py candidate.py test_portal.py app.py gunicorn.conf.py test_app.py test_release.py deploy/release.py
+          python3 -m unittest -v
+      - name: Build isolated runtime
+        run: docker build --tag email-auth-unified-ci services/email-auth
+      - name: Smoke test with synthetic credentials and no network
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="email-auth-unified-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+          docker run -d --name "$name" --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges --memory=128m --cpus=.5 --pids-limit=100 \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --tmpfs /data:rw,noexec,nosuid,size=16m,uid=10001,gid=10001 \
+            --network none \
+            email-auth-unified-ci python candidate.py >/dev/null
+          for attempt in $(seq 1 30); do
+            if docker exec "$name" python smoke.py >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'Isolated runtime did not become ready' >&2
+          exit 1
+      - name: Package tested image for private review
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p image-artifact
+          docker save email-auth-unified-ci | gzip -n > image-artifact/email-auth-image.tar.gz
+          (cd image-artifact && sha256sum email-auth-image.tar.gz > SHA256SUMS)
+          IMAGE_ID="$(docker image inspect --format '{{.Id}}' email-auth-unified-ci)"
+          export IMAGE_ID
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          metadata = {
+              "source_commit": os.environ["GITHUB_SHA"],
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "image_id": os.environ["IMAGE_ID"],
+              "platform": "linux/amd64",
+              "purpose": "review and isolated testing only; not deployed",
+          }
+          Path("image-artifact/metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+          PY
+      - name: Retain tested image as a private workflow artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: email-auth-tested-${{ github.sha }}
+          path: image-artifact/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  native-release:
+    name: Native release controller tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify checkout revision
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Run offline controller tests
+        working-directory: tools/native-release
+        run: |
+          python3 -m py_compile native_release.py test_native_release.py
+          python3 -m unittest -v
