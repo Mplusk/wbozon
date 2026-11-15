@@ -9,9 +9,11 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import re
 import secrets
 import sqlite3
+import threading
 import time
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlencode
@@ -34,6 +36,21 @@ VALUE_RE = re.compile(r'[A-Za-z0-9_-]{43}\Z')
 VERIFIER_RE = re.compile(r'[A-Za-z0-9._~-]{43,128}\Z')
 CLIENT_RE = re.compile(r'client_[A-Za-z0-9_-]{32}\Z')
 SCOPE = 'mcp:read'
+PENDING_TTL = 15 * 60
+_LOG = logging.getLogger('sidzen.oauth')
+_REJECTION_TIMES = {}
+_REJECTION_LOCK = threading.Lock()
+
+def _reject(reason):
+    """Emit only fixed labels, rate limited per worker; never log request data."""
+    if reason not in ('origin','form','csrf','ticket'): raise ValueError('Invalid diagnostic')
+    now=time.monotonic()
+    with _REJECTION_LOCK:
+        last=_REJECTION_TIMES.get(reason)
+        if last is None or now-last>=10:
+            _REJECTION_TIMES[reason]=now
+            _LOG.warning('OAuth consent rejected: %s',reason)
+    raise OAuthError('invalid_request')
 # A successful authorization form redirects to a validated provider callback.
 # Chromium enforces form-action across that redirect, so the consent page must
 # allow the approved callback origins in addition to its same-origin POST.
@@ -151,7 +168,7 @@ class OAuthStore:
                 raise OAuthError('invalid_request')
             nonce=secrets.token_urlsafe(32)
             payload={'nonce':nonce,'client':client[0],'redirect':data['redirect_uri'],'state':state,
-                     'challenge':data['code_challenge'],'scope':scope,'resource':resource,'expires':self.clock()+300}
+                     'challenge':data['code_challenge'],'scope':scope,'resource':resource,'expires':self.clock()+PENDING_TTL}
             encoded=base64.urlsafe_b64encode(json.dumps(payload,separators=(',',':'),ensure_ascii=True).encode()).rstrip(b'=').decode()
             signature=base64.urlsafe_b64encode(hmac.new(self.signing_key,encoded.encode('ascii'),hashlib.sha256).digest()).rstrip(b'=').decode()
             ticket=encoded+'.'+signature
@@ -166,7 +183,7 @@ class OAuthStore:
         try:
             payload=json.loads(base64.urlsafe_b64decode(encoded+'='*((-len(encoded))%4)))
             nonce=payload['nonce'];expires=payload['expires']
-            if not isinstance(nonce,str) or not VALUE_RE.fullmatch(nonce) or not isinstance(csrf,str) or not hmac.compare_digest(nonce,csrf) or type(expires) not in (int,float) or not self.clock()<expires<=self.clock()+300:
+            if not isinstance(nonce,str) or not VALUE_RE.fullmatch(nonce) or not isinstance(csrf,str) or not hmac.compare_digest(nonce,csrf) or type(expires) not in (int,float) or not self.clock()<expires<=self.clock()+PENDING_TTL:
                 raise ValueError()
             row=(payload['client'],payload['redirect'],payload['state'],payload['challenge'],payload['scope'],payload['resource'])
             if not all(isinstance(x,str) for x in row) or row[1] not in CALLBACKS: raise ValueError()
@@ -298,17 +315,27 @@ def handle(environ,start,store,keys,origin):
                 '<input type="hidden" name="csrf" value="'+nonce+'"><input type="hidden" name="ticket" value="'+ticket+'"><label for="mcp-key">Ключ MCP из кабинета</label>'
                 '<input id="mcp-key" type="password" name="key" required autocomplete="off" maxlength="47">'
                 '<button>Разрешить доступ</button></form><p><a href="/settings">Открыть настройки ключей</a></p></main>')
-            return reply('200 OK',document('Подключение MCP',page),kind='text/html; charset=utf-8',extra=[('Set-Cookie','__Host-mcp-oauth='+nonce+'; Path=/; Max-Age=300; Secure; HttpOnly; SameSite=Lax')],csp=OAUTH_CSP)
+            return reply('200 OK',document('Подключение MCP',page),kind='text/html; charset=utf-8',extra=[('Set-Cookie','__Host-mcp-oauth-'+nonce+'='+nonce+'; Path=/; Max-Age=900; Secure; HttpOnly; SameSite=Lax')],csp=OAUTH_CSP)
         if path=='/oauth/authorize' and method=='POST':
-            if environ.get('HTTP_ORIGIN')!=origin: raise OAuthError('invalid_request')
-            data=params(read_body('application/x-www-form-urlencoded'))
-            if set(data)!={'csrf','ticket','key'}: raise OAuthError('invalid_request')
+            if environ.get('HTTP_ORIGIN')!=origin: _reject('origin')
+            try: data=params(read_body('application/x-www-form-urlencoded'))
+            except OAuthError: _reject('form')
+            if set(data)!={'csrf','ticket','key'}: _reject('form')
             cookie=SimpleCookie()
             try: cookie.load(environ.get('HTTP_COOKIE',''))
-            except Exception: raise OAuthError('invalid_request') from None
-            csrf=data['csrf']; stored=cookie.get('__Host-mcp-oauth')
+            except Exception: _reject('csrf')
+            csrf=data['csrf']
             ticket=data['ticket']
-            if not VALUE_RE.fullmatch(csrf) or len(ticket)>3000 or not re.fullmatch(r'[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}',ticket) or not stored or not hmac.compare_digest(csrf,stored.value): raise OAuthError('invalid_request')
+            if not VALUE_RE.fullmatch(csrf): _reject('csrf')
+            if len(ticket)>3000 or not re.fullmatch(r'[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}',ticket): _reject('ticket')
+            cookie_name='__Host-mcp-oauth-'+csrf
+            stored=cookie.get(cookie_name)
+            # Previously rendered forms used one fixed cookie name. Preserve
+            # already-open valid authorizations during a rolling deployment.
+            if not stored:
+                cookie_name='__Host-mcp-oauth'
+                stored=cookie.get(cookie_name)
+            if not stored or not hmac.compare_digest(csrf,stored.value): _reject('csrf')
             key_id=keys.check_token(data['key'])
             if not key_id:
                 page=('<main id="content"><h1>Ключ не подошёл</h1><p>Проверьте ключ MCP и попробуйте снова.</p>'
@@ -316,10 +343,11 @@ def handle(environ,start,store,keys,origin):
                     '<label for="mcp-key">Ключ MCP из кабинета</label><input id="mcp-key" type="password" name="key" required autocomplete="off" maxlength="47">'
                     '<button>Разрешить доступ</button></form><p><a href="/settings">Настройки ключей</a></p></main>')
                 return reply('403 Forbidden',document('Ключ не подошёл',page),kind='text/html; charset=utf-8',csp=OAUTH_CSP)
-            code,redirect,state=store.approve(ticket,csrf,key_id)
+            try: code,redirect,state=store.approve(ticket,csrf,key_id)
+            except OAuthError: _reject('ticket')
             query={'code':code,'iss':origin}
             if state:query['state']=state
-            return reply('303 See Other','',kind='text/html; charset=utf-8',extra=[('Location',redirect+'?'+urlencode(query)),('Set-Cookie','__Host-mcp-oauth=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax')],csp=OAUTH_CSP)
+            return reply('303 See Other','',kind='text/html; charset=utf-8',extra=[('Location',redirect+'?'+urlencode(query)),('Set-Cookie',cookie_name+'=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax')],csp=OAUTH_CSP)
         if path=='/oauth/token' and method=='POST':
             data=params(read_body('application/x-www-form-urlencoded'))
             basic=None; auth=environ.get('HTTP_AUTHORIZATION','')
@@ -333,6 +361,12 @@ def handle(environ,start,store,keys,origin):
             return reply('200 OK',store.exchange(data,resource,basic))
         return error('invalid_request','405 Method Not Allowed')
     except OAuthError as exc:
+        if path=='/oauth/authorize' and method=='POST' and exc.code=='invalid_request':
+            page=('<main id="content"><h1>Подключение прервано</h1><p>Сессия подключения истекла или была прервана. '
+                  'Вернитесь в Claude, Grok или ChatGPT и начните подключение заново. '
+                  'Затем введите ранее созданный ключ MCP в течение 15 минут.</p>'
+                  '<p><a href="/settings">Открыть настройки ключей</a></p></main>')
+            return reply('400 Bad Request',document('Подключение прервано',page),kind='text/html; charset=utf-8')
         return error(exc.code,'401 Unauthorized' if exc.code=='invalid_client' else '400 Bad Request')
     except (sqlite3.Error,OverflowError):
         return error('temporarily_unavailable','503 Service Unavailable')

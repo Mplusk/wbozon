@@ -1,8 +1,10 @@
 """Security and compatibility tests for OAuth MCP; synthetic credentials only."""
 import base64, hashlib, io, json, secrets, sqlite3, tempfile, threading, unittest
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 from urllib.parse import urlencode, urlsplit, parse_qs
 from external_keys import KeyStore
+import oauth_mcp
 from oauth_mcp import OAuthStore,OAuthError,handle,SCOPE
 from ui import CSP
 
@@ -104,8 +106,65 @@ class Tests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(approve,range(4)))
         self.assertEqual(sum(results),1)
         with sqlite3.connect(self.path) as c:self.assertEqual(c.execute('select count(*) from oauth_pending_used').fetchone()[0],1)
-        expired,csrf,_,_=self.store.begin(self.auth_params(),self.resource);self.now+=301
+        expired,csrf,_,_=self.store.begin(self.auth_params(),self.resource);self.now+=901
         with self.assertRaises(OAuthError):self.store.approve(expired,csrf,self.key_id)
+    def test_parallel_consent_cookies_and_legacy_cookie_are_independent(self):
+        import re
+        def form():
+            r=self.request('/oauth/authorize',query=urlencode(self.auth_params()))
+            self.assertIn('Max-Age=900',r['headers']['Set-Cookie'])
+            self.assertIn('Secure; HttpOnly; SameSite=Lax',r['headers']['Set-Cookie'])
+            cookie=r['headers']['Set-Cookie'].split(';')[0]
+            nonce=cookie.split('=',1)[1]
+            ticket=re.search(r'name="ticket" value="([A-Za-z0-9_.-]+)"',r['body']).group(1)
+            return cookie,nonce,ticket
+        c1,n1,t1=form();c2,n2,t2=form()
+        self.assertNotEqual(c1.split('=',1)[0],c2.split('=',1)[0])
+        cookies=c1+'; '+c2
+        for cookie,nonce,ticket in [(c1,n1,t1),(c2,n2,t2)]:
+            body=urlencode({'csrf':nonce,'ticket':ticket,'key':self.secret}).encode()
+            result=self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=cookies,origin=self.origin)
+            self.assertEqual(result['status'],'303 See Other')
+            self.assertTrue(result['headers']['Set-Cookie'].startswith(cookie.split('=',1)[0]+'=;'))
+        _,legacy_nonce,legacy_ticket=form()
+        legacy='__Host-mcp-oauth='+legacy_nonce
+        body=urlencode({'csrf':legacy_nonce,'ticket':legacy_ticket,'key':self.secret}).encode()
+        result=self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=legacy,origin=self.origin)
+        self.assertEqual(result['status'],'303 See Other')
+        self.assertTrue(result['headers']['Set-Cookie'].startswith('__Host-mcp-oauth=;'))
+    def test_fifteen_minute_ttl_and_recovery_page_do_not_expose_input(self):
+        import re
+        def form():
+            r=self.request('/oauth/authorize',query=urlencode(self.auth_params()))
+            cookie=r['headers']['Set-Cookie'].split(';')[0];nonce=cookie.split('=',1)[1]
+            ticket=re.search(r'name="ticket" value="([A-Za-z0-9_.-]+)"',r['body']).group(1)
+            return cookie,nonce,ticket
+        cookie,nonce,ticket=form();self.now+=301
+        body=urlencode({'csrf':nonce,'ticket':ticket,'key':self.secret}).encode()
+        self.assertEqual(self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=cookie,origin=self.origin)['status'],'303 See Other')
+        cookie,nonce,ticket=form();self.now+=901
+        body=urlencode({'csrf':nonce,'ticket':ticket,'key':self.secret}).encode()
+        r=self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=cookie,origin=self.origin)
+        self.assertEqual(r['status'],'400 Bad Request');self.assertIn('Подключение прервано',r['body'])
+        self.assertIn('начните подключение заново',r['body']);self.assertNotIn(self.secret,r['body'])
+        self.assertNotIn(ticket,r['body']);self.assertNotIn(nonce,r['body'])
+        self.assertEqual(r['headers']['Cache-Control'],'no-store');self.assertIn('text/html',r['headers']['Content-Type'])
+    def test_diagnostics_are_fixed_categories_without_request_values(self):
+        import re
+        r=self.request('/oauth/authorize',query=urlencode(self.auth_params()))
+        cookie=r['headers']['Set-Cookie'].split(';')[0];nonce=cookie.split('=',1)[1]
+        ticket=re.search(r'name="ticket" value="([A-Za-z0-9_.-]+)"',r['body']).group(1)
+        body=urlencode({'csrf':nonce,'ticket':ticket,'key':self.secret}).encode()
+        oauth_mcp._REJECTION_TIMES.clear()
+        with patch.object(oauth_mcp._LOG,'warning') as warning:
+            self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=cookie,origin='https://attacker.invalid')
+            self.request('/oauth/authorize','POST',body=b'bad',content='application/x-www-form-urlencoded',cookie=cookie,origin=self.origin)
+            self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie='',origin=self.origin)
+            self.now+=901
+            self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=cookie,origin=self.origin)
+            categories=[call.args[1] for call in warning.call_args_list]
+            self.assertEqual(categories,['origin','form','csrf','ticket'])
+            self.assertNotIn(self.secret,str(warning.call_args_list));self.assertNotIn(ticket,str(warning.call_args_list));self.assertNotIn(nonce,str(warning.call_args_list))
     def test_rejects_redirect_and_dcr_abuse(self):
         for url in ['https://evil.example/callback','https://claude.ai.evil.example/api/mcp/auth_callback','https://claude.ai/api/mcp/auth_callback?evil=1']:
             with self.assertRaises(OAuthError):self.store.register({'redirect_uris':[url]})
