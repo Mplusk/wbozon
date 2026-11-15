@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Loopback-only, bounded CONNECT relay for the two marketplace API hosts."""
+"""Loopback-only, bounded CONNECT relay for fixed marketplace API hosts."""
 import ipaddress
 import json
 import select
@@ -12,7 +12,8 @@ import time
 
 HOST = '127.0.0.1'
 PORT = 18761
-ALLOWED = frozenset(('api-seller.ozon.ru', 'discounts-prices-api.wildberries.ru'))
+ALLOWED = frozenset(('api-seller.ozon.ru', 'discounts-prices-api.wildberries.ru',
+                     'content-api.wildberries.ru', 'common-api.wildberries.ru'))
 MAX_CLIENTS = 8
 MAX_HEADERS = 8192
 HEADER_TIMEOUT = 5
@@ -20,7 +21,7 @@ DNS_TIMEOUT = 3
 CONNECT_TIMEOUT = 5
 IDLE_TIMEOUT = 20
 TOTAL_TIMEOUT = 60
-MAX_TUNNEL_BYTES = 4 * 1024 * 1024
+MAX_TUNNEL_BYTES = 8 * 1024 * 1024
 
 RESOLVER = '''import json,socket,sys
 items=socket.getaddrinfo(sys.argv[1],443,type=socket.SOCK_STREAM)

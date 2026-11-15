@@ -7,7 +7,7 @@ This separate working directory extends the audited stdlib WSGI email-login prot
 - Authenticated `/settings` UI; values never returned after save. Changes require a session established in the last five minutes, CSRF and exact Origin.
 - AES-256-GCM vault, independent random nonce per write, provider name as associated data. Ciphertexts only in the vault SQLite DB. Loss of master key loses access; access to both key and DB permits decryption.
 - `/api/read`: server-to-server POST, separate high-entropy bearer token. Only its SHA256 hash is configured at the VPS. Browser session and `oai-authenticated-user-id` do NOT authenticate this API.
-- Minimal operations: `ozon_products`, `wb_prices`, first page only, limit 1–100. Exact static hosts, paths/methods, redirects disabled, TLS verification, a 20-second subprocess deadline including DNS and response reads, bounded response and narrow output field projection. Credentials are sent to the worker through stdin rather than command-line arguments or environment. Standard proxy and Python SSL CA environment settings are inherited; unrelated application environment variables are not. SQLite lock waits for checks/previews are shortened, but the network deadline does not guarantee a total HTTP deadline if process creation, disk I/O or client body reads stall. No generic proxy endpoint, no writes, no credentials returned.
+- Read-only operations: Ozon products and prices; Wildberries products, prices, commissions and box tariffs. Pagination and filters are validated per operation. Exact static hosts, paths/methods, redirects disabled, TLS verification, a 20-second subprocess deadline including DNS and response reads, bounded response and narrow output field projection. Credentials are sent to the worker through stdin rather than command-line arguments or environment. Standard proxy and Python SSL CA environment settings are inherited; unrelated application environment variables are not. SQLite lock waits for checks/previews are shortened, but the network deadline does not guarantee a total HTTP deadline if process creation, disk I/O or client body reads stall. No generic proxy endpoint, no writes, no credentials returned.
 - Credential files loaded by `create_portal`; SMTP password is not put in Docker environment.
 
 ## Configuration, not performed
@@ -27,10 +27,10 @@ All secret files must be provisioned outside Git/build context, least-privilege 
 
 The portal records only the last completed, authorized and valid `/api/read` operation per credential (MCP-specific or existing bridge), with a timestamp and fixed outcome. Authenticated requests rejected by the rate limiter are also recorded with an unknown operation, without parsing the body. It does not log tokens, request arguments, responses or exception details; browser marketplace checks do not count. Activity writes are best-effort so a temporary storage failure does not prevent a read. An MCP-key request demonstrates use of that credential, not a continuously active MCP connection; no history before this feature was enabled is available.
 
-## Sites integration — not activated
+## Sites integration
 Keep current Sites OAuth/owner-lock. Only after owner verification, a separate Sites adapter would call fixed `https://3dprinta.shop/api/read` using the narrowly scoped bearer credential stored in Sites secrets. Do not accept the upstream host or credentials as tool parameters. No forwarding Sites OAuth tokens to the VPS. Responses remain untrusted evidence. This prototype is NOT itself an OAuth MCP server; it is a dedicated read API for a trusted bridge.
 
-Registration of any new connector and end-to-end live traffic are unverified. Current production Sites tool names should not be silently changed to imply seven operations while only two are implemented here.
+The owner-only Sites connector calls this API with its separately scoped MCP token. Individual operations depend on the seller token rights and provider availability; verify live responses before claiming success.
 
 ## Known limits / production gates
 - 34 local unit tests passed, including a clean virtual-environment install from requirements.txt. No live seller request, SMTP send, browser QA or deploy occurred.

@@ -6,6 +6,7 @@ from email.message import EmailMessage
 from urllib.parse import parse_qs, urlsplit
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from app import LoginApp, smtp_mailer
+import ozon_mcp, wb_mcp
 
 FIELDS = {'ozon': ('client_id', 'api_key'), 'wb': ('api_token',)}
 CHECK_OPERATIONS = {'ozon':'ozon_products', 'wb':'wb_prices'}
@@ -18,7 +19,10 @@ CHECK_MESSAGES = {
     'unavailable':'Маркетплейс временно недоступен. Повторите проверку позже.',
     'failed':'Не удалось подтвердить соединение. Проверьте настройки и повторите позже.',
 }
-BRIDGE_OPERATIONS = {'ozon_products':'товары Ozon', 'wb_prices':'цены Wildberries', 'unknown':'операция не определена'}
+BRIDGE_OPERATIONS = {'unknown':'операция не определена', 'ozon_products':'товары Ozon',
+    'ozon_prices':'цены Ozon', 'wb_products':'товары Wildberries',
+    'wb_prices':'цены Wildberries', 'wb_commissions':'комиссии Wildberries',
+    'wb_box_tariffs':'тарифы Wildberries'}
 BRIDGE_OUTCOMES = {'ok':'данные получены', 'not_configured':'ключ не добавлен', 'failed':'не удалось получить данные', 'rate_limited':'превышен лимит запросов'}
 
 class Vault:
@@ -94,53 +98,18 @@ def decode_provider_payload(raw):
     return payload
 
 def _provider_read(operation, args, creds):
-    limit = args.get('limit', 20)
-    allowed={'limit','nm_id'} if operation=='wb_prices' else {'limit'}
-    nm_id=args.get('nm_id')
-    if type(limit) is not int or not 1 <= limit <= 100 or set(args)-allowed:
-        raise ValueError('Invalid arguments')
-    if 'nm_id' in args and (type(nm_id) is not int or not 1<=nm_id<=9223372036854775807 or limit!=1):
-        raise ValueError('Invalid WB article')
-    if operation == 'ozon_products':
-        req = urllib.request.Request('https://api-seller.ozon.ru/v3/product/list',
-            data=json.dumps({'filter': {'visibility':'ALL'}, 'limit':limit, 'last_id':''}).encode(),
-            headers={'Client-Id':creds['client_id'], 'Api-Key':creds['api_key'], 'Content-Type':'application/json'}, method='POST')
-    elif operation == 'wb_prices':
-        req = urllib.request.Request('https://discounts-prices-api.wildberries.ru/api/v2/list/goods/filter?limit='+str(limit)+'&offset=0'+('&filterNmID='+str(nm_id) if nm_id is not None else ''),
-            headers={'Authorization':creds['api_token']}, method='GET')
-    else: raise ValueError('Unknown operation')
+    """One bounded, read-only provider request. Called in the deadline worker."""
+    if operation in wb_mcp.OPERATIONS:
+        return wb_mcp.read(operation, args, creds)
+    if operation not in ozon_mcp.OPERATIONS:
+        raise ValueError('Unknown operation')
+    req=ozon_mcp.build_request(operation,args,creds)
     opener=urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
-    with opener.open(req, timeout=15) as resp:
+    with opener.open(req,timeout=15) as resp:
         raw=resp.read(512001)
         if len(raw)>512000: raise ValueError('Response too large')
         data=decode_provider_payload(raw)
-    if operation=='ozon_products':
-        rows=data.get('result',{}).get('items')
-        if not isinstance(rows,list): raise ValueError('Unexpected schema')
-        keys=('product_id','offer_id','archived','is_fbo_visible','is_fbs_visible')
-    else:
-        # WB reports an error flag in its envelope; data must not override it.
-        if ('error' in data and data['error'] is not False) or data.get('errorText') not in (None,''):
-            raise ValueError('Provider reported an error')
-        rows=data.get('data',{}).get('listGoods')
-        if not isinstance(rows,list): raise ValueError('Unexpected schema')
-        keys=('nmID','vendorCode','discount','clubDiscount','currencyIsoCode4217')
-    values=list(creds.values())
-    def clean(v):
-        if isinstance(v,str):
-            for secret in values: v=v.replace(secret,'[REDACTED]')
-            return v[:256]
-        return v if type(v) in (int,float,bool) or v is None else None
-    out=[]
-    for row in rows[:limit]:
-        if not isinstance(row,dict): raise ValueError('Unexpected row')
-        item={k:clean(row[k]) for k in keys if k in row}
-        if operation=='wb_prices':
-            sizes=row.get('sizes',[])
-            if not isinstance(sizes,list): raise ValueError('Unexpected sizes')
-            item['sizes']=[{k:clean(s[k]) for k in ('sizeID','techSizeName','price','discountedPrice','clubDiscountedPrice') if k in s} for s in sizes[:100] if isinstance(s,dict)]
-        out.append(item)
-    return {'items':out, 'first_page_only':True, 'untrusted_data':True, 'read_only':True}
+    return ozon_mcp.project_response(operation,args,data,creds)
 
 PROVIDER_DEADLINE_SECONDS = 20
 PROVIDER_WORKER = os.path.realpath(__file__)
@@ -327,16 +296,29 @@ class Portal:
                 data=json.loads(body('application/json'))
                 if not isinstance(data,dict) or set(data)!={'operation','arguments'}: raise ValueError()
                 op=data['operation']; args=data['arguments']
-                if op not in ('ozon_products','wb_prices') or not isinstance(args,dict) or set(args)-{'limit'} or type(args.get('limit',20)) is not int or not 1<=args.get('limit',20)<=100: raise ValueError()
+                if op in ozon_mcp.OPERATIONS: ozon_mcp.validate_args(op,args)
+                elif op in wb_mcp.OPERATIONS:
+                    wb_mcp.validate_args(op,args)
+                    # Exact-article lookup is reserved for the browser flow.
+                    if op=='wb_prices' and 'nm_id' in args: raise ValueError()
+                else: raise ValueError()
             except (ValueError,TypeError,UnicodeError): return reply({'error':'invalid_request'},'400 Bad Request',True)
             try:
-                creds=self.vault.read('ozon' if op=='ozon_products' else 'wb')
+                creds=self.vault.read('ozon' if op in ozon_mcp.OPERATIONS else 'wb')
                 if not creds:
                     record_bridge(op,'not_configured')
                     return reply({'error':'not_configured'},'409 Conflict',True)
                 result=self.gateway(op,args,creds)
                 record_bridge(op,'ok')
                 return reply(result,json_response=True)
+            except urllib.error.HTTPError as exc:
+                record_bridge(op,'failed')
+                if exc.code in (401,403): return reply({'error':'provider_access_denied'},'403 Forbidden',True)
+                if exc.code == 429: return reply({'error':'provider_rate_limited'},'429 Too Many Requests',True)
+                return reply({'error':'read_failed'},'502 Bad Gateway',True)
+            except TimeoutError:
+                record_bridge(op,'failed')
+                return reply({'error':'provider_timeout'},'504 Gateway Timeout',True)
             except Exception:
                 record_bridge(op,'failed')
                 return reply({'error':'read_failed'},'502 Bad Gateway',True)
