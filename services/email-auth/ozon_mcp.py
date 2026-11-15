@@ -26,6 +26,24 @@ PRODUCT_FIELDS = ('product_id', 'offer_id', 'archived', 'is_fbo_visible',
 PRICE_ITEM_FIELDS = ('product_id', 'offer_id', 'acquiring', 'volume_weight')
 
 
+def build_seller_info_request(creds):
+    """Read the seller profile from a fixed endpoint; never accept a caller URL."""
+    return urllib.request.Request('https://api-seller.ozon.ru/v1/seller/info',
+        data=b'{}', headers={'Client-Id':creds['client_id'], 'Api-Key':creds['api_key'],
+                           'Content-Type':'application/json'}, method='POST')
+
+
+def project_company_currency(data, creds):
+    """Return only a safe ISO-style company currency, not an analytics currency."""
+    company = data.get('company') if isinstance(data, dict) else None
+    currency = company.get('currency') if isinstance(company, dict) else None
+    if not isinstance(currency, str) or not re.fullmatch(r'[A-Z]{3}', currency):
+        return None
+    if any(secret and secret in currency for secret in creds.values() if isinstance(secret, str)):
+        return None
+    return currency
+
+
 def _string(value, maximum):
     return isinstance(value, str) and len(value) <= maximum and not re.search(r'[\x00-\x1f\x7f]', value)
 

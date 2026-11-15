@@ -1,6 +1,7 @@
 """Local integration prototype. Browser sessions never authenticate the read API."""
 from ui import document, CSP
 import hashlib, hmac, html, json, math, os, re, secrets, sqlite3, ssl, subprocess, sys, urllib.request, urllib.error, smtplib
+import threading, time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from email.message import EmailMessage
@@ -112,7 +113,8 @@ def decode_provider_payload(raw, preserve_decimal=False):
     return payload
 
 def _provider_read(operation, args, creds):
-    """One bounded, read-only provider request. Called in the deadline worker."""
+    """Bounded, read-only provider requests, within one deadline worker."""
+    started=time.monotonic()
     if operation in wb_mcp.OPERATIONS:
         return wb_mcp.read(operation, args, creds)
     if operation not in ozon_mcp.OPERATIONS:
@@ -123,7 +125,33 @@ def _provider_read(operation, args, creds):
         raw=resp.read(512001)
         if len(raw)>512000: raise ValueError('Response too large')
         data=decode_provider_payload(raw,preserve_decimal=operation=='ozon_orders_analytics')
-    return ozon_mcp.project_response(operation,args,data,creds)
+    result=ozon_mcp.project_response(operation,args,data,creds)
+    if operation=='ozon_orders_analytics':
+        # Seller info is optional. Use a daemon thread with a hard wait bound:
+        # DNS resolution may ignore urllib's socket timeout. Never let an
+        # unavailable profile discard an otherwise valid analytics response.
+        remaining=min(3.0, PROVIDER_DEADLINE_SECONDS-(time.monotonic()-started)-1.5)
+        if remaining>0:
+            found=[]
+            def read_company_currency():
+                try:
+                    profile=ozon_mcp.build_seller_info_request(creds)
+                    with urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context())).open(profile,timeout=remaining) as response:
+                        raw_profile=response.read(65537)
+                    if len(raw_profile)>65536: return
+                    currency=ozon_mcp.project_company_currency(decode_provider_payload(raw_profile),creds)
+                    if currency: found.append(currency)
+                except urllib.error.HTTPError as exc:
+                    exc.close()
+                except Exception:
+                    # This optional lookup never logs an upstream error or credentials.
+                    pass
+            worker=threading.Thread(target=read_company_currency,daemon=True)
+            worker.start(); worker.join(remaining)
+            if not worker.is_alive() and found:
+                result['company_currency']=found[0]
+                result['company_currency_source']='Ozon Seller API /v1/seller/info company.currency; company currency, not a guaranteed analytics currency.'
+    return result
 
 PROVIDER_DEADLINE_SECONDS = 20
 PROVIDER_WORKER = os.path.realpath(__file__)
