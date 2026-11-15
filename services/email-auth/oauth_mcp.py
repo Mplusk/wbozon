@@ -37,6 +37,7 @@ VERIFIER_RE = re.compile(r'[A-Za-z0-9._~-]{43,128}\Z')
 CLIENT_RE = re.compile(r'client_[A-Za-z0-9_-]{32}\Z')
 SCOPE = 'mcp:read'
 PENDING_TTL = 15 * 60
+MAX_PENDING_COOKIES = 8
 _LOG = logging.getLogger('sidzen.oauth')
 _REJECTION_TIMES = {}
 _REJECTION_LOCK = threading.Lock()
@@ -51,6 +52,21 @@ def _reject(reason):
             _REJECTION_TIMES[reason]=now
             _LOG.warning('OAuth consent rejected: %s',reason)
     raise OAuthError('invalid_request')
+
+def _obsolete_pending_cookies(raw):
+    """Retire excess cookies from our namespace without touching other cookies.
+
+    Cookie headers arrive in browser creation order for matching paths in normal
+    clients. Preserve the newest seven; the response sets the eighth. A hard
+    bound on cleanup also limits work for malformed/adversarial input.
+    """
+    if not isinstance(raw,str) or len(raw)>4096: return []
+    parsed=SimpleCookie()
+    try: parsed.load(raw)
+    except Exception: return []
+    prefix='__Host-mcp-oauth-'
+    names=[name for name in parsed if name.startswith(prefix) and VALUE_RE.fullmatch(name[len(prefix):])]
+    return names[:max(0,min(64,len(names)-(MAX_PENDING_COOKIES-1)))]
 # A successful authorization form redirects to a validated provider callback.
 # Chromium enforces form-action across that redirect, so the consent page must
 # allow the approved callback origins in addition to its same-origin POST.
@@ -315,7 +331,10 @@ def handle(environ,start,store,keys,origin):
                 '<input type="hidden" name="csrf" value="'+nonce+'"><input type="hidden" name="ticket" value="'+ticket+'"><label for="mcp-key">Ключ MCP из кабинета</label>'
                 '<input id="mcp-key" type="password" name="key" required autocomplete="off" maxlength="47">'
                 '<button>Разрешить доступ</button></form><p><a href="/settings">Открыть настройки ключей</a></p></main>')
-            return reply('200 OK',document('Подключение MCP',page),kind='text/html; charset=utf-8',extra=[('Set-Cookie','__Host-mcp-oauth-'+nonce+'='+nonce+'; Path=/; Max-Age=900; Secure; HttpOnly; SameSite=Lax')],csp=OAUTH_CSP)
+            expired=[('Set-Cookie',name+'=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax')
+                     for name in _obsolete_pending_cookies(environ.get('HTTP_COOKIE',''))]
+            expired.append(('Set-Cookie','__Host-mcp-oauth-'+nonce+'='+nonce+'; Path=/; Max-Age=900; Secure; HttpOnly; SameSite=Lax'))
+            return reply('200 OK',document('Подключение MCP',page),kind='text/html; charset=utf-8',extra=expired,csp=OAUTH_CSP)
         if path=='/oauth/authorize' and method=='POST':
             if environ.get('HTTP_ORIGIN')!=origin: _reject('origin')
             try: data=params(read_body('application/x-www-form-urlencoded'))

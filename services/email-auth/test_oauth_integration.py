@@ -50,6 +50,25 @@ class OAuthPortalIntegrationTests(unittest.TestCase):
         return self.call('/mcp','POST',{'jsonrpc':'2.0','id':1,'method':'tools/call',
             'params':{'name':'wb_prices','arguments':{'limit':1}}},json_body=True,token=token)
 
+    def test_expired_authorization_ticket_is_rejected(self):
+        raw_key=self.create_owner_key()
+        client_id=next(iter(oauth_mcp.CIMD));redirect=oauth_mcp.CIMD[client_id][0][0]
+        verifier=secrets.token_urlsafe(32)
+        challenge=base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
+        start=self.call('/oauth/authorize',query={'response_type':'code','client_id':client_id,
+            'redirect_uri':redirect,'code_challenge_method':'S256','code_challenge':challenge,
+            'scope':'mcp:read','resource':'https://3dprinta.shop/mcp','state':'expired_state'})
+        self.assertTrue(start['status'].startswith('200'))
+        nonce=re.search(r'name="csrf" value="([A-Za-z0-9_-]{43})"',start['body']).group(1)
+        ticket=re.search(r'name="ticket" value="([A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43})"',start['body']).group(1)
+        cookie=start['headers']['Set-Cookie'].split(';',1)[0]
+        self.now+=oauth_mcp.PENDING_TTL+1
+        result=self.call('/oauth/authorize','POST',{'csrf':nonce,'ticket':ticket,'key':raw_key},
+                         cookie=cookie,origin='https://3dprinta.shop')
+        self.assertTrue(result['status'].startswith('400'))
+        self.assertNotIn('Location',result['headers'])
+        self.assertNotIn(raw_key,result['body'])
+
     def test_fixed_metadata_client_identifiers_through_http(self):
         raw_key=self.create_owner_key()
         self.vault.save('ozon',{'client_id':'123','api_key':'synthetic-ozon-secret'})

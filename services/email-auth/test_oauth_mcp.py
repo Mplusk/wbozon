@@ -132,6 +132,32 @@ class Tests(unittest.TestCase):
         result=self.request('/oauth/authorize','POST',body=body,content='application/x-www-form-urlencoded',cookie=legacy,origin=self.origin)
         self.assertEqual(result['status'],'303 See Other')
         self.assertTrue(result['headers']['Set-Cookie'].startswith('__Host-mcp-oauth=;'))
+    def test_pending_cookies_are_bounded_across_repeated_authorization_attempts(self):
+        from http.cookies import SimpleCookie
+        jar={'other_session':'keep-me','__Host-mcp-oauth':'legacy-value',
+             '__Host-mcp-oauth-invalid':'unrelated-value'}
+        query=urlencode(self.auth_params())
+        for _ in range(40):
+            raw='; '.join(name+'='+value for name,value in jar.items())
+            e={'PATH_INFO':'/oauth/authorize','REQUEST_METHOD':'GET','QUERY_STRING':query,
+               'HTTP_COOKIE':raw,'wsgi.input':io.BytesIO(b''),'CONTENT_LENGTH':'0'}
+            r={}
+            def start(status,headers):r.update(status=status,headers=headers)
+            b''.join(handle(e,start,self.store,self.keys,self.origin))
+            self.assertEqual(r['status'],'200 OK')
+            for name,value in r['headers']:
+                if name!='Set-Cookie':continue
+                parsed=SimpleCookie();parsed.load(value)
+                self.assertEqual(len(parsed),1)
+                morsel=next(iter(parsed.values()))
+                if morsel['max-age']=='0': jar.pop(morsel.key,None)
+                else: jar[morsel.key]=morsel.value
+            self.assertEqual(jar['other_session'],'keep-me')
+            self.assertEqual(jar['__Host-mcp-oauth'],'legacy-value')
+            self.assertEqual(jar['__Host-mcp-oauth-invalid'],'unrelated-value')
+            pending=[name for name in jar if name.startswith('__Host-mcp-oauth-') and len(name)==len('__Host-mcp-oauth-')+43]
+            self.assertLessEqual(len(pending),8)
+            self.assertLess(len('; '.join(name+'='+value for name,value in jar.items())),4096)
     def test_fifteen_minute_ttl_and_recovery_page_do_not_expose_input(self):
         import re
         def form():
