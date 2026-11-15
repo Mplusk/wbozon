@@ -43,6 +43,23 @@ class ProviderPayloadTests(unittest.TestCase):
         result=self.read({'result':{'items':[{'product_id':456,'offer_id':'article','archived':False}]}},'ozon_products')
         self.assertEqual(result['items'][0],{'product_id':456,'offer_id':'article','archived':False})
 
+    def test_order_analytics_preserves_original_json_decimal_precision(self):
+        raw=(b'{"result":{"data":['
+             b'{"dimensions":[{"id":"2026-11-09"}],"metrics":[1234567890.123456789,2]},'
+             b'{"dimensions":[{"id":"2026-11-10"}],"metrics":[0.000000001,1]}]}}')
+        with patch('portal.urllib.request.build_opener') as build:
+            build.return_value.open.return_value.__enter__.return_value.read.return_value=raw
+            result=provider_read('ozon_orders_analytics',{'date_from':'2026-11-09','date_to':'2026-11-10'},
+                {'client_id':'123','api_key':'synthetic-secret'})
+        self.assertEqual(result['ordered_amount'],'1234567890.123456790')
+        self.assertIsNone(result['currency'])
+        json.dumps(result,allow_nan=False)
+
+    def test_order_analytics_rejects_extreme_decimal_json(self):
+        for value in (b'NaN',b'1e9999',b'1e-9999',b'0.'+b'1'*81):
+            with self.subTest(value=value),self.assertRaises(ValueError):
+                decode_provider_payload(b'{"value":'+value+b'}',preserve_decimal=True)
+
 class ProviderPayloadIntegrationTests(unittest.TestCase):
     setUp=test_portal.Tests.setUp
     tearDown=test_portal.Tests.tearDown

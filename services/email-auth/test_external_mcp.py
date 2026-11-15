@@ -38,7 +38,7 @@ class ExternalMCPTests(unittest.TestCase):
     def test_read_only_tool_list_and_matching_validation(self):
         out=self.request(self.rpc('tools/list'),headers={'HTTP_MCP_PROTOCOL_VERSION':'2025-11-25'})
         tools=out['body']['result']['tools']
-        self.assertEqual({t['name'] for t in tools}, {'ozon_products','ozon_prices','wb_products','wb_prices','wb_commissions','wb_box_tariffs'})
+        self.assertEqual({t['name'] for t in tools}, {'ozon_products','ozon_prices','ozon_orders_analytics','wb_products','wb_prices','wb_commissions','wb_box_tariffs','wb_sales_summary'})
         self.assertTrue(all(t['annotations']['readOnlyHint'] and not t['annotations']['destructiveHint'] for t in tools))
         self.assertTrue(all(t['_meta']['securitySchemes']==[{'type':'oauth2','scopes':['mcp:read']}] for t in tools))
         self.assertTrue(all(t['securitySchemes']==t['_meta']['securitySchemes'] for t in tools))
@@ -51,6 +51,17 @@ class ExternalMCPTests(unittest.TestCase):
         self.assertEqual(out['body']['id'],'client-id')
         self.assertEqual(self.calls,[('key-id','wb_prices',params['arguments'])])
         self.assertTrue(json.loads(out['body']['result']['content'][0]['text'])['read_only'])
+    def test_order_reports_accept_period_and_reject_invalid_arguments(self):
+        period={'date_from':'2026-11-02', 'date_to':'2026-11-08'}
+        for name in ('ozon_orders_analytics','wb_sales_summary'):
+            with self.subTest(name=name):
+                out=self.request(self.rpc('tools/call',{'name':name,'arguments':period}))
+                self.assertNotIn('isError',out['body']['result'])
+                self.assertEqual(self.calls[-1],('key-id',name,period))
+                before=len(self.calls)
+                invalid=self.request(self.rpc('tools/call',{'name':name,'arguments':{'date_from':'invalid','date_to':'2026-11-08'}}))
+                self.assertTrue(invalid['body']['result']['isError'])
+                self.assertEqual(len(self.calls),before)
     def test_seller_errors_are_safe_and_not_jsonrpc_errors(self):
         def fail(*_): raise mcp.MCPToolError('provider_access_denied')
         out=self.request(self.rpc('tools/call',{'name':'wb_prices'}),execute=fail)
@@ -106,7 +117,7 @@ class ExternalMCPTests(unittest.TestCase):
         self.assertIn('2025-11-25',result['supportedVersions'])
         self.assertEqual(result['_meta']['io.modelcontextprotocol/serverInfo']['name'],'sidzen-marketplace-readonly')
         listed=self.modern('tools/list')['body']['result']
-        self.assertEqual(listed['resultType'],'complete');self.assertEqual(len(listed['tools']),6)
+        self.assertEqual(listed['resultType'],'complete');self.assertEqual(len(listed['tools']),8)
         self.assertEqual((listed['ttlMs'],listed['cacheScope']),(0,'private'))
         call=self.modern('tools/call',{'name':'ozon_products','arguments':{'limit':1}})
         self.assertEqual(call['body']['result']['resultType'],'complete')

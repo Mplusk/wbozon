@@ -11,7 +11,7 @@ import urllib.request
 from datetime import date, datetime
 from urllib.parse import urlencode
 
-OPERATIONS = frozenset(('wb_products', 'wb_prices', 'wb_commissions', 'wb_box_tariffs'))
+OPERATIONS = frozenset(('wb_products', 'wb_prices', 'wb_commissions', 'wb_box_tariffs', 'wb_sales_summary'))
 MAX_ROW_BODY = 512000
 MAX_TABLE_BODY = 4000000
 
@@ -39,10 +39,11 @@ def validate_args(operation, args):
         'wb_prices': {'limit', 'offset', 'nm_id'},
         'wb_commissions': {'limit', 'subject_id', 'search'},
         'wb_box_tariffs': {'limit', 'date', 'warehouse'},
+        'wb_sales_summary': {'limit', 'offset', 'date_from', 'date_to'},
     }[operation]
     if set(args) - allowed:
         raise ValueError('Invalid arguments')
-    limit = args.get('limit', 20)
+    limit = args.get('limit', 100 if operation == 'wb_sales_summary' else 20)
     if type(limit) is not int or not 1 <= limit <= (200 if operation in ('wb_commissions','wb_box_tariffs') else 100):
         raise ValueError('Invalid limit')
     if operation == 'wb_products':
@@ -73,6 +74,19 @@ def validate_args(operation, args):
             raise ValueError('Invalid date') from None
         if 'warehouse' in args and (not isinstance(args['warehouse'], str) or len(args['warehouse']) > 100):
             raise ValueError('Invalid warehouse')
+    if operation == 'wb_sales_summary':
+        dates = []
+        for field in ('date_from', 'date_to'):
+            value = args.get(field)
+            if not isinstance(value, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+                raise ValueError('Invalid date')
+            try: dates.append(date.fromisoformat(value))
+            except ValueError: raise ValueError('Invalid date') from None
+        if dates[1] < dates[0] or (dates[1] - dates[0]).days > 364:
+            raise ValueError('Invalid period')
+        offset = args.get('offset', 0)
+        if type(offset) is not int or not 0 <= offset <= 1000000:
+            raise ValueError('Invalid offset')
     return dict(args)
 
 def _decode(raw):
@@ -91,7 +105,7 @@ def read(operation, args, creds):
     """Execute one marketplace request and return bounded, read-only data."""
     args = validate_args(operation, args)
     token = creds['api_token']
-    limit = args.get('limit', 20)
+    limit = args.get('limit', 100 if operation == 'wb_sales_summary' else 20)
     headers = {'Authorization': token, 'Accept': 'application/json'}
     if operation == 'wb_products':
         cursor = {'limit': limit}
@@ -105,9 +119,16 @@ def read(operation, args, creds):
         req = urllib.request.Request('https://discounts-prices-api.wildberries.ru/api/v2/list/goods/filter?' + urlencode(query), headers=headers, method='GET')
     elif operation == 'wb_commissions':
         req = urllib.request.Request('https://common-api.wildberries.ru/api/v1/tariffs/commission', headers=headers, method='GET')
+    elif operation == 'wb_sales_summary':
+        body = json.dumps({'selectedPeriod': {'start': args['date_from'], 'end': args['date_to']},
+                           'skipDeletedNm': False, 'limit': limit, 'offset': args.get('offset', 0)}).encode()
+        headers['Content-Type'] = 'application/json'
+        req = urllib.request.Request('https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/products', data=body, headers=headers, method='POST')
     else:
         req = urllib.request.Request('https://common-api.wildberries.ru/api/v1/tariffs/box?' + urlencode({'date': args['date']}), headers=headers, method='GET')
-    cap = MAX_TABLE_BODY if operation in ('wb_commissions','wb_box_tariffs') else MAX_ROW_BODY
+    # The sales-funnel API includes many nested, unused statistics per product;
+    # bound that raw envelope separately from our much smaller projected output.
+    cap = MAX_TABLE_BODY if operation in ('wb_commissions','wb_box_tariffs','wb_sales_summary') else MAX_ROW_BODY
     opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
     with opener.open(req, timeout=15) as response:
         raw = response.read(cap + 1)
@@ -191,6 +212,40 @@ def read(operation, args, creds):
         if 'subject_id' in args: items=[row for row in items if row.get('subjectID')==args['subject_id']]
         if args.get('search'): items=[row for row in items if args['search'].casefold() in str(row.get('subjectName','')).casefold()]
         result.update(items=items[:limit], matched_rows=len(items), returned_rows=min(len(items),limit), truncated=len(items)>limit)
+    elif operation == 'wb_sales_summary':
+        nested = data.get('data')
+        rows = nested.get('products') if isinstance(nested, dict) else None
+        if not isinstance(rows, list) or len(rows) > limit:
+            raise ValueError('Unexpected sales schema')
+        currency = nested.get('currency')
+        if not isinstance(currency, str) or not re.fullmatch(r'[A-Za-z]{3}', currency):
+            raise ValueError('Missing sales currency')
+        items = []
+        metric_names = ('orderCount', 'orderSum', 'buyoutCount', 'buyoutSum', 'cancelCount', 'cancelSum')
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get('product'), dict):
+                raise ValueError('Unexpected sales product')
+            statistic = row.get('statistic')
+            selected = statistic.get('selected') if isinstance(statistic, dict) else None
+            if not isinstance(selected, dict) or any(type(selected.get(k)) is not int or selected[k] < 0 for k in metric_names):
+                raise ValueError('Unexpected sales metrics')
+            period = selected.get('period')
+            if not isinstance(period, dict) or period.get('start') != args['date_from'] or period.get('end') != args['date_to']:
+                raise ValueError('Unexpected sales period')
+            items.append({'product': project(row['product'], ('nmId', 'title', 'vendorCode', 'brandName', 'subjectId', 'subjectName')),
+                          'metrics': project(selected, metric_names)})
+        offset = args.get('offset', 0)
+        has_more = len(items) == limit
+        next_offset = offset + len(items) if has_more and offset + len(items) <= 1000000 else None
+        page_totals = {key: clean(sum(row['statistic']['selected'][key] for row in rows)) for key in metric_names}
+        result.update(items=items, currency=currency.upper(), date_from=args['date_from'], date_to=args['date_to'],
+                      offset=offset, next_offset=next_offset, has_more=has_more, page_totals=page_totals,
+                      complete=(offset == 0 and not has_more),
+                      note='Данные WB по датам заказа; выкупы, отмены и возвраты относятся к дате заказа. '
+                           'Отчёт предварительный, обновляется с задержкой; это не выплаты и не прибыль. '
+                           'page_totals относится только к текущей странице. Для итога сложите суммы всех страниц, '
+                           'не представляйте неполную выборку как итог. '
+                           'WB может обновить данные между страницами; при has_more и отсутствии next_offset выборка неполная.')
     else:
         envelope=data.get('response')
         table=envelope.get('data') if isinstance(envelope, dict) else None

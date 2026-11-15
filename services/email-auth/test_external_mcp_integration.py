@@ -118,7 +118,7 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
         self.assertTrue(self.mcp(message,token,'https://attacker.invalid')['status'].startswith('403'))
         result=self.mcp(message,token)
         self.assertEqual(result['headers'].get('Cache-Control'),'no-store')
-        self.assertEqual(len(json.loads(result['body'])['result']['tools']),6)
+        self.assertEqual(len(json.loads(result['body'])['result']['tools']),8)
 
 
 if __name__ == '__main__': unittest.main()

@@ -43,6 +43,8 @@ TOOLS = [
     _tool('ozon_prices', 'Чтение цен и комиссий товаров Ozon.',
           {'limit':_integer(1,100), 'cursor':_text(512),
            'offer_ids':{'type':'array','maxItems':100,'items':_text(256)}}),
+    _tool('ozon_orders_analytics', 'Аналитика заказов Ozon за период включительно, по дням, максимум 90 дней. Выручка здесь означает стоимость заказанных товаров, а не выкуп, прибыль или выплаты. Сравнивайте с суммой заказов WB, не с выкупами. Не складывайте суммы площадок без подтверждения одинаковой валюты.',
+          {'date_from':{'type':'string','format':'date'}, 'date_to':{'type':'string','format':'date'}}, ('date_from','date_to')),
     _tool('wb_products', 'Чтение страницы собственных карточек Wildberries.',
           {'limit':_integer(1,100), 'updated_at':_text(64), 'nm_id':_integer(1,9007199254740991)}),
     _tool('wb_prices', 'Чтение страницы собственных цен Wildberries.',
@@ -52,6 +54,9 @@ TOOLS = [
     _tool('wb_box_tariffs', 'Чтение тарифов Wildberries на короба для указанной даты.',
           {'date':{'type':'string','pattern':r'^\d{4}-\d{2}-\d{2}$'},
            'limit':_integer(1,200), 'warehouse':_text(100)}, ('date',)),
+    _tool('wb_sales_summary', 'Аналитика Wildberries за период включительно: сумма и количество заказов, выкупов и отмен. Выкупы привязаны к дате заказа. Получите все страницы и не выдавайте неполный итог за полный; сравнивайте сумму заказов с Ozon, не смешивая её с выкупами. Не складывайте суммы площадок без подтверждения одинаковой валюты.',
+          {'date_from':{'type':'string','format':'date'}, 'date_to':{'type':'string','format':'date'},
+           'limit':_integer(1,100), 'offset':_integer(0,1000000)}, ('date_from','date_to')),
 ]
 TOOL_NAMES = frozenset(tool['name'] for tool in TOOLS)
 

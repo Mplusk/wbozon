@@ -75,8 +75,35 @@ class WBOperations(unittest.TestCase):
         self.assertEqual(urlsplit(request.full_url).hostname,'common-api.wildberries.ru')
         self.assertEqual(parse_qs(urlsplit(request.full_url).query),{'date':['2026-11-15']})
         self.assertEqual(result['currency'],'RUB');self.assertEqual(result['items'],[{'warehouseName':'A','boxDeliveryBase':'100'}])
+    def test_sales_funnel_period_pagination_and_separate_metrics(self):
+        args={'date_from':'2026-11-09','date_to':'2026-11-15','limit':1}
+        row={'product':{'nmId':13,'vendorCode':self.secret,'title':'item','phone':self.secret},
+             'statistic':{'selected':{'period':{'start':args['date_from'],'end':args['date_to']},
+                'orderCount':4,'orderSum':400,'buyoutCount':2,'buyoutSum':200,'cancelCount':1,'cancelSum':100}}}
+        result,request=self.read('wb_sales_summary',args,{'data':{'currency':'RUB','products':[row]}})
+        self.assertEqual(request.full_url,'https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/products')
+        self.assertEqual(request.method,'POST')
+        self.assertEqual(json.loads(request.data),{'selectedPeriod':{'start':args['date_from'],'end':args['date_to']},'skipDeletedNm':False,'limit':1,'offset':0})
+        self.assertEqual(result['items'][0]['product'],{'nmId':13,'vendorCode':'[REDACTED]','title':'item'})
+        self.assertEqual(result['items'][0]['metrics'],{'orderCount':4,'orderSum':400,'buyoutCount':2,'buyoutSum':200,'cancelCount':1,'cancelSum':100})
+        self.assertEqual(result['page_totals'],result['items'][0]['metrics'])
+        self.assertEqual(result['currency'],'RUB'); self.assertFalse(result['complete']);self.assertTrue(result['has_more']);self.assertEqual(result['next_offset'],1)
+        result,_=self.read('wb_sales_summary',{**args,'offset':1},{'data':{'currency':'RUB','products':[]}})
+        self.assertFalse(result['complete']);self.assertFalse(result['has_more']);self.assertIsNone(result['next_offset'])
+        result,_=self.read('wb_sales_summary',{**args,'limit':2},{'data':{'currency':'RUB','products':[row]}})
+        self.assertTrue(result['complete'])
+        result,request=self.read('wb_sales_summary',{'date_from':args['date_from'],'date_to':args['date_to']},{'data':{'currency':'RUB','products':[row,row]}})
+        self.assertEqual(json.loads(request.data)['limit'],100)
+        self.assertEqual(result['page_totals']['orderSum'],800)
+        self.assertEqual(result['page_totals']['buyoutSum'],400)
+        self.assertEqual(result['page_totals']['cancelSum'],200)
+        self.assertTrue(result['complete'])
+    def test_sales_funnel_incomplete_schema_never_implies_zero(self):
+        args={'date_from':'2026-11-09','date_to':'2026-11-15'}
+        for payload in ({'data':{'products':[]}}, {'data':{'currency':'RUB','products':[{'product':{},'statistic':{'selected':{}}}]}}, {'data':{'currency':'RUB','products':'bad'}}):
+            with self.subTest(payload=payload),self.assertRaises(ValueError):self.read('wb_sales_summary',args,payload)
     def test_invalid_inputs_fail_before_network(self):
-        invalid=[('wb_products',{'nm_id':1}),('wb_products',{'updated_at':'not-date','nm_id':1}),('wb_products',{'updated_at':'2026-01-01T00:00:00Z','nm_id':True}),('wb_prices',{'offset':-1}),('wb_prices',{'offset':1,'nm_id':1,'limit':1}),('wb_prices',{'limit':True}),('wb_prices',{'url':'https://example.com'}),('wb_commissions',{'search':'x'*101}),('wb_commissions',{'subject_id':True}),('wb_box_tariffs',{'date':'2026-02-30'}),('wb_box_tariffs',{'date':'2026-01-01','warehouse':'x'*101})]
+        invalid=[('wb_products',{'nm_id':1}),('wb_products',{'updated_at':'not-date','nm_id':1}),('wb_products',{'updated_at':'2026-01-01T00:00:00Z','nm_id':True}),('wb_prices',{'offset':-1}),('wb_prices',{'offset':1,'nm_id':1,'limit':1}),('wb_prices',{'limit':True}),('wb_prices',{'url':'https://example.com'}),('wb_commissions',{'search':'x'*101}),('wb_commissions',{'subject_id':True}),('wb_box_tariffs',{'date':'2026-02-30'}),('wb_box_tariffs',{'date':'2026-01-01','warehouse':'x'*101}),('wb_sales_summary',{}),('wb_sales_summary',{'date_from':'2026-02-30','date_to':'2026-03-01'}),('wb_sales_summary',{'date_from':'2026-11-15','date_to':'2026-11-09'}),('wb_sales_summary',{'date_from':'2024-01-01','date_to':'2026-01-01'}),('wb_sales_summary',{'date_from':'2026-01-01','date_to':'2026-01-02','offset':True})]
         with patch('wb_mcp.urllib.request.build_opener') as opener:
             for op,args in invalid:
                 with self.subTest(op=op,args=args),self.assertRaises(ValueError):wb_mcp.read(op,args,self.creds)

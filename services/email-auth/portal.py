@@ -2,6 +2,7 @@
 from ui import document, CSP
 import hashlib, hmac, html, json, math, os, re, secrets, sqlite3, ssl, subprocess, sys, urllib.request, urllib.error, smtplib
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from email.message import EmailMessage
 from urllib.parse import parse_qs, urlsplit
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -20,9 +21,9 @@ CHECK_MESSAGES = {
     'failed':'Не удалось подтвердить соединение. Проверьте настройки и повторите позже.',
 }
 BRIDGE_OPERATIONS = {'unknown':'операция не определена', 'ozon_products':'товары Ozon',
-    'ozon_prices':'цены Ozon', 'wb_products':'товары Wildberries',
+    'ozon_prices':'цены Ozon', 'ozon_orders_analytics':'заказы Ozon', 'wb_products':'товары Wildberries',
     'wb_prices':'цены Wildberries', 'wb_commissions':'комиссии Wildberries',
-    'wb_box_tariffs':'тарифы Wildberries'}
+    'wb_box_tariffs':'тарифы Wildberries', 'wb_sales_summary':'заказы и выкупы Wildberries'}
 OAUTH_PATHS = frozenset(('/.well-known/oauth-protected-resource',
     '/.well-known/oauth-protected-resource/mcp', '/.well-known/oauth-authorization-server',
     '/oauth/register', '/oauth/authorize', '/oauth/token'))
@@ -89,10 +90,20 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
-def decode_provider_payload(raw):
+def decode_provider_payload(raw, preserve_decimal=False):
     """Reject non-JSON constants and numeric overflow before normalizing data."""
     def reject_constant(value): raise ValueError('Invalid provider JSON number')
     def finite_float(value):
+        if preserve_decimal:
+            # Restrict both precision and exponent before constructing/summing a
+            # provider-controlled decimal. Other operations keep their old types.
+            if len(value) > 80: raise ValueError('Invalid provider JSON number')
+            try: number=Decimal(value)
+            except InvalidOperation: raise ValueError('Invalid provider JSON number') from None
+            if (not number.is_finite() or len(number.as_tuple().digits) > 80
+                    or abs(number.as_tuple().exponent) > 80 or abs(number.adjusted()) > 80):
+                raise ValueError('Invalid provider JSON number')
+            return number
         number=float(value)
         if not math.isfinite(number): raise ValueError('Invalid provider JSON number')
         return number
@@ -111,7 +122,7 @@ def _provider_read(operation, args, creds):
     with opener.open(req,timeout=15) as resp:
         raw=resp.read(512001)
         if len(raw)>512000: raise ValueError('Response too large')
-        data=decode_provider_payload(raw)
+        data=decode_provider_payload(raw,preserve_decimal=operation=='ozon_orders_analytics')
     return ozon_mcp.project_response(operation,args,data,creds)
 
 PROVIDER_DEADLINE_SECONDS = 20

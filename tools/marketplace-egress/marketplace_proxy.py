@@ -13,7 +13,8 @@ import time
 HOST = '127.0.0.1'
 PORT = 18761
 ALLOWED = frozenset(('api-seller.ozon.ru', 'discounts-prices-api.wildberries.ru',
-                     'content-api.wildberries.ru', 'common-api.wildberries.ru'))
+                     'content-api.wildberries.ru', 'common-api.wildberries.ru',
+                     'seller-analytics-api.wildberries.ru'))
 MAX_CLIENTS = 8
 MAX_HEADERS = 8192
 HEADER_TIMEOUT = 5

@@ -13,7 +13,7 @@ class RelayTests(unittest.TestCase):
     def test_allowlist_contains_only_required_marketplace_hosts(self):
         self.assertEqual(proxy.ALLOWED, {'api-seller.ozon.ru',
             'discounts-prices-api.wildberries.ru', 'content-api.wildberries.ru',
-            'common-api.wildberries.ru'})
+            'common-api.wildberries.ru', 'seller-analytics-api.wildberries.ru'})
 
     def run_connection(self, payload, resolver=None, connector=None):
         server, client = socket.socketpair()

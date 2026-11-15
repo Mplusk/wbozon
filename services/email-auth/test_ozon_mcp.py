@@ -83,5 +83,36 @@ class OzonBridgeTests(unittest.TestCase):
             ozon.project_response('ozon_prices', {'limit': 1},
                 {'items': [{'price': {'price': float('nan')}}]}, self.creds)
 
+    def test_order_analytics_daily_aggregation_is_bounded_and_exact(self):
+        args = {'date_from': '2026-11-09', 'date_to': '2026-11-15'}
+        request = ozon.build_request('ozon_orders_analytics', args, self.creds)
+        self.assertEqual(request.full_url, 'https://api-seller.ozon.ru/v1/analytics/data')
+        self.assertEqual(json.loads(request.data), {**args, 'metrics': ['revenue', 'ordered_units'],
+            'dimension': ['day'], 'limit': 100, 'offset': 0})
+        data = {'timestamp': '2026-11-16 00:00:00', 'result': {'data': [
+            {'dimensions': [{'id': '2026-11-09', 'name': 'untrusted'}], 'metrics': [0.1, 2]},
+            {'dimensions': [{'id': '2026-11-15'}], 'metrics': [0.2, 1]}]}}
+        result = ozon.project_response('ozon_orders_analytics', args, data, self.creds)
+        self.assertEqual(result['ordered_amount'], '0.3')
+        self.assertEqual(result['ordered_units'], '3')
+        self.assertTrue(result['complete'])
+        self.assertEqual([r['date'] for r in result['days']], ['2026-11-09', '2026-11-15'])
+        self.assertNotIn('untrusted', json.dumps(result['days']))
+
+    def test_order_analytics_rejects_invalid_ranges_and_response(self):
+        for args in ({'date_from': '2026-02-30', 'date_to': '2026-03-01'},
+                     {'date_from': '2026-02-02', 'date_to': '2026-02-01'},
+                     {'date_from': '2026-01-01', 'date_to': '2026-04-01'},
+                     {'date_from': '2026-01-01', 'date_to': '2026-01-02', 'offset': 1}):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                ozon.validate_args('ozon_orders_analytics', args)
+        args = {'date_from': '2026-11-09', 'date_to': '2026-11-15'}
+        good = {'dimensions': [{'id': '2026-11-09'}], 'metrics': [10.5, 2]}
+        for rows in ([good, good], [{'dimensions': [{'id': '2026-11-16'}], 'metrics': [2, 1]}],
+                     [{'dimensions': [{'id': '2026-11-09'}], 'metrics': [float('nan'), 1]}],
+                     [{'dimensions': [{'id': '2026-11-09'}], 'metrics': [1, 1.5]}]):
+            with self.subTest(rows=rows), self.assertRaises(ValueError):
+                ozon.project_response('ozon_orders_analytics', args, {'result': {'data': rows}}, self.creds)
+
 
 if __name__ == '__main__': unittest.main()
