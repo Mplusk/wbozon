@@ -128,8 +128,8 @@ def _provider_read(operation, args, creds):
         out.append(item)
     return {'items':out, 'first_page_only':True, 'untrusted_data':True, 'read_only':True}
 
-PROVIDER_DEADLINE_SECONDS = 15
-PROVIDER_WORKER = os.path.abspath(__file__)
+PROVIDER_DEADLINE_SECONDS = 20
+PROVIDER_WORKER = os.path.realpath(__file__)
 
 def provider_read(operation, args, creds):
     """Bound the entire provider operation, including DNS and response reads.
