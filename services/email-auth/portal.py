@@ -18,6 +18,8 @@ CHECK_MESSAGES = {
     'unavailable':'Маркетплейс временно недоступен. Повторите проверку позже.',
     'failed':'Не удалось подтвердить соединение. Проверьте настройки и повторите позже.',
 }
+BRIDGE_OPERATIONS = {'ozon_products':'товары Ozon', 'wb_prices':'цены Wildberries', 'unknown':'операция не определена'}
+BRIDGE_OUTCOMES = {'ok':'данные получены', 'not_configured':'ключ не добавлен', 'failed':'не удалось получить данные', 'rate_limited':'превышен лимит запросов'}
 
 class Vault:
     def __init__(self, path, key):
@@ -26,6 +28,7 @@ class Vault:
         with sqlite3.connect(path) as c:
             c.execute('CREATE TABLE IF NOT EXISTS vault(provider TEXT PRIMARY KEY, blob BLOB NOT NULL)')
             c.execute('CREATE TABLE IF NOT EXISTS connection_checks(provider TEXT PRIMARY KEY, version TEXT NOT NULL, outcome TEXT NOT NULL, checked_at REAL NOT NULL)')
+            c.execute("CREATE TABLE IF NOT EXISTS bridge_activity(source TEXT PRIMARY KEY CHECK(source IN ('bridge','mcp')), operation TEXT NOT NULL, outcome TEXT NOT NULL, completed_at REAL NOT NULL)")
     def save(self, provider, values):
         nonce = secrets.token_bytes(12)
         blob = nonce + self.aead.encrypt(nonce, json.dumps(values).encode(), provider.encode())
@@ -63,6 +66,17 @@ class Vault:
     def present(self):
         with sqlite3.connect(self.path, timeout=0.5) as c:
             return {r[0] for r in c.execute('SELECT provider FROM vault')}
+    def record_bridge_activity(self, source, operation, outcome, completed_at):
+        if source not in ('bridge','mcp') or operation not in BRIDGE_OPERATIONS or outcome not in BRIDGE_OUTCOMES: raise ValueError('Invalid bridge activity')
+        # A delayed writer must not overwrite a more recently completed request.
+        with sqlite3.connect(self.path, timeout=0.5) as c:
+            c.execute('INSERT INTO bridge_activity VALUES (?,?,?,?) ON CONFLICT(source) DO UPDATE SET operation=excluded.operation, outcome=excluded.outcome, completed_at=excluded.completed_at WHERE excluded.completed_at >= bridge_activity.completed_at', (source,operation,outcome,completed_at))
+    def bridge_activity(self, source):
+        if source not in ('bridge','mcp'): raise ValueError('Invalid bridge source')
+        with sqlite3.connect(self.path, timeout=0.5) as c:
+            row=c.execute('SELECT operation,outcome,completed_at FROM bridge_activity WHERE source=?',(source,)).fetchone()
+        if row and (row[0] not in BRIDGE_OPERATIONS or row[1] not in BRIDGE_OUTCOMES): raise ValueError('Invalid bridge activity')
+        return row
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -233,9 +247,12 @@ def render_preview(provider, result, fetched_at, sensitive_values=(), lookup_nm_
     return document(title,content)
 
 class Portal:
-    def __init__(self, login, vault, read_token_hash, gateway=provider_read):
+    def __init__(self, login, vault, read_token_hash, gateway=provider_read, mcp_read_token_hash=None):
         if not re.fullmatch(r'[0-9a-f]{64}',read_token_hash): raise ValueError('Expected SHA256 token hash')
+        if mcp_read_token_hash is not None and (not re.fullmatch(r'[0-9a-f]{64}',mcp_read_token_hash) or hmac.compare_digest(read_token_hash,mcp_read_token_hash)):
+            raise ValueError('Expected distinct SHA256 MCP token hash')
         self.login,self.vault,self.token_hash,self.gateway=login,vault,read_token_hash,gateway
+        self.mcp_token_hash=mcp_read_token_hash
     def request_budget(self, provider, now):
         """Read-only local limiter snapshot. It neither reserves nor grants a request."""
         if provider not in CHECK_OPERATIONS: raise ValueError('Invalid provider')
@@ -290,9 +307,22 @@ class Portal:
             if method!='POST': return reply({'error':'method'},'405 Method Not Allowed',True)
             # Browser cookies, Origin and Sites identity header confer no API authority.
             auth=e.get('HTTP_AUTHORIZATION','')
-            if not re.fullmatch(r'Bearer [A-Za-z0-9_-]{43,128}',auth) or not hmac.compare_digest(hashlib.sha256(auth[7:].encode()).hexdigest(),self.token_hash):
+            if not re.fullmatch(r'Bearer [A-Za-z0-9_-]{43,128}',auth):
                 return reply({'error':'unauthorized'},'401 Unauthorized',True)
-            if not self.login.permit('api',30,60): return reply({'error':'rate_limited'},'429 Too Many Requests',True)
+            supplied_hash=hashlib.sha256(auth[7:].encode()).hexdigest()
+            bridge_authorized=hmac.compare_digest(supplied_hash,self.token_hash)
+            mcp_authorized=hmac.compare_digest(supplied_hash,self.mcp_token_hash or '0'*64)
+            if not (bridge_authorized or (self.mcp_token_hash is not None and mcp_authorized)):
+                return reply({'error':'unauthorized'},'401 Unauthorized',True)
+            source='mcp' if self.mcp_token_hash is not None and mcp_authorized else 'bridge'
+            def record_bridge(operation,outcome):
+                # Observability must not change the response of an authorised read.
+                try: self.vault.record_bridge_activity(source,operation,outcome,self.login.clock())
+                except Exception: pass
+            if not self.login.permit('api',30,60):
+                # The body has not been validated, so do not trust or record its operation.
+                record_bridge('unknown','rate_limited')
+                return reply({'error':'rate_limited'},'429 Too Many Requests',True)
             try:
                 data=json.loads(body('application/json'))
                 if not isinstance(data,dict) or set(data)!={'operation','arguments'}: raise ValueError()
@@ -301,10 +331,15 @@ class Portal:
             except (ValueError,TypeError,UnicodeError): return reply({'error':'invalid_request'},'400 Bad Request',True)
             try:
                 creds=self.vault.read('ozon' if op=='ozon_products' else 'wb')
-                if not creds: return reply({'error':'not_configured'},'409 Conflict',True)
+                if not creds:
+                    record_bridge(op,'not_configured')
+                    return reply({'error':'not_configured'},'409 Conflict',True)
                 result=self.gateway(op,args,creds)
+                record_bridge(op,'ok')
                 return reply(result,json_response=True)
-            except Exception: return reply({'error':'read_failed'},'502 Bad Gateway',True)
+            except Exception:
+                record_bridge(op,'failed')
+                return reply({'error':'read_failed'},'502 Bad Gateway',True)
         if path in ('/settings/check','/settings/preview','/settings/wb-lookup') and method!='POST': return reply('Method not allowed','405 Method Not Allowed')
         if method not in ('GET','POST'): return reply('Method not allowed','405 Method Not Allowed')
         sid=self.login.cookies(e).get('__Host-sid','')
@@ -457,7 +492,19 @@ class Portal:
                 ident=provider+'-'+field
                 content+=f'<p class="field"><label for="{ident}">{labels[field]}</label><input id="{ident}" type="password" name="{field}" autocomplete="off" required maxlength="2048"></p>'
             content+='<button>'+('Заменить сохранённый ключ' if saved else 'Сохранить ключ')+'</button></form></section>'
-        content+='</div><section class="mcp-card" aria-labelledby="mcp-title"><h2 id="mcp-title">Связь с MCP</h2><p>Статус подключения MCP здесь не проверяется. Наличие ключей в кабинете не означает, что ассистент уже получает данные.</p></section></main>'
+        content+='</div><section class="mcp-card" aria-labelledby="mcp-title"><h2 id="mcp-title">Связь с MCP</h2><div>'
+        try:
+            for source,label in (('mcp','MCP'),('bridge','другого подключённого клиента')):
+                activity=self.vault.bridge_activity(source)
+                if activity:
+                    operation,outcome,completed_at=activity
+                    stamp=datetime.fromtimestamp(completed_at,timezone.utc).strftime('%d.%m.%Y %H:%M:%S UTC')
+                    content+='<p><strong>Последнее обращение '+label+':</strong> '+stamp+' — '+BRIDGE_OPERATIONS[operation]+', '+BRIDGE_OUTCOMES[outcome]+'.</p>'
+                else:
+                    content+='<p><strong>Обращений '+label+' пока не зафиксировано.</strong></p>'
+        except (sqlite3.Error,ValueError,TypeError,OverflowError,OSError):
+            content+='<p>Не удалось загрузить сведения об обращениях к API кабинета.</p>'
+        content+='<p>Показаны последние завершённые обращения к API кабинета с момента включения учёта. MCP определяется по отдельному ключу доступа и появится здесь, только если интеграция использует этот API; проверки и просмотр в кабинете не учитываются. Это не проверка текущего подключения MCP. <a href="/settings">Обновить сведения</a>.</p></div></section></main>'
         return reply(document('Подключение кабинетов',content,progress=True))
 
 def secret_file(name, binary=False):
@@ -477,7 +524,8 @@ def create_portal():
     # Production file mounts are configured by the operator, never by request input.
     login=LoginApp(os.environ['DATABASE_PATH'],secret_file('SESSION_SECRET_FILE'),os.environ.get('BASE_URL','https://3dprinta.shop'),mailer=file_smtp_mailer)
     vault=Vault(os.environ['VAULT_PATH'],secret_file('VAULT_KEY_FILE',True))
-    return Portal(login,vault,secret_file('READ_TOKEN_HASH_FILE'))
+    mcp_hash=secret_file('MCP_READ_TOKEN_HASH_FILE') if 'MCP_READ_TOKEN_HASH_FILE' in os.environ else None
+    return Portal(login,vault,secret_file('READ_TOKEN_HASH_FILE'),mcp_read_token_hash=mcp_hash)
 
 if __name__ == '__main__' and sys.argv[1:] == ['--provider-worker']:
     _provider_worker()

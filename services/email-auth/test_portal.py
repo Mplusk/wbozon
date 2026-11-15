@@ -101,6 +101,13 @@ class FactoryTests(unittest.TestCase):
                 path=base/key;path.write_bytes(value);env[key]=str(path)
             with patch.dict(os.environ,env,clear=True):
                 instance=create_portal();self.assertIsInstance(instance,Portal)
+                mcp_path=base/'mcp-hash'
+                mcp_hash=hashlib.sha256(secrets.token_bytes(32)).hexdigest()
+                mcp_path.write_text(mcp_hash,encoding='ascii')
+                with patch.dict(os.environ,{'MCP_READ_TOKEN_HASH_FILE':str(mcp_path)}):
+                    self.assertEqual(create_portal().mcp_token_hash,mcp_hash)
+                    mcp_path.write_text(values['READ_TOKEN_HASH_FILE'].decode(),encoding='ascii')
+                    with self.assertRaises(ValueError):create_portal()
                 (base/'VAULT_KEY_FILE').unlink()
                 with self.assertRaises(FileNotFoundError):create_portal()
             with patch.dict(os.environ,{'SESSION_SECRET':'not-used'},clear=True):

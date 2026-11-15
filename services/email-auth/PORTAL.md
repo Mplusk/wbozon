@@ -19,10 +19,13 @@ Environment contains paths only:
 - SESSION_SECRET_FILE: >=32-character random signing secret.
 - VAULT_KEY_FILE: exactly 32 random binary bytes, outside repository and backups unless separately protected.
 - READ_TOKEN_HASH_FILE: SHA256 hex of a separately generated random server-to-server token (at least 32 random bytes, token_urlsafe encoded).
+- MCP_READ_TOKEN_HASH_FILE (optional): SHA256 hex of a different random MCP bridge token. The existing read token remains valid; the optional hash must differ. Only hashes and secret file paths belong on the portal server.
 - SMTP_PASSWORD_FILE: SMTP password for no-reply@3dprinta.shop.
 - BASE_URL=https://3dprinta.shop.
 
 All secret files must be provisioned outside Git/build context, least-privilege read-only mounts; DB directories private to service UID. Do not log headers, cookies, URL query strings or bodies at proxy/app/APM layers. No secret values in command lines, build args, test fixtures or source.
+
+The portal records only the last completed, authorized and valid `/api/read` operation per credential (MCP-specific or existing bridge), with a timestamp and fixed outcome. Authenticated requests rejected by the rate limiter are also recorded with an unknown operation, without parsing the body. It does not log tokens, request arguments, responses or exception details; browser marketplace checks do not count. Activity writes are best-effort so a temporary storage failure does not prevent a read. An MCP-key request demonstrates use of that credential, not a continuously active MCP connection; no history before this feature was enabled is available.
 
 ## Sites integration — not activated
 Keep current Sites OAuth/owner-lock. Only after owner verification, a separate Sites adapter would call fixed `https://3dprinta.shop/api/read` using the narrowly scoped bearer credential stored in Sites secrets. Do not accept the upstream host or credentials as tool parameters. No forwarding Sites OAuth tokens to the VPS. Responses remain untrusted evidence. This prototype is NOT itself an OAuth MCP server; it is a dedicated read API for a trusted bridge.

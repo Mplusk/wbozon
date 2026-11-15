@@ -11,7 +11,8 @@ class SettingsUXTests(unittest.TestCase):
         page=self.request()['body']
         self.assertEqual(page.count('Ключ: не добавлен.'),2)
         self.assertEqual(page.count('Соединение с маркетплейсом: не проверено.'),2)
-        self.assertIn('Статус подключения MCP здесь не проверяется.',page)
+        self.assertIn('Обращений MCP пока не зафиксировано.',page)
+        self.assertIn('Это не проверка текущего подключения MCP.',page)
         self.assertNotIn('настроено',page)
         self.assertFalse(self.calls)
 
