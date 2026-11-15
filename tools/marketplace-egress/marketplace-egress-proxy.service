@@ -1,0 +1,32 @@
+[Unit]
+Description=Loopback CONNECT relay for marketplace APIs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=marketplace-egress
+Group=marketplace-egress
+WorkingDirectory=/opt/marketplace-egress
+ExecStart=/usr/bin/python3 -B /opt/marketplace-egress/marketplace_proxy.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+UMask=0077
+MemoryMax=256M
+TasksMax=32
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target
