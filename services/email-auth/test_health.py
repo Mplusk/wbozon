@@ -8,7 +8,8 @@ class HealthTests(unittest.TestCase):
  def setUp(self):
   self.login=SimpleNamespace(origin='https://3dprinta.shop',cookies=Mock(side_effect=AssertionError('must not inspect sessions')),connect=Mock(side_effect=AssertionError('must not open database')))
   self.vault=Mock();self.gateway=Mock(side_effect=AssertionError('must not call seller API'))
-  self.app=Portal(self.login,self.vault,'0'*64,self.gateway)
+  self.external_keys=Mock()
+  self.app=Portal(self.login,self.vault,'0'*64,self.gateway,external_key_store=self.external_keys)
  def request(self,method='GET',host='3dprinta.shop',cookie=''):
   stream=Mock();stream.read.side_effect=AssertionError('must not read request body')
   e={'PATH_INFO':'/healthz','REQUEST_METHOD':method,'HTTP_HOST':host,'HTTP_COOKIE':cookie,'wsgi.input':stream,'CONTENT_LENGTH':'999999'}
@@ -30,6 +31,6 @@ class HealthTests(unittest.TestCase):
    with self.subTest(host=host):self.assertEqual(self.request(host=host)['status'],'400 Bad Request')
  def test_cookie_never_changes_health_or_reads_session(self):
   self.assertEqual(self.request(cookie='__Host-sid='+'a'*43)['body'],b'{"status":"ok"}')
-  self.login.cookies.assert_not_called();self.login.connect.assert_not_called();self.gateway.assert_not_called();self.assertEqual(self.vault.mock_calls,[])
+  self.login.cookies.assert_not_called();self.login.connect.assert_not_called();self.gateway.assert_not_called();self.assertEqual(self.vault.mock_calls,[]);self.assertEqual(self.external_keys.mock_calls,[])
 
 if __name__=='__main__':unittest.main()

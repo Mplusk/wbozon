@@ -6,7 +6,7 @@ from email.message import EmailMessage
 from urllib.parse import parse_qs, urlsplit
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from app import LoginApp, smtp_mailer
-import ozon_mcp, wb_mcp
+import ozon_mcp, wb_mcp, external_keys, external_mcp
 
 FIELDS = {'ozon': ('client_id', 'api_key'), 'wb': ('api_token',)}
 CHECK_OPERATIONS = {'ozon':'ozon_products', 'wb':'wb_prices'}
@@ -216,12 +216,13 @@ def render_preview(provider, result, fetched_at, sensitive_values=(), lookup_nm_
     return document(title,content)
 
 class Portal:
-    def __init__(self, login, vault, read_token_hash, gateway=provider_read, mcp_read_token_hash=None):
+    def __init__(self, login, vault, read_token_hash, gateway=provider_read, mcp_read_token_hash=None, external_key_store=None):
         if not re.fullmatch(r'[0-9a-f]{64}',read_token_hash): raise ValueError('Expected SHA256 token hash')
         if mcp_read_token_hash is not None and (not re.fullmatch(r'[0-9a-f]{64}',mcp_read_token_hash) or hmac.compare_digest(read_token_hash,mcp_read_token_hash)):
             raise ValueError('Expected distinct SHA256 MCP token hash')
         self.login,self.vault,self.token_hash,self.gateway=login,vault,read_token_hash,gateway
         self.mcp_token_hash=mcp_read_token_hash
+        self.external_keys=external_key_store if external_key_store is not None else external_keys.KeyStore(vault.path)
     def request_budget(self, provider, now):
         """Read-only local limiter snapshot. It neither reserves nor grants a request."""
         if provider not in CHECK_OPERATIONS: raise ValueError('Invalid provider')
@@ -248,13 +249,31 @@ class Portal:
                     present=c.execute('SELECT 1 FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),self.login.clock())).fetchone()
                 if present:
                     start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
-        if path not in ('/settings','/settings/check','/settings/preview','/settings/wb-lookup','/api/read','/healthz'):
+        if path not in ('/settings','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/mcp','/api/read','/healthz'):
             return self.login(e,start)
         def reply(text,code='200 OK',json_response=False):
             if not json_response and not text.lstrip().lower().startswith('<!doctype'): text=document('Кабинет', '<main id="content" class="error-card"><h1>Кабинет</h1><p>'+text+'</p></main>')
             body=(json.dumps(text) if json_response else text).encode()
             start(code,[('Content-Type','application/json' if json_response else 'text/html; charset=utf-8'),('Content-Length',str(len(body))),('Cache-Control','no-store'),('Referrer-Policy','no-referrer' if json_response else 'strict-origin'),('X-Content-Type-Options','nosniff'),('Content-Security-Policy',CSP)]); return [body]
         if e.get('HTTP_HOST')!=urlsplit(self.login.origin).netloc: return reply('Invalid host','400 Bad Request')
+        if path=='/mcp':
+            def authenticate(token):
+                key_id=self.external_keys.check_token(token)
+                return key_id if key_id and self.external_keys.mark_used(key_id,self.login.clock()) else None
+            def execute(key_id,operation,args):
+                try:
+                    if not self.login.permit('external-mcp:'+key_id,30,60) or not self.login.permit('api',30,60):
+                        raise external_mcp.MCPToolError('rate_limited')
+                    creds=self.vault.read('ozon' if operation in ozon_mcp.OPERATIONS else 'wb')
+                    if not creds: raise external_mcp.MCPToolError('not_configured')
+                    return self.gateway(operation,args,creds)
+                except urllib.error.HTTPError as exc:
+                    code='provider_access_denied' if exc.code in (401,403) else 'rate_limited' if exc.code==429 else 'unavailable'
+                    exc.close()
+                    raise external_mcp.MCPToolError(code) from None
+                except TimeoutError:
+                    raise external_mcp.MCPToolError('provider_timeout') from None
+            return external_mcp.handle(e,start,authenticate,execute,self.login.origin)
         if path=='/healthz':
             # Liveness only: no session, credential, database, SMTP or seller access.
             # This does not assert that downstream integrations are configured/healthy.
@@ -335,6 +354,30 @@ class Portal:
         except sqlite3.Error:
             return reply('Сервис временно недоступен. Повторите позже. <a href="/settings">Настройки</a>','503 Service Unavailable')
         if not session: return reply('Войдите заново на главной странице.','401 Unauthorized')
+        if path in ('/settings/mcp/create','/settings/mcp/revoke'):
+            if method!='POST': return reply('Method not allowed','405 Method Not Allowed')
+            if e.get('HTTP_ORIGIN')!=self.login.origin: return reply('Forbidden','403 Forbidden')
+            if session[0]-43200 < now-300: return reply('Для изменения ключей войдите заново по письму.','403 Forbidden')
+            try:
+                form=parse_qs(body('application/x-www-form-urlencoded'),max_num_fields=3,keep_blank_values=True,strict_parsing=True)
+                if any(len(v)!=1 for v in form.values()): raise ValueError()
+                form={k:v[0] for k,v in form.items()}
+                csrf=form.get('csrf','')
+                if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
+                if path=='/settings/mcp/create':
+                    if set(form)!={'csrf','request_id','name'}: raise ValueError()
+                    name=form['name'].strip()
+                    _,token=self.external_keys.create(name,form['request_id'],now)
+                    return reply(document('Ключ создан',external_keys.render_created(name,token,self.login.origin)))
+                if set(form)!={'csrf','key_id'}: raise ValueError()
+                if not self.external_keys.revoke(form['key_id'],now): return reply('Ключ уже отозван или не найден. <a href="/settings">Настройки</a>','409 Conflict')
+            except external_keys.DuplicateRequestError:
+                return reply('Этот запрос уже выполнен. Создайте новый ключ в настройках.','409 Conflict')
+            except external_keys.KeyLimitError:
+                return reply('Достигнут лимит активных ключей. Отзовите ненужный ключ.','409 Conflict')
+            except (ValueError,TypeError,UnicodeError): return reply('Проверьте введённые значения.','400 Bad Request')
+            except sqlite3.Error: return reply('Не удалось изменить ключ. Повторите позже.','503 Service Unavailable')
+            start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]); return [b'']
         if path in ('/settings/check','/settings/preview','/settings/wb-lookup'):
             if e.get('HTTP_ORIGIN')!=self.login.origin: return reply('Forbidden','403 Forbidden')
             try:
@@ -486,7 +529,12 @@ class Portal:
                     content+='<p><strong>Обращений '+label+' пока не зафиксировано.</strong></p>'
         except (sqlite3.Error,ValueError,TypeError,OverflowError,OSError):
             content+='<p>Не удалось загрузить сведения об обращениях к API кабинета.</p>'
-        content+='<p>Показаны последние завершённые обращения к API кабинета с момента включения учёта. MCP определяется по отдельному ключу доступа и появится здесь, только если интеграция использует этот API; проверки и просмотр в кабинете не учитываются. Это не проверка текущего подключения MCP. <a href="/settings">Обновить сведения</a>.</p></div></section></main>'
+        content+='<p>Показаны последние завершённые обращения к API кабинета с момента включения учёта. MCP определяется по отдельному ключу доступа и появится здесь, только если интеграция использует этот API; проверки и просмотр в кабинете не учитываются. Это не проверка текущего подключения MCP. <a href="/settings">Обновить сведения</a>.</p></div></section>'
+        try:
+            content+=external_keys.render_section(self.external_keys,session[1],session[0]-43200 >= now-300,self.login.origin)
+        except (sqlite3.Error,ValueError,TypeError,OverflowError,OSError):
+            content+='<p>Не удалось загрузить ключи для других ИИ. Повторите позже.</p>'
+        content+='</main>'
         return reply(document('Подключение кабинетов',content,progress=True))
 
 def secret_file(name, binary=False):
