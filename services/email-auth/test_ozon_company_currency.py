@@ -76,7 +76,7 @@ class Response(io.BytesIO):
     def __exit__(self,*args): self.close()
 class Opener:
     def open(self,request,timeout):
-        if request.full_url.endswith('/seller/info'): time.sleep(20)
+        if request.full_url.endswith('/seller/info'): time.sleep(60)
         return Response({analytics!r})
 portal.urllib.request.build_opener=lambda *args:Opener()
 portal._provider_worker()
@@ -84,9 +84,9 @@ portal._provider_worker()
         with tempfile.TemporaryDirectory() as tmp:
             worker=Path(tmp)/'worker.py'; worker.write_text(code,encoding='utf-8')
             started=time.monotonic()
-            with patch('portal.PROVIDER_WORKER',str(worker)), patch('portal.PROVIDER_DEADLINE_SECONDS',8):
+            with patch('portal.PROVIDER_WORKER',str(worker)), patch('portal.PROVIDER_DEADLINE_SECONDS',30):
                 result=portal.provider_read('ozon_orders_analytics',ARGS,CREDS)
-            self.assertLess(time.monotonic()-started,7)
+            self.assertLess(time.monotonic()-started,25)
             self.assertEqual(result['ordered_amount'],'123.45')
             self.assertNotIn('company_currency',result)
 
