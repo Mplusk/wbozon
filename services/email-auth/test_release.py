@@ -207,7 +207,9 @@ class PortalRuntimeContractTests(unittest.TestCase):
         self.assertIn('portal:create_portal()',dockerfile)
         self.assertIn('portal.py smoke.py candidate.py',dockerfile)
         ignore=(root/'.dockerignore').read_text()
-        for name in ('portal.py','smoke.py','candidate.py'): self.assertIn('!'+name,ignore)
+        for name in ('portal.py','smoke.py','candidate.py','ozon_mcp.py','wb_mcp.py'):
+            self.assertIn('!'+name,ignore)
+            self.assertIn(name,dockerfile)
         source=(root/'deploy/release.py').read_text()
         self.assertNotIn('--env-file',source)
         self.assertNotIn('SESSION_SECRET=',source)

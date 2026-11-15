@@ -4,6 +4,8 @@
 !requirements.txt
 !Dockerfile
 !portal.py
+!ozon_mcp.py
+!wb_mcp.py
 !ui.py
 !smoke.py
 !candidate.py
