@@ -34,6 +34,7 @@ def _tool(name, description, properties, required=()):
             'inputSchema':{'type':'object', 'properties':properties,
                            'required':list(required), 'additionalProperties':False},
             'annotations':dict(ANNOTATIONS),
+            'securitySchemes':[{'type':'oauth2','scopes':['mcp:read']}],
             '_meta':{'securitySchemes':[{'type':'oauth2','scopes':['mcp:read']}]}}
 
 TOOLS = [

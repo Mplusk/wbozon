@@ -41,6 +41,7 @@ class ExternalMCPTests(unittest.TestCase):
         self.assertEqual({t['name'] for t in tools}, {'ozon_products','ozon_prices','wb_products','wb_prices','wb_commissions','wb_box_tariffs'})
         self.assertTrue(all(t['annotations']['readOnlyHint'] and not t['annotations']['destructiveHint'] for t in tools))
         self.assertTrue(all(t['_meta']['securitySchemes']==[{'type':'oauth2','scopes':['mcp:read']}] for t in tools))
+        self.assertTrue(all(t['securitySchemes']==t['_meta']['securitySchemes'] for t in tools))
     def test_notifications_are_accepted_without_response_body_or_execution(self):
         out=self.request({'jsonrpc':'2.0','method':'notifications/initialized'})
         self.assertEqual(out['status'],'202 Accepted');self.assertIsNone(out['body']);self.assertFalse(self.calls)
