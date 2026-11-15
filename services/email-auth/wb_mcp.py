@@ -115,6 +115,9 @@ def read(operation, args, creds):
     data = _decode(raw)
     def clean(value, max_length=256):
         if isinstance(value, str): return value.replace(token, '[REDACTED]')[:max_length] if token else value[:max_length]
+        # JavaScript cannot safely represent all int64 values. Preserve larger
+        # integers as decimal text rather than silently rounding identifiers.
+        if type(value) is int and abs(value) > 9007199254740991: return str(value)
         return value if type(value) in (int, float, bool) or value is None else None
     def project(row, fields):
         if not isinstance(row, dict): raise ValueError('Unexpected row')

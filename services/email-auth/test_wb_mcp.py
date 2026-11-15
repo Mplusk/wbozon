@@ -37,6 +37,19 @@ class WBOperations(unittest.TestCase):
         self.assertEqual(item['sizes'],[{'chrtID':5,'skus':['[REDACTED]']}])
         self.assertEqual(item['characteristics'],[{'id':3,'name':'n','value':['text','[REDACTED]']}])
         self.assertEqual(item['photos'],[{'big':'https://example.invalid/[REDACTED]'}])
+    def test_large_integers_are_decimal_strings_without_rounding(self):
+        huge=9007199254740993
+        payload={'cards':[{'nmID':huge,'imtID':1,'sizes':[{'chrtID':huge,'skus':[huge]}],'characteristics':[{'id':1,'value':[huge,-huge,True,42]}]}], 'cursor':{'updatedAt':'2026-11-15T12:00:00Z','nmID':123,'total':1}}
+        result,_=self.read('wb_products',{'limit':1},payload)
+        item=result['items'][0]
+        self.assertEqual(item['nmID'],str(huge))
+        self.assertEqual(item['imtID'],1)
+        self.assertEqual(item['sizes'][0]['chrtID'],str(huge))
+        self.assertEqual(item['sizes'][0]['skus'],[str(huge)])
+        self.assertEqual(item['characteristics'][0]['value'],[str(huge),str(-huge),True,42])
+        self.assertEqual(result['cursor']['nmID'],123)
+        payload['cursor']['nmID']=huge
+        with self.assertRaises(ValueError):self.read('wb_products',{'limit':1},payload)
     def test_prices_offset_and_exact_product(self):
         payload={'data':{'listGoods':[{'nmID':13,'currencyIsoCode4217':'RUB','vendorCode':self.secret,'sizes':[{'price':10,'other':self.secret}]}]},'error':False}
         result,request=self.read('wb_prices',{'limit':1,'offset':20},payload)
