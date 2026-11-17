@@ -1,5 +1,5 @@
 """Liveness regression tests: no DB, credentials or network needed."""
-import io,json,unittest
+import io,json,os,tempfile,unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 from portal import Portal
@@ -7,7 +7,8 @@ from portal import Portal
 class HealthTests(unittest.TestCase):
  def setUp(self):
   self.login=SimpleNamespace(origin='https://3dprinta.shop',cookies=Mock(side_effect=AssertionError('must not inspect sessions')),connect=Mock(side_effect=AssertionError('must not open database')))
-  self.vault=Mock();self.gateway=Mock(side_effect=AssertionError('must not call seller API'))
+  self.vault=Mock();self.vault.path=os.path.join(tempfile.gettempdir(),'health-test-vault.sqlite')
+  self.gateway=Mock(side_effect=AssertionError('must not call seller API'))
   self.external_keys=Mock()
   self.oauth=Mock()
   self.app=Portal(self.login,self.vault,'0'*64,self.gateway,external_key_store=self.external_keys,oauth_store=self.oauth)
