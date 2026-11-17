@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import ozon_mcp
 import ozon_details
+import portal
 
 
 CREDS = {'client_id':'123', 'api_key':'synthetic-private-key'}
@@ -112,11 +113,38 @@ class OzonFinanceReportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ozon_mcp.project_response('ozon_accrual_day',{**DAY_ARGS,'last_id':'next'},data,CREDS)
 
+    def test_daily_filter_keeps_only_exact_posting_and_reports_unattributed_rows(self):
+        data=daily_payload()
+        other={**data['accruals'][0], 'accrual_id':103, 'unit_number':'A-10'}
+        data['accruals'].append(other)
+        args={**DAY_ARGS,'posting_number':'A-1','view':'details'}
+        request=ozon_mcp.build_request('ozon_accrual_day',args,CREDS)
+        self.assertEqual(json.loads(request.data),{'date':'2026-11-15','last_id':''})
+        result=ozon_mcp.project_response('ozon_accrual_day',args,data,CREDS)
+        self.assertEqual([r['posting_number'] for r in result['matching_rows']],['A-1'])
+        self.assertEqual(result['other_posting_entries_excluded'],1)
+        self.assertEqual(result['non_posting_category_entries_excluded'],2)
+        self.assertEqual(result['posting_filter'],'A-1')
+        self.assertEqual(result['period_completeness'],'not_verified')
+        self.assertIn('не полный',result['posting_filter_note'])
+
+    def test_daily_filter_rejects_secret_reflection(self):
+        with self.assertRaises(ValueError):
+            portal.finance_request_preflight('ozon_accrual_day',
+                {**DAY_ARGS,'posting_number':CREDS['api_key']},CREDS)
+        with self.assertRaises(ValueError):
+            portal.finance_request_preflight('ozon_accrual_day',
+                {**DAY_ARGS,'last_id':CREDS['api_key']},CREDS)
+        with self.assertRaises(ValueError):
+            ozon_mcp.project_response('ozon_accrual_day',
+                {**DAY_ARGS,'posting_number':CREDS['api_key']},daily_payload(),CREDS)
+
     def test_monthly_report_uses_month_and_keeps_return_sign(self):
         req=ozon_mcp.build_request('ozon_realization_article_month',MONTH_ARGS,CREDS)
         self.assertEqual(req.full_url,'https://api-seller.ozon.ru/v1/finance/realization/posting')
         self.assertEqual(json.loads(req.data),{'year':2026,'month':10})
-        result=ozon_mcp.project_response('ozon_realization_article_month',MONTH_ARGS,monthly_payload(),CREDS)
+        result=ozon_mcp.project_response('ozon_realization_article_month',
+                                         {**MONTH_ARGS,'view':'details'},monthly_payload(),CREDS)
         self.assertEqual(result['period_basis'],'realization_report_month')
         self.assertFalse(result['order_date_filter_used'])
         self.assertEqual(result['observed_delivery_units'],2)
@@ -130,6 +158,16 @@ class OzonFinanceReportTests(unittest.TestCase):
         self.assertNotIn('private-payer',text)
         self.assertNotIn('private-customer',text)
         self.assertNotIn('private-barcode',text)
+
+    def test_monthly_summary_groups_each_sku_without_interpreting_returns(self):
+        data=monthly_payload()
+        result=ozon_mcp.project_response('ozon_realization_article_month',MONTH_ARGS,data,CREDS)
+        self.assertNotIn('selected_rows',result)
+        self.assertEqual([(row['sku'],row['observed_delivery_units'],row['observed_return_units_signed'])
+                          for row in result['by_sku']],[('10',2,None),('11',None,-1)])
+        self.assertEqual(result['by_sku'][0]['names'],['Пример'])
+        self.assertEqual(result['quantity_additivity'],'not_verified')
+        self.assertIn('не рассчитаны',result['summary_note'])
 
     def test_similar_report_rows_are_not_claimed_as_proven_unique_sales(self):
         data=monthly_payload()

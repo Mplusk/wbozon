@@ -84,6 +84,34 @@ class OzonDetailsTests(unittest.TestCase):
         self.assertFalse(result['items'][0]['sources_reported'])
         self.assertEqual(result['items'][0]['sku_candidates'], [])
 
+    def test_sku_from_stock_sources_is_mapped_and_private_stock_is_not_exposed(self):
+        row = {'id': 42, 'offer_id': 'A', 'name': 'Model', 'sku': 10,
+               'sources': [{'source': 'SDS', 'sku': 10}],
+               'stocks': {'stocks': [{'sku': 11, 'source': 'fbo', 'present': 123},
+                                      {'sku': 10, 'source': 'fbs', 'reserved': 12}]}}
+        result = details.project_response('ozon_product_info', {'skus': ['11']}, {'items': [row]}, CREDS)
+        item = result['items'][0]
+        self.assertEqual(item['sku_candidates'], ['10', '11'])
+        self.assertEqual(item['matched_identifiers'], ['11'])
+        self.assertEqual(item['stock_sources'], [{'sku': '11', 'source': 'fbo'}, {'sku': '10', 'source': 'fbs'}])
+        self.assertTrue(item['stock_sources_reported'])
+        self.assertNotIn('present', json.dumps(result))
+        self.assertNotIn('reserved', json.dumps(result))
+
+    def test_incomplete_or_unsafe_stock_identity_is_not_silently_accepted(self):
+        row = {'id': 42, 'offer_id': 'A', 'name': 'Model', 'sku': 10, 'sources': [],
+               'stocks': {'stocks': [{'sku': None, 'source': 'fbo'}]}}
+        item = details.project_response('ozon_product_info', {'offer_ids': ['A']}, {'items': [row]}, CREDS)['items'][0]
+        self.assertIn('stock_sources', item['incomplete_fields'])
+        row_with_no_source = {**row, 'sources': [{'sku': 10, 'source': None}]}
+        item = details.project_response('ozon_product_info', {'offer_ids': ['A']},
+                                        {'items': [row_with_no_source]}, CREDS)['items'][0]
+        self.assertIn('sources', item['incomplete_fields'])
+        for stocks in ([1], {'stocks': [{'sku': True, 'source': 'fbo'}]},
+                       {'stocks': [{'sku': 11, 'source': CREDS['api_key']}]}):
+            with self.subTest(stocks=stocks), self.assertRaises(ValueError):
+                details.project_response('ozon_product_info', {'offer_ids': ['A']}, {'items': [{**row, 'stocks': stocks}]}, CREDS)
+
     def test_conflicting_sku_or_offer_is_flagged(self):
         rows = [{'id': 1, 'offer_id': 'A', 'name': 'One', 'sku': 55, 'sources': []},
                 {'id': 2, 'offer_id': 'A', 'name': 'Two', 'sku': 55, 'sources': []}]

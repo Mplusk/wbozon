@@ -151,7 +151,8 @@ def _products(args, data, secret):
                    'offer_id': _text(row['offer_id'], 256, secret=secret) if row.get('offer_id') is not None else None,
                    'name': _text(row['name'], 1024, empty=True, secret=secret) if row.get('name') is not None else None,
                    'sku': _optional_sku(row.get('sku'), secret),
-                   'sources': [], 'sources_reported': 'sources' in row and row['sources'] is not None}
+                   'sources': [], 'sources_reported': 'sources' in row and row['sources'] is not None,
+                   'stock_sources': [], 'stock_sources_reported': False}
         if product['sources_reported']:
             for source in _items(row['sources'], 1000):
                 if not isinstance(source, dict): raise ValueError('Invalid product source')
@@ -160,13 +161,27 @@ def _products(args, data, secret):
                     'sku': _optional_sku(source_sku, secret),
                     'source': _text(source['source'], 128, empty=True, secret=secret)
                               if source.get('source') is not None else None})
+        stocks = row.get('stocks')
+        if stocks is not None:
+            if not isinstance(stocks, dict): raise ValueError('Invalid product stocks')
+            if stocks.get('stocks') is not None:
+                product['stock_sources_reported'] = True
+                for stock in _items(stocks['stocks'], 1000):
+                    if not isinstance(stock, dict): raise ValueError('Invalid product stock')
+                    product['stock_sources'].append({
+                        'sku': _optional_sku(stock.get('sku'), secret),
+                        'source': _text(stock['source'], 128, empty=True, secret=secret)
+                                  if stock.get('source') is not None else None})
         candidates = {s['sku'] for s in product['sources'] if s['sku']}
+        candidates.update(s['sku'] for s in product['stock_sources'] if s['sku'])
         if product['sku']: candidates.add(product['sku'])
         product['sku_candidates'] = sorted(candidates, key=int)
         incomplete = [key for key in ('product_id', 'offer_id', 'name') if not product[key]]
         if not product['sku_candidates']: incomplete.append('sku')
-        if not product['sources_reported'] or any(not x['sku'] for x in product['sources']):
+        if not product['sources_reported'] or any(not x['sku'] or not x['source'] for x in product['sources']):
             incomplete.append('sources')
+        if product['stock_sources_reported'] and any(not x['sku'] or not x['source'] for x in product['stock_sources']):
+            incomplete.append('stock_sources')
         product['incomplete_fields'] = incomplete
         index = len(products)
         products.append(product)

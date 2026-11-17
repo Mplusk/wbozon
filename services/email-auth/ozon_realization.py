@@ -17,13 +17,17 @@ ENDPOINT = 'https://api-seller.ozon.ru/v1/finance/realization/posting'
 
 
 def validate_args(args):
-    if not isinstance(args, dict) or set(args) != {'offer_id', 'year', 'month'}:
+    if (not isinstance(args, dict) or
+            set(args) - {'offer_id', 'year', 'month', 'view'} or
+            not {'offer_id', 'year', 'month'} <= set(args)):
         raise ValueError('Invalid realization arguments')
     ozon_details._text(args['offer_id'], 256)
     if type(args['year']) is not int or not 2023 <= args['year'] <= 9999:
         raise ValueError('Invalid year')
     if type(args['month']) is not int or not 1 <= args['month'] <= 12:
         raise ValueError('Invalid month')
+    if args.get('view', 'summary') not in ('summary', 'details'):
+        raise ValueError('Invalid report view')
 
 
 def build_request(args, creds):
@@ -111,13 +115,13 @@ def project_response(args, data, creds):
     return_rows = [row['return_commission'] for row in selected if row['return_commission'] is not None]
     delivered = sum(row['quantity'] for row in delivery_rows) if delivery_rows else None
     returned = sum(row['quantity'] for row in return_rows) if return_rows else None
-    return {'source': 'Ozon Seller API /v1/finance/realization/posting',
+    result = {'source': 'Ozon Seller API /v1/finance/realization/posting',
             'offer_id': args['offer_id'], 'year': args['year'], 'month': args['month'],
             'period_basis': 'realization_report_month', 'order_date_filter_used': False,
             'report_start_date': report_start, 'report_end_date': report_stop, 'currency': currency,
             'observed_delivery_units': delivered, 'observed_return_units_signed': returned,
             'observed_delivery_rows': len(delivery_rows), 'observed_return_rows': len(return_rows),
-            'returned_units_sign_convention': 'provider_value', 'selected_rows': selected,
+            'returned_units_sign_convention': 'provider_value',
             'matched_rows': len(selected), 'report_rows_with_missing_offer_id': missing_identity,
             'financial_completeness': 'not_verified', 'row_identity': 'not_verified',
             'quantity_additivity': 'not_verified', 'subsequent_returns': 'not_verified',
@@ -126,3 +130,28 @@ def project_response(args, data, creds):
                      'не подтверждены. Будущие возвраты и полнота исторических SKU не подтверждены. '
                      'Возвраты переданы со знаком Ozon, без вычитания по догадке.'),
             'read_only': True, 'untrusted_data': True}
+    if args.get('view', 'summary') == 'details':
+        result['selected_rows'] = selected
+    else:
+        groups = {}
+        for row in selected:
+            group = groups.setdefault(row['sku'], {'sku': row['sku'], 'names': set(),
+                'matched_rows': 0, 'delivery_rows': 0, 'return_rows': 0,
+                'observed_delivery_units': None, 'observed_return_units_signed': None})
+            if row['name'] is not None: group['names'].add(row['name'])
+            group['matched_rows'] += 1
+            for field, count, total in (('delivery_commission', 'delivery_rows', 'observed_delivery_units'),
+                                        ('return_commission', 'return_rows', 'observed_return_units_signed')):
+                value = row[field]
+                if value is not None:
+                    group[count] += 1
+                    group[total] = (group[total] or 0) + value['quantity']
+        result['by_sku'] = []
+        for sku in sorted(groups, key=lambda item: (item is None, int(item) if item else 0)):
+            group = groups[sku]
+            group['names'] = sorted(group['names'])
+            result['by_sku'].append(group)
+        result['summary_note'] = ('Группировка отражает только наблюдаемые количества; строки, '
+                                  'цены и суммы доступны в details. Финансовые показатели на единицу '
+                                  'не рассчитаны: полнота и правила сложения не подтверждены.')
+    return result

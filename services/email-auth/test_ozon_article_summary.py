@@ -106,6 +106,23 @@ class OzonArticleSummaryTests(unittest.TestCase):
                 self.assertIsNone(result['observations'])
                 self.assertEqual(len(opener.calls),1)
 
+    def test_stock_only_sku_is_rechecked_and_included_in_financial_filter(self):
+        item={**ITEM,'stocks':{'stocks':[{'source':'fbo','sku':12}]}}
+        opener=FakeOpener(forward={'items':[item]},reverse={'items':[item]})
+        result=self.execute(opener)
+        self.assertEqual(result['identity']['sku_candidates'],['10','11','12'])
+        self.assertEqual(result['identity']['stock_sources'],[{'source':'fbo','sku':'12'}])
+        self.assertEqual(opener.calls[1][1],{'sku':['10','11','12']})
+        self.assertEqual(result['status'],'partial')
+
+    def test_stock_source_changes_block_identity_before_finance(self):
+        forward={**ITEM,'stocks':{'stocks':[{'source':'fbo','sku':11}]}}
+        reverse={**ITEM,'stocks':{'stocks':[{'source':'fbs','sku':11}]}}
+        opener=FakeOpener(forward={'items':[forward]},reverse={'items':[reverse]})
+        result=self.execute(opener)
+        self.assertEqual(result['reason'],'identity_changed_during_lookup')
+        self.assertEqual(len(opener.calls),2)
+
     def test_reverse_conflict_or_changed_mapping_stops_before_finance(self):
         cases=[({'items':[ITEM,{**ITEM,'id':8}]},'reverse_identity_ambiguous'),
                ({'items':[{**ITEM,'name':'Другое'}]},'identity_changed_during_lookup'),

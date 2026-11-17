@@ -12,7 +12,7 @@ ENDPOINT = 'https://api-seller.ozon.ru/v1/finance/accrual/by-day'
 
 
 def validate_args(args):
-    if not isinstance(args, dict) or set(args) - {'date', 'last_id', 'skus', 'view'} or not {'date', 'skus'} <= set(args):
+    if not isinstance(args, dict) or set(args) - {'date', 'last_id', 'skus', 'view', 'posting_number'} or not {'date', 'skus'} <= set(args):
         raise ValueError('Invalid daily accrual arguments')
     day = args['date']
     if not isinstance(day, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', day):
@@ -20,6 +20,7 @@ def validate_args(args):
     try: date.fromisoformat(day)
     except ValueError: raise ValueError('Invalid date') from None
     ozon_details._text(args.get('last_id', ''), 512, empty=True)
+    if 'posting_number' in args: ozon_details._text(args['posting_number'], 128)
     skus = ozon_details._items(args['skus'], 100)
     if not skus: raise ValueError('No SKUs')
     normalized = [ozon_details._id(sku) for sku in skus]
@@ -60,6 +61,9 @@ def project_response(args, data, creds):
     requested = {ozon_details._id(sku) for sku in args['skus']}
     rows = ozon_details._items(data.get('accruals'), 5000)
     ids, selected, other_sku, unallocated = set(), [], 0, 0
+    other_postings, without_posting = 0, 0
+    posting_filter = args.get('posting_number')
+    if posting_filter is not None: ozon_details._text(posting_filter, 128, secret=secret)
     for row in rows:
         if not isinstance(row, dict): raise ValueError('Invalid daily accrual')
         accrual_id = ozon_details._id(row.get('accrual_id'), secret)
@@ -71,6 +75,9 @@ def project_response(args, data, creds):
             posting = row.get('posting')
             if not isinstance(posting, dict): raise ValueError('Missing posting')
             posting_number = ozon_details._text(row.get('unit_number'), 128, secret=secret)
+            if posting_filter is not None and posting_number != posting_filter:
+                other_postings += 1
+                continue
             for product in ozon_details._items(posting.get('products'), 1000):
                 if not isinstance(product, dict): raise ValueError('Invalid posting product')
                 sku = ozon_details._optional_sku(product.get('sku'), secret)
@@ -91,6 +98,9 @@ def project_response(args, data, creds):
         elif category == 'ITEM':
             item_fees = row.get('item_fees')
             if not isinstance(item_fees, dict): raise ValueError('Missing item fees')
+            if posting_filter is not None:
+                without_posting += 1
+                continue
             for item in ozon_details._items(item_fees.get('fees'), 1000):
                 if not isinstance(item, dict): raise ValueError('Invalid item fee')
                 sku = ozon_details._optional_sku(item.get('sku'),secret)
@@ -103,6 +113,7 @@ def project_response(args, data, creds):
                                  'fees': _fees(item.get('fees'),secret)})
         elif category in ('NON_ITEM','CONTAINER_FEES','UNSPECIFIED'):
             unallocated += 1
+            if posting_filter is not None: without_posting += 1
         else:
             raise ValueError('Unknown accrual category')
     result = {'source': 'Ozon Seller API /v1/finance/accrual/by-day', 'date': args['date'],
@@ -111,6 +122,9 @@ def project_response(args, data, creds):
             'provider_cursor_nonempty': bool(cursor), 'page_accrual_ids': sorted(ids,key=int),
             'other_sku_products_excluded': other_sku,
             'unallocated_entries_excluded': unallocated, 'period_completeness': 'not_verified',
+            'posting_filter': posting_filter,
+            'other_posting_entries_excluded': other_postings,
+            'non_posting_category_entries_excluded': without_posting,
             'row_identity': 'not_verified',
             'note': ('Одна страница начислений за дату. Получите справочник типов; объединяйте страницы '
                      'только после проверки идентификаторов и курсоров. Пустой курсор и отсутствие строк '
@@ -119,6 +133,10 @@ def project_response(args, data, creds):
                      'как независимые операции; не складывайте их друг с другом или с итогами без сверки. '
                      'Расходы без SKU не распределяются. Поле commission_ratio не возвращается.'),
             'read_only': True, 'untrusted_data': True}
+    if posting_filter is not None:
+        result['posting_filter_note'] = ('Показаны только строки POSTING с этим номером за дату начисления. '
+            'Начисления ITEM и прочие строки без подтверждённого номера отправления исключены; '
+            'это не полный отчёт по отправлению. Проверьте все страницы.')
     if args.get('view','summary') == 'details':
         result['matching_rows'] = selected
     else:

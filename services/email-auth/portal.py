@@ -62,6 +62,11 @@ def finance_request_preflight(operation, args, creds):
             'posting_numbers':args['posting_numbers'],'date_from':args['date_from'],
             'date_to':args['date_to'],'view':'summary'},creds)
     else:
+        if operation == 'ozon_accrual_day' and isinstance(args,dict):
+            if 'posting_number' in args:
+                ozon_details._text(args['posting_number'],128,secret=api_key)
+            if 'last_id' in args:
+                ozon_details._text(args['last_id'],512,empty=True,secret=api_key)
         ozon_mcp.build_request(operation,args,creds)
 
 

@@ -55,7 +55,10 @@ def _one_identity(args, projected):
             not isinstance(item.get('sku_candidates'),list) or not item['sku_candidates'] or
             not isinstance(item.get('sources'),list) or
             any(not isinstance(source,dict) or not source.get('sku') or not source.get('source')
-                for source in item['sources'])):
+                for source in item['sources']) or
+            not isinstance(item.get('stock_sources'),list) or
+            any(not isinstance(source,dict) or not source.get('sku') or not source.get('source')
+                for source in item['stock_sources'])):
         return None, 'identity_incomplete'
     if len(item['sku_candidates']) > 100:
         return None, 'too_many_observed_skus'
@@ -81,11 +84,16 @@ def confirm_identity(args, forward, reverse):
             first['name'] != second['name'] or first['sku'] != second['sku'] or
             set(first['sku_candidates']) != set(second['sku_candidates']) or
             {(source['source'],source['sku']) for source in first['sources']} !=
-            {(source['source'],source['sku']) for source in second['sources']}):
+            {(source['source'],source['sku']) for source in second['sources']} or
+            first['stock_sources_reported'] != second['stock_sources_reported'] or
+            {(source['source'],source['sku']) for source in first['stock_sources']} !=
+            {(source['source'],source['sku']) for source in second['stock_sources']}):
         return None, _blocked(args,'identity_changed_during_lookup')
     identity={'offer_id':first['offer_id'],'product_id':first['product_id'],'name':first['name'],
               'primary_sku':first['sku'],
               'sku_candidates':list(first['sku_candidates']),'sources':list(first['sources']),
+              'stock_sources':list(first['stock_sources']),
+              'stock_sources_reported':first['stock_sources_reported'],
               'mapping':'current_forward_and_reverse_only','current_sku_coverage':'not_verified',
               'historical_sku_coverage':'not_verified',
               'cross_product_conflicts_outside_response':'not_verified'}
