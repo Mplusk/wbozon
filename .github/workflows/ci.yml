@@ -149,6 +149,9 @@ jobs:
     needs: [email-auth, marketplace-egress]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    concurrency:
+      group: wbozon-native-candidate-and-staging
+      cancel-in-progress: false
     steps:
       - name: Check out exact tested commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -223,3 +226,30 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+      - name: Deliver candidate to isolated server staging
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/ozon-finance-partial-20261117'
+        env:
+          STAGE_SSH_KEY: ${{ secrets.WBOZON_STAGE_SSH_KEY }}
+          STAGE_KNOWN_HOSTS: ${{ secrets.WBOZON_STAGE_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test -n "$STAGE_SSH_KEY"
+          test -n "$STAGE_KNOWN_HOSTS"
+          artifact="$RUNNER_TEMP/native-artifact/native-portal-${GITHUB_SHA}.tar.gz"
+          (cd "$RUNNER_TEMP/native-artifact" && sha256sum --check --strict SHA256SUMS)
+          digest="$(sha256sum "$artifact" | cut -d ' ' -f1)"
+          bytes="$(stat -c '%s' "$artifact")"
+          [[ "$digest" =~ ^[0-9a-f]{64}$ && "$bytes" =~ ^[1-9][0-9]*$ ]]
+          private_dir="$RUNNER_TEMP/wbozon-stage-ssh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          umask 077
+          mkdir -m 700 "$private_dir"
+          trap 'rm -f "$private_dir/key" "$private_dir/known_hosts"; rmdir "$private_dir"' EXIT
+          printf '%s\n' "$STAGE_SSH_KEY" > "$private_dir/key"
+          printf '%s\n' "$STAGE_KNOWN_HOSTS" > "$private_dir/known_hosts"
+          ssh -T -i "$private_dir/key" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$private_dir/known_hosts" \
+            -o GlobalKnownHostsFile=/dev/null -o ClearAllForwardings=yes \
+            -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=2 \
+            staging-account@portal.example.invalid "stage $GITHUB_SHA $digest $bytes" < "$artifact"

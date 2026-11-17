@@ -188,6 +188,24 @@ when the guard process dies. It must independently establish secure path ownersh
 writer and mount-namespace assumptions, a durable recovery plan and bounded disk
 I/O supervision. Synthetic tests do not prove real systemd drain or recovery.
 
+## Restricted artifact staging
+
+`stage_receiver.py` accepts an archive over a forced SSH command for a dedicated
+unprivileged account. It checks the announced length and digest and writes only
+to that account's private staging directory. It never unpacks, executes or activates
+the archive. The SSH key cannot invoke a shell or write to the live release. The
+staged file and sender-supplied digest are **not** independent proof of CI origin;
+any future privileged promoter must obtain trusted provenance and verify the
+bytes again after copying them to a root-controlled location.
+
+The CI job stages only tested artifacts from `main` and the explicitly named
+release branch. Uploads use pinned SSH host keys and encrypted GitHub secrets.
+Staging is bounded to 40 artifacts or 300 MB and does not automatically delete
+finished files; when full, it fails until an independently checked cleanup is
+performed. Upload rate limits use the host wall clock. The free-space precheck
+does not reserve disk blocks against other services. Staging does **not** enable
+automatic deployment or switch the running service.
+
 The controller does not maintain a permanent guarantee about root operators or
 systemd configuration changes outside its lock. Passing local tests does not
 constitute host acceptance or enable automatic deployment.
