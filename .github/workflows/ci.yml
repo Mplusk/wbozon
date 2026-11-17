@@ -142,3 +142,78 @@ jobs:
         run: |
           python3 -m py_compile marketplace_proxy.py test_marketplace_proxy.py
           python3 -m unittest -v
+
+  native-candidate:
+    name: Build and test native portal candidate
+    if: github.event_name == 'push'
+    needs: [email-auth, marketplace-egress]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact tested commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Reconstruct source and hash-locked wheelhouse
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 -c 'import platform,sys; assert sys.version_info[:2] == (3,12); assert platform.machine() == "x86_64"'
+          bundle="$RUNNER_TEMP/native-candidate"
+          mkdir -p "$bundle/service" "$bundle/wheelhouse" "$RUNNER_TEMP/native-artifact"
+          git archive "$GITHUB_SHA" services/email-auth | tar -x -C "$bundle/service" --strip-components=2
+          cp tools/native-test-bundle/requirements-offline.lock "$bundle/requirements-offline.lock"
+          cp tools/native-test-bundle/test_native.py "$bundle/test_native.py"
+          python3 -m pip download --isolated --index-url https://pypi.org/simple \
+            --only-binary=:all: --require-hashes --no-deps \
+            --dest "$bundle/wheelhouse" -r "$bundle/requirements-offline.lock"
+      - name: Test native runtime using the packaged wheelhouse
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/native-candidate"
+          venv="$RUNNER_TEMP/native-candidate-venv"
+          python3 -m venv "$venv"
+          "$venv/bin/python" -m pip install --isolated --no-index --find-links "$bundle/wheelhouse" \
+            --require-hashes -r "$bundle/requirements-offline.lock"
+          (cd "$bundle/service" && PYTHONDONTWRITEBYTECODE=1 "$venv/bin/python" -m unittest -q)
+          PYTHONDONTWRITEBYTECODE=1 "$venv/bin/python" "$bundle/test_native.py"
+      - name: Package candidate with source provenance and hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/native-candidate"
+          out="$RUNNER_TEMP/native-artifact"
+          python3 - "$bundle" <<'PY'
+          import hashlib, json, os, pathlib, re, sys
+          root = pathlib.Path(sys.argv[1])
+          sha = os.environ['GITHUB_SHA']
+          if not re.fullmatch(r'[0-9a-f]{40}', sha): raise SystemExit('invalid commit')
+          meta = {'source_commit':sha, 'repository':os.environ['GITHUB_REPOSITORY'],
+                  'run_id':os.environ['GITHUB_RUN_ID'], 'run_attempt':os.environ['GITHUB_RUN_ATTEMPT'],
+                  'platform':'linux/amd64', 'python':'3.12',
+                  'purpose':'tested native candidate; server installation is not verified'}
+          (root/'PROVENANCE.json').write_text(json.dumps(meta,sort_keys=True,indent=2)+'\n',encoding='utf-8')
+          files = []
+          for path in sorted(root.rglob('*')):
+              if path.is_symlink(): raise SystemExit('symlink in candidate')
+              if not path.is_file(): continue
+              name = path.relative_to(root).as_posix()
+              if not re.fullmatch(r'[A-Za-z0-9_./-]+', name): raise SystemExit('unsafe candidate path')
+              files.append((hashlib.sha256(path.read_bytes()).hexdigest(), name))
+          if not files: raise SystemExit('empty candidate')
+          (root/'FILES.sha256').write_text(''.join(f'{digest}  {name}\n' for digest,name in files),encoding='utf-8')
+          PY
+          (cd "$bundle" && sha256sum --check --strict FILES.sha256 >/dev/null)
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -C "$bundle" -cf - . | gzip -n > "$out/native-portal-${GITHUB_SHA}.tar.gz"
+          (cd "$out" && sha256sum "native-portal-${GITHUB_SHA}.tar.gz" > SHA256SUMS)
+      - name: Retain tested native candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-portal-tested-${{ github.sha }}
+          path: ${{ runner.temp }}/native-artifact/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
