@@ -40,8 +40,10 @@ the journal of the corresponding wbozon-deploy-RUN-ATTEMPT.service and
 wbozon-cd-recover.service, and the root-private active.json under
 /var/lib/3dprinta-native-deployer. The single-host adoption script verifies the
 original unit and baseline before installing the units in systemd/. Revisions
-that change the pinned dependency set, storage initialization or finance gate
-contract require a compatible rollout plan.
+that change the pinned dependency set, database-owning modules, SQL access or
+finance gate contract require a compatible rollout plan. The running DB schema
+must match the quiescent snapshots on every path that reopens ingress. Unexpected
+external schema changes retain the journal and backups for reconciliation.
 
 ## Historical manual controller
 

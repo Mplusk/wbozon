@@ -224,8 +224,16 @@ def receive(directory, stream, commit, digest, size, now=None, run_id=None, run_
                     versioned.append((os.fstat(oldfd).st_mtime_ns, entry))
                 finally:
                     os.close(oldfd)
-        for _, entry in sorted(versioned, reverse=True)[11:]:
+        count = len(artifacts) + 1
+        used = sum(length for _, length in artifacts) + size
+        sizes = dict(artifacts)
+        for index, (_, entry) in enumerate(sorted(versioned)):
+            if (len(versioned) - index <= 11 and used <= MAX_TOTAL_BYTES - MAX_BYTES and
+                    count < MAX_ARTIFACTS):
+                break
             os.unlink(entry, dir_fd=dfd)
+            used -= sizes[entry]
+            count -= 1
         os.fsync(dfd)
     finally:
         if created:

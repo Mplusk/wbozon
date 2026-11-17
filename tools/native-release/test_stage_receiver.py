@@ -64,6 +64,13 @@ class StageReceiverTests(unittest.TestCase):
         self.assertTrue((self.directory / (self.commit + '.tar.gz')).exists())
         self.assertTrue((self.directory / (self.commit + '-14-1.tar.gz')).exists())
 
+    def test_reserves_byte_capacity_for_next_versioned_upload(self):
+        with patch.object(receiver, 'MAX_BYTES', len(self.data)), patch.object(receiver, 'MAX_TOTAL_BYTES', len(self.data) * 3):
+            for i in range(1, 7):
+                receiver.receive(self.directory, io.BytesIO(self.data), self.commit, self.digest,
+                                 len(self.data), run_id=str(i), run_attempt='1')
+            self.assertEqual(len(list(self.directory.glob('*-*-*.tar.gz'))), 2)
+
     def test_same_commit_from_different_workflow_attempts_does_not_conflict(self):
         receiver.receive(self.directory, io.BytesIO(self.data), self.commit, self.digest,
                          len(self.data), run_id='123456', run_attempt='1')

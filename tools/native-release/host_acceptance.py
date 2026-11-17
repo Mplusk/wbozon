@@ -103,7 +103,7 @@ def suite(python, gate_source):
                       release_group='wbozon-release', baseline=old, baseline_sha256=shas[old],
                       addresses=['127.0.0.1'], port=port, host='localhost', gate=str(data / '.ozon-finance-gates'),
                       databases=[str(data / n) for n in ('auth.sqlite', 'vault.sqlite')], dependencies=[],
-                      recovery_unit=recover)
+                      recovery_unit=recover, worker_config_sha256=digest(b'# synthetic\n'))
         unit_data = ('[Service]\nType=exec\nDynamicUser=yes\nUser=' + tag + '\nSupplementaryGroups=wbozon-release\n'
             'WorkingDirectory=' + str(root / 'current/service') + '\nStateDirectory=' + tag + '\nStateDirectoryMode=0700\n'
             'Environment=PYTHONDONTWRITEBYTECODE=1 DATABASE_PATH=' + config['databases'][0] +

@@ -2,7 +2,9 @@ import unittest
 import tempfile
 from pathlib import Path
 import build_release
-from release_host import database_access
+from release_host import ReleaseError, compatible, database_access
+from cd import Transaction
+from unittest.mock import Mock
 
 
 class BuildInputTests(unittest.TestCase):
@@ -34,3 +36,29 @@ class BuildInputTests(unittest.TestCase):
             self.assertNotEqual(database_access(root), original)
             module.rename(root / 'service' / 'other.py')
             self.assertNotEqual(database_access(root), original)
+
+    def test_changed_handler_cannot_hide_schema_change_behind_sql_helper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = [Path(tmp) / name for name in ('old', 'new')]
+            for p in paths:
+                svc = p / 'service'
+                svc.mkdir(parents=True)
+                for name in ('app.py', 'finance_gate.py', 'external_keys.py', 'oauth_mcp.py', 'gunicorn.conf.py'):
+                    (svc / name).write_text('')
+                (svc / 'portal.py').write_text('class Vault: pass\nclass Portal:\n def __init__(self): pass\n'
+                    ' def read_gateway(self): pass\ndef create_portal(): pass\ndef provider_read(): pass\n'
+                    'def sql(db,q): db.execute(q)\n')
+            with (paths[1] / 'service/portal.py').open('a') as f:
+                f.write('def handle(db): sql(db, "ALTER " + "TABLE sessions ADD flag INT")\n')
+            with self.assertRaises(ReleaseError):
+                compatible(*paths)
+
+    def test_schema_mismatch_keeps_ingress_closed_and_receipt_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            host = Mock(state=Path(tmp))
+            host.check_schema.side_effect = ReleaseError('schema mismatch')
+            transaction = Transaction(host)
+            with self.assertRaises(ReleaseError):
+                transaction.complete({'schemas': ['old']}, 'old', 'checksum')
+            host.barrier.assert_not_called()
+            self.assertFalse(transaction.active.exists())

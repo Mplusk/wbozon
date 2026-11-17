@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import socket
 import sqlite3
 import stat
@@ -23,6 +24,12 @@ from native_release import secure, syncdir
 
 class ReleaseError(Exception):
     pass
+
+
+WORKER_CONFIG = 'b9c000b89ec0921a9d07d678cd9b1b44a458d959414a579eb753a4942c792fa2'
+# Reviewed portal sources for initial adoption: storage remains compatible across this pair.
+ADOPTION_PORTALS = frozenset(('e0b80bfca4c06201f16ea7e4c6d2e8b89c034408770580e7ef5de6fa99de0b82',
+                              '1015ddabbed83b61e9c77ea66130de5a4a71a15d2a332924a1cba36d0d0dd32e'))
 
 
 def command(args, *, data=None, timeout=15):
@@ -102,6 +109,20 @@ def compatible(old, new):
         raise ReleaseError('startup, storage or finance gate contract changed')
     if database_access(old) != database_access(new):
         raise ReleaseError('SQL or schema access changed; a migration rollout is required')
+    def storage_owners(directory):
+        result = {}
+        for p in (directory / 'service').rglob('*.py'):
+            if p.name.startswith('test_'):
+                continue
+            raw = p.read_bytes().replace(b'\r\n', b'\n')
+            if p.name == 'portal.py' or re.search(rb'\b(?:import|from)\s+[^\n#]*\bsqlite3\b', raw):
+                result[p.relative_to(directory / 'service').as_posix()] = digest(raw)
+        return result
+    before, after = storage_owners(old), storage_owners(new)
+    if {before.get('portal.py'), after.get('portal.py')} == ADOPTION_PORTALS:
+        before['portal.py'] = after['portal.py']
+    if before != after:
+        raise ReleaseError('storage-owning source changed outside the approved rollback contract')
 
 
 def database_access(release):
@@ -233,8 +254,13 @@ class Host:
         if environment:
             env = dict(item.split(b'=', 1) for item in (proc / 'environ').read_bytes().split(b'\0') if b'=' in item)
             argv = (proc / 'cmdline').read_bytes().split(b'\0')
-            if env.get(b'GUNICORN_CMD_ARGS', b'').strip() or any(
-                    a.startswith((b'-k', b'--worker-class', b'--threads')) for a in argv):
+            options = shlex.split(os.fsdecode(env.get(b'GUNICORN_CMD_ARGS', b'')))
+            config_flags = [i for i, a in enumerate(argv) if a in (b'-c', b'--config')]
+            if (options and not re.fullmatch(r'--timeout(?:=| )[1-9][0-9]{0,3}', ' '.join(options)) or
+                    any(i+1 >= len(argv) or argv[i+1] != b'gunicorn.conf.py' for i in config_flags) or
+                    digest((self.releases / release / 'service/gunicorn.conf.py').read_bytes().replace(b'\r\n', b'\n'))
+                    != self.cfg.get('worker_config_sha256', WORKER_CONFIG) or any(
+                    a.startswith((b'-k', b'--worker-class', b'--threads', b'--config=', b'--chdir')) for a in argv)):
                 raise ReleaseError('unreviewed Gunicorn concurrency override')
             auth, vault = (Path(os.fsdecode(env[k])) for k in (b'DATABASE_PATH', b'VAULT_PATH'))
             gate = Path(os.fsdecode(env[b'OZON_FINANCE_GATE_DIR'])) if b'OZON_FINANCE_GATE_DIR' in env else vault.parent / '.ozon-finance-gates'
