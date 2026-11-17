@@ -29,6 +29,9 @@ BRIDGE_OPERATIONS = {'unknown':'операция не определена', 'oz
     'ozon_posting_candidates':'номера отправлений Ozon',
     'ozon_realization_article_month':'месячный отчёт реализации артикула Ozon',
     'ozon_accrual_day':'начисления Ozon за день по SKU',
+    'ozon_unallocated_accruals':'нераспределённые начисления Ozon',
+    'ozon_fbo_supply_orders':'заявки FBO Ozon', 'ozon_fbo_supply_details':'поставки FBO Ozon',
+    'ozon_fbo_supply_items':'состав поставки FBO Ozon', 'ozon_fbo_volume_allocation':'затраты поставки FBO по объёму',
     'ozon_return_events':'события возвратов Ozon',
     'wb_prices':'цены Wildberries', 'wb_commissions':'комиссии Wildberries',
     'wb_box_tariffs':'тарифы Wildberries', 'wb_sales_summary':'заказы и выкупы Wildberries'}
@@ -170,6 +173,12 @@ def _provider_read(operation, args, creds, *, request_timeout=15, absolute_deadl
         return wb_mcp.read(operation, args, creds)
     if operation not in ozon_mcp.OPERATIONS:
         raise ValueError('Unknown operation')
+    if operation == ozon_mcp.ozon_supply_allocation.OPERATION:
+        deadline = started + PROVIDER_DEADLINE_SECONDS - 2 if absolute_deadline is None else absolute_deadline
+        def read_supply(name, arguments):
+            return _provider_read(name, arguments, creds, request_timeout=request_timeout, absolute_deadline=deadline)
+        result = ozon_mcp.ozon_supply_allocation.calculate(args, read_supply)
+        return _guard_ozon_result(result, creds)
     if operation == ozon_article_summary.OPERATION:
         deadline=(started+max(0,PROVIDER_DEADLINE_SECONDS-2)
                   if absolute_deadline is None else absolute_deadline)
@@ -188,8 +197,8 @@ def _provider_read(operation, args, creds, *, request_timeout=15, absolute_deadl
         try:
             raw=resp.read(512001)
             if len(raw)>512000: raise finance_gate.ProviderResponseTooLarge('Provider response too large')
-            data=decode_provider_payload(raw,preserve_decimal=operation in ('ozon_orders_analytics','ozon_realization_article_month'),
-                                         reject_duplicates=operation in ('ozon_products','ozon_posting_status','ozon_posting_candidates','ozon_realization_article_month','ozon_accrual_day','ozon_return_events') or operation in ozon_mcp.ozon_details.OPERATIONS)
+            data=decode_provider_payload(raw,preserve_decimal=operation in ('ozon_orders_analytics','ozon_realization_article_month',ozon_mcp.ozon_fbo.BUNDLE),
+                                         reject_duplicates=operation in ('ozon_products','ozon_posting_status','ozon_posting_candidates','ozon_realization_article_month','ozon_accrual_day','ozon_return_events',ozon_mcp.ozon_unallocated.OPERATION) or operation in ozon_mcp.ozon_details.OPERATIONS or operation in ozon_mcp.ozon_fbo.ENDPOINTS)
         except (finance_gate.ProviderResponseTooLarge, urllib.error.HTTPError): raise
         except TimeoutError: raise finance_gate.ProviderBodyTimeout('Provider response timed out') from None
         except urllib.error.URLError as exc:
@@ -201,6 +210,17 @@ def _provider_read(operation, args, creds, *, request_timeout=15, absolute_deadl
         except Exception: raise finance_gate.ProviderResponseInvalid('Invalid provider response') from None
     try: result=ozon_mcp.project_response(operation,args,data,creds)
     except Exception: raise finance_gate.ProviderResponseInvalid('Invalid provider response') from None
+    if operation == ozon_mcp.ozon_unallocated.OPERATION and args.get('include_types', True):
+        deadline = started + PROVIDER_DEADLINE_SECONDS - 2 if absolute_deadline is None else absolute_deadline
+        try:
+            types = _provider_read('ozon_accrual_types', {}, creds, request_timeout=request_timeout, absolute_deadline=deadline)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 403:
+                raise
+            exc.close()
+            result['type_dictionary_status'] = 'provider_access_denied'
+        else:
+            result = ozon_mcp.ozon_unallocated.attach_types(result, types)
     if operation=='ozon_products' and args.get('include_identity',True):
         # A single page is enriched by product ID and exact offer_id; neither
         # SKU ordering nor a successful catalog lookup proves historical coverage.
@@ -405,7 +425,7 @@ def _provider_worker():
             return _provider_read(request['operation'],request['args'],request['creds'])
         value = (_finance_read_with_retry(request.get('finance_gate_dir'),request['creds'],read,deadline,
                   allow_retry=(request['operation'] != ozon_article_summary.OPERATION and
-                    (request['operation'] != 'ozon_posting_accruals' or
+                    (request['operation'] not in ('ozon_posting_accruals',ozon_mcp.ozon_unallocated.OPERATION) or
                      not request['args'].get('include_types',True))))
                  if is_finance else read())
         result={'kind':'ok', 'result':value}

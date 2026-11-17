@@ -44,7 +44,7 @@ The owner-only Sites connector calls this API with its separately scoped MCP tok
 ## Ozon finance rate limiting and recovery
 
 `ozon_accrual_types`, `ozon_posting_accruals`, `ozon_accrual_day`,
-`ozon_realization_article_month`, `ozon_return_events` and the partial `ozon_article_summary` use a per-Client-ID lock owned
+`ozon_unallocated_accruals`, `ozon_realization_article_month`, `ozon_return_events` and the partial `ozon_article_summary` use a per-Client-ID lock owned
 by the actual provider worker, so a parent process dying does not release a lock
 still held by an orphaned worker. Different clients can proceed separately.
 The gate uses local OS advisory locks, atomic file replacement, a durable client
@@ -63,6 +63,26 @@ An interval that could reproduce a seller key is not returned to the caller.
 The article summary performs two identity lookups and one posting-accrual read
 sequentially within the same overall worker deadline; its user-supplied posting
 set is not a complete-period assertion. See `OZON_ARTICLE_SUMMARY.md`.
+
+`ozon_unallocated_accruals` reads one accrual date and one cursor for types 12, 133, 134, 77 and 46.
+The tool retrieves their current names from the Ozon dictionary by default. Both reads share one finance
+reservation. A 429 on the dictionary propagates with the normal cooldown. The composite request is never replayed.
+The by-day schema identifies the order or service with `unit_number` and has no supply ID. Rows carrying a SKU
+are returned separately. The original sign and currency come from each typed fee.
+[Daily accruals](https://docs.ozon.com/api/seller/#operation/GetFinanceAccrualByDay) · [Type dictionary](https://docs.ozon.com/api/seller/#operation/GetFinanceAccrualTypes)
+
+To read a declared FBO composition, use `ozon_fbo_supply_orders` to obtain order IDs and
+`ozon_fbo_supply_details` to select the specific supply and bundle. `ozon_fbo_supply_items` reads a single
+bundle page. `ozon_fbo_volume_allocation` fetches the selected bundle across pages and allocates one
+documented signed cost according to each SKU's quantity and litres per unit. The document reference, line,
+date, currency and its explicit single-supply scope travel with the result. Its per-unit ratio is exact,
+and SKU totals reconcile in [ISO 4217 currency minor units](https://www.iso.org/iso-4217-currency-codes.html).
+A second traversal compares multi-page compositions, then the tool rechecks the order-to-bundle link.
+Ozon provides no snapshot guarantee across requests. Missing quantities or litres, inconsistent
+pages or an unverified financial accrual link leave the allocation unknown. Allocation uses declared
+quantities at read time. It is excluded from the actual article accrual summary.
+[Supply orders](https://docs.ozon.com/api/seller/#operation/SupplyOrderList) · [Order details](https://docs.ozon.com/api/seller/#operation/SupplyOrderGet) · [Bundle](https://docs.ozon.com/api/seller/#operation/SupplyOrderBundle)
+
 The daily accrual tool defaults to a compact `summary` by observed SKU, type,
 source component and currency; its `coverage_by_sku` records missing delivery
 and commission containers. `details` retains per-posting and per-item fields.

@@ -9,6 +9,9 @@
 !ozon_article_summary.py
 !ozon_realization.py
 !ozon_accrual_day.py
+!ozon_unallocated.py
+!ozon_fbo.py
+!ozon_supply_allocation.py
 !ozon_return_events.py
 !finance_gate.py
 !ozon_posting_status.py

@@ -21,7 +21,8 @@ import urllib.error
 from datetime import timezone
 
 FINANCE_OPERATIONS = frozenset(('ozon_accrual_types', 'ozon_posting_accruals', 'ozon_article_summary',
-                                'ozon_realization_article_month', 'ozon_accrual_day', 'ozon_return_events'))
+                                'ozon_realization_article_month', 'ozon_accrual_day', 'ozon_return_events',
+                                'ozon_unallocated_accruals'))
 MAX_RETRY_SECONDS = 2147483647
 
 

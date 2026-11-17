@@ -37,7 +37,29 @@ def _tool(name, description, properties, required=()):
             'securitySchemes':[{'type':'oauth2','scopes':['mcp:read']}],
             '_meta':{'securitySchemes':[{'type':'oauth2','scopes':['mcp:read']}]}}
 
+_DOCUMENT_DATE = {'type':'string', 'format':'date'}
+_SUPPLY_EXPENSE = {'type':'object', 'additionalProperties':False,
+    'description':'Одна строка предоставленного документа. Укажите её собственные дату, ссылку, сумму со знаком, валюту и явно указанную поставку.',
+    'properties':{'document_id':_text(128), 'line_id':_text(128), 'document_date':_DOCUMENT_DATE,
+                  'period_from':_DOCUMENT_DATE, 'period_to':_DOCUMENT_DATE, 'supply_id':_text(19),
+                  'scope':{'type':'string', 'enum':['single_supply','shared_or_unknown']},
+                  'amount':{'type':'string', 'description':'Сумма со знаком и исходными десятичными разрядами.'},
+                  'currency':_text(16), 'accrual_id':{'type':'string', 'maxLength':19,
+                      'description':'Если основание — начисление Ozon, укажите его ID. Без документированной связи API расчёт будет неполным.'}}}
+
 TOOLS = [
+    _tool('ozon_unallocated_accruals', 'Одна страница по дате начисления для типов 12, 133, 134, 77 и 46. Возвращает исходный знак, валюту, accrual_id, unit_number и возможный номер отправления для категории POSTING. Ссылка на отправление требует сверки. Строки с явным SKU перечислены отдельно. Справочник названий запрашивается у Ozon по умолчанию. Не приписывайте строки без SKU артикулу или поставке. Для следующей страницы используйте ту же дату, учитывайте повторы курсоров и ID. Соблюдайте Retry-After.',
+          {'date':_DOCUMENT_DATE, 'last_id':_text(512), 'include_types':{'type':'boolean'}}, ('date',)),
+    _tool('ozon_fbo_supply_orders', 'Страница идентификаторов заявок на поставку FBO, начиная с новых. По умолчанию запрашивает все документированные статусы. Для продолжения передайте next_cursor как last_id с теми же фильтрами. Для состава сначала получите сведения о заявках.',
+          {'states':{'type':'array','minItems':1,'maxItems':len(ozon_mcp.ozon_fbo.STATES),'uniqueItems':True,
+                     'items':{'type':'string','enum':list(ozon_mcp.ozon_fbo.STATES)}},
+           'order_number':_text(128), 'limit':_integer(1,100), 'last_id':_text(512)}),
+    _tool('ozon_fbo_supply_details', 'Сведения по ID заявок FBO. Для каждой заявки показывает статусы, даты и все её поставки с supply_id и bundle_id. Используйте bundle_id конкретной поставки для чтения состава.',
+          {'order_ids':{'type':'array','minItems':1,'maxItems':50,'uniqueItems':True,'items':_text(19)}}, ('order_ids',)),
+    _tool('ozon_fbo_supply_items', 'Одна страница состава по точному bundle_id. Каждая строка сохраняет SKU, артикул, название, количество, объём единицы и объём строки в литрах. При has_next=true продолжите по next_cursor. Количество относится к составу заявки. Проверяйте повторы SKU по всем страницам.',
+          {'bundle_id':_text(512), 'limit':_integer(1,100), 'last_id':_text(512)}, ('bundle_id',)),
+    _tool('ozon_fbo_volume_allocation', 'Распределение одной строки документа по объёму товаров указанной поставки FBO. Читает все доступные страницы её состава. Для оценки передайте expense с document_id, line_id, document_date, суммой, валютой, supply_id из документа и scope=single_supply. Неполный состав, отсутствующие объёмы и неподтверждённая привязка начисления к поставке блокируют расчёт. Результат — модель по данным документа. Не добавляйте её к фактическим начислениям по артикулу.',
+          {'order_id':_text(19), 'supply_id':_text(19), 'expense':_SUPPLY_EXPENSE}, ('order_id','supply_id')),
     _tool('ozon_products', 'Одна страница товаров Ozon. По умолчанию дополнительно получает название и все наблюдаемые SKU из карточки, сверяя product_id и точный артикул; проверяйте identity_status и identity_enrichment. При несовпадении данные не прикрепляются. Полнота SKU, исторические связи и совпадения между страницами не подтверждены. include_identity=false отключает дополнительный запрос.',
           {'limit':_integer(1,100), 'last_id':_text(512), 'include_identity':{'type':'boolean'}}),
     _tool('ozon_product_info', 'Названия, артикулы и все SKU, перечисленные Ozon в основных полях, sources и stocks.stocks выбранных товаров. Передайте ровно один массив идентификаторов; сохраняйте все SKU и учитывайте conflicts, incomplete_fields и unmatched_identifiers. Полнота источника не подтверждена.',
