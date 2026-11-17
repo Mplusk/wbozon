@@ -11,6 +11,7 @@ import finance_gate
 import portal
 import test_ozon_article_summary
 import test_ozon_finance_reports
+import test_ozon_return_events
 
 import test_portal
 
@@ -125,7 +126,7 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
         result=self.mcp(message,token)
         self.assertEqual(result['headers'].get('Cache-Control'),'no-store')
         names={tool['name'] for tool in json.loads(result['body'])['result']['tools']}
-        self.assertEqual(names, {'ozon_products','ozon_product_info','ozon_accrual_types','ozon_accrual_day','ozon_article_summary','ozon_realization_article_month',
+        self.assertEqual(names, {'ozon_products','ozon_product_info','ozon_accrual_types','ozon_accrual_day','ozon_article_summary','ozon_realization_article_month','ozon_return_events',
                                  'ozon_posting_accruals','ozon_prices','ozon_orders_analytics',
                                  'ozon_posting_status','ozon_posting_candidates','wb_products','wb_prices','wb_commissions',
                                  'wb_box_tariffs','wb_sales_summary'})
@@ -247,6 +248,27 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
                     result=json.loads(output['content'][0]['text'])
                     self.assertTrue(result['read_only'])
                     self.assertNotIn('synthetic-private',json.dumps(result))
+
+    def test_return_events_reach_authenticated_mcp(self):
+        token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',self.create()['body']).group(1)
+        self.vault.save('ozon',{'client_id':'777','api_key':'synthetic-private'})
+        self.app.gateway=portal._provider_read
+        class Opener:
+            def open(self,request,timeout):
+                self_request=json.loads(request.data)
+                if self_request['filter']['return_schema']!='FBO':raise AssertionError('wrong scheme')
+                payload={'returns':[test_ozon_return_events.row()],'has_next':False}
+                return test_ozon_article_summary.Response(json.dumps(payload,ensure_ascii=False).encode())
+        message={'jsonrpc':'2.0','id':7,'method':'tools/call',
+                 'params':{'name':'ozon_return_events','arguments':test_ozon_return_events.ARGS}}
+        with patch('portal.urllib.request.build_opener',return_value=Opener()):
+            output=json.loads(self.mcp(message,token)['body'])['result']
+        self.assertNotIn('isError',output)
+        result=json.loads(output['content'][0]['text'])
+        self.assertEqual(result['matched_rows'],1)
+        self.assertEqual(result['period_basis'],'logistic.return_date')
+        self.assertIsNone(result['financial_return_total'])
+        self.assertNotIn('private-address',json.dumps(result))
 
     def test_new_finance_tools_share_429_cooldown_with_existing_tools(self):
         token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',self.create()['body']).group(1)

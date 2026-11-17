@@ -7,6 +7,7 @@ import subprocess
 import shutil
 import sys
 import tempfile
+import time
 import types
 import unittest
 import urllib.error
@@ -24,6 +25,61 @@ class FinanceGateTests(unittest.TestCase):
         self.client = '10001000100010001000100010001'
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_short_429_retries_only_after_shared_cooldown(self):
+        clock={'wall':1000.0,'mono':100.0};calls=[]
+        def read():
+            calls.append('read')
+            if len(calls)==1: raise urllib.error.HTTPError('',429,'',{'Retry-After':'1'},io.BytesIO(b''))
+            return {'ok':True}
+        def sleep(seconds):
+            with self.assertRaises(gate.GateError) as blocked:
+                gate.run(self.root,self.client,lambda:self.fail('early request'))
+            self.assertEqual(blocked.exception.reason,'cooldown')
+            clock['wall']+=seconds;clock['mono']+=seconds
+        creds={'client_id':self.client,'api_key':'private'}
+        with patch('finance_gate.time.time',side_effect=lambda:clock['wall']), \
+             patch('finance_gate.time.monotonic',side_effect=lambda:clock['mono']), \
+             patch('portal.time.sleep',side_effect=sleep):
+            self.assertEqual(portal._finance_read_with_retry(self.root,creds,read,110),{'ok':True})
+        self.assertEqual(len(calls),2)
+
+    def test_second_429_is_not_retried_and_remains_recorded(self):
+        calls=[]
+        def read():
+            calls.append(1)
+            raise urllib.error.HTTPError('',429,'',{'Retry-After':'0'},io.BytesIO(b''))
+        with patch('portal.time.sleep'):
+            with self.assertRaises(urllib.error.HTTPError):
+                portal._finance_read_with_retry(self.root,{'client_id':self.client,'api_key':'private'},read,time.monotonic()+10)
+        self.assertEqual(len(calls),2)
+        with open(os.path.join(self.root,gate._key(self.client)+'.json'),encoding='utf8') as f:
+            self.assertEqual(__import__('json').load(f)['status'],'retry')
+
+    def test_unknown_long_deadline_and_composite_429_are_not_retried(self):
+        for retry,available,allowed in [(None,10,True),('3',10,True),('1',3,True),('1',10,False)]:
+            with self.subTest(retry=retry,available=available,allowed=allowed), tempfile.TemporaryDirectory() as temp:
+                calls=[]
+                def read():
+                    calls.append(1);headers={} if retry is None else {'Retry-After':retry}
+                    raise urllib.error.HTTPError('',429,'',headers,io.BytesIO(b''))
+                with patch('portal.time.sleep') as sleep, self.assertRaises(urllib.error.HTTPError):
+                    portal._finance_read_with_retry(os.path.join(temp,'gate'),
+                        {'client_id':self.client,'api_key':'private'},read,time.monotonic()+available,allow_retry=allowed)
+                self.assertEqual(len(calls),1);sleep.assert_not_called()
+
+    def test_late_wakeup_does_not_start_another_request(self):
+        clock={'wall':1000.0,'mono':100.0};calls=[]
+        def read():
+            calls.append(1)
+            raise urllib.error.HTTPError('',429,'',{'Retry-After':'1'},io.BytesIO(b''))
+        def late_sleep(_):
+            clock['wall']+=8;clock['mono']+=8
+        with patch('finance_gate.time.time',side_effect=lambda:clock['wall']), \
+             patch('finance_gate.time.monotonic',side_effect=lambda:clock['mono']), \
+             patch('portal.time.sleep',side_effect=late_sleep),self.assertRaises(urllib.error.HTTPError):
+            portal._finance_read_with_retry(self.root,{'client_id':self.client,'api_key':'private'},read,110)
+        self.assertEqual(len(calls),1)
 
     def test_retry_after_seconds_http_date_and_server_clock_skew(self):
         now = 1794880000
@@ -357,7 +413,7 @@ class FinanceGateTests(unittest.TestCase):
     def test_worker_preserves_429_header_without_provider_body(self):
         script = ('import sys\nsys.path.insert(0,'+repr(os.path.dirname(portal.__file__))+')\n'
                   'import io,portal,urllib.error\n'
-                  'def fail(*a): raise urllib.error.HTTPError("",429,"private",{"Retry-After":"37"},io.BytesIO(b"private"))\n'
+                  'def fail(*a,**kw): raise urllib.error.HTTPError("",429,"private",{"Retry-After":"37"},io.BytesIO(b"private"))\n'
                   'portal._provider_read=fail\n'
                   'portal._provider_worker()\n')
         worker=os.path.join(self.temp.name,'fake_worker.py')
@@ -373,7 +429,7 @@ class FinanceGateTests(unittest.TestCase):
     def test_worker_preserves_known_provider_size_error_and_releases_gate(self):
         script = ('import sys\nsys.path.insert(0,'+repr(os.path.dirname(portal.__file__))+')\n'
                   'import portal,finance_gate\n'
-                  'def fail(*a): raise finance_gate.ProviderResponseTooLarge("private")\n'
+                  'def fail(*a,**kw): raise finance_gate.ProviderResponseTooLarge("private")\n'
                   'portal._provider_read=fail\n'
                   'portal._provider_worker()\n')
         worker=os.path.join(self.temp.name,'fake_worker.py')

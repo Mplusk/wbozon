@@ -14,10 +14,11 @@ import ozon_details
 import ozon_article_summary
 import ozon_realization
 import ozon_accrual_day
+import ozon_return_events
 
 OPERATIONS = frozenset({'ozon_products', 'ozon_prices', 'ozon_orders_analytics', 'ozon_posting_status', 'ozon_posting_candidates',
                         ozon_article_summary.OPERATION, ozon_realization.OPERATION,
-                        ozon_accrual_day.OPERATION}) | ozon_details.OPERATIONS
+                        ozon_accrual_day.OPERATION, ozon_return_events.OPERATION}) | ozon_details.OPERATIONS
 PRICE_FIELDS = ('auto_action_enabled', 'currency_code', 'marketing_seller_price',
                 'min_price', 'net_price', 'old_price', 'price', 'retail_price',
                 'vat')
@@ -143,6 +144,8 @@ def validate_args(operation, args):
         return ozon_realization.validate_args(args)
     if operation == ozon_accrual_day.OPERATION:
         return ozon_accrual_day.validate_args(args)
+    if operation == ozon_return_events.OPERATION:
+        return ozon_return_events.validate_args(args)
     if operation in ozon_details.OPERATIONS:
         return ozon_details.validate_args(operation, args)
     if operation in ('ozon_posting_status','ozon_posting_candidates'):
@@ -177,6 +180,8 @@ def build_request(operation, args, creds):
         return ozon_realization.build_request(args, creds)
     if operation == ozon_accrual_day.OPERATION:
         return ozon_accrual_day.build_request(args, creds)
+    if operation == ozon_return_events.OPERATION:
+        return ozon_return_events.build_request(args, creds)
     if operation in ozon_details.OPERATIONS:
         return ozon_details.build_request(operation, args, creds)
     if operation in ('ozon_posting_status','ozon_posting_candidates'):
@@ -210,6 +215,8 @@ def project_response(operation, args, data, creds):
         return ozon_realization.project_response(args, data, creds)
     if operation == ozon_accrual_day.OPERATION:
         return ozon_accrual_day.project_response(args, data, creds)
+    if operation == ozon_return_events.OPERATION:
+        return ozon_return_events.project_response(args, data, creds)
     if operation in ozon_details.OPERATIONS:
         return ozon_details.project_response(operation, args, data, creds)
     if operation == 'ozon_posting_status':

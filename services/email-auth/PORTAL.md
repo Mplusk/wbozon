@@ -44,7 +44,7 @@ The owner-only Sites connector calls this API with its separately scoped MCP tok
 ## Ozon finance rate limiting and recovery
 
 `ozon_accrual_types`, `ozon_posting_accruals`, `ozon_accrual_day`,
-`ozon_realization_article_month` and the partial `ozon_article_summary` use a per-Client-ID lock owned
+`ozon_realization_article_month`, `ozon_return_events` and the partial `ozon_article_summary` use a per-Client-ID lock owned
 by the actual provider worker, so a parent process dying does not release a lock
 still held by an orphaned worker. Different clients can proceed separately.
 The gate uses local OS advisory locks, atomic file replacement, a durable client
@@ -54,7 +54,10 @@ key, in which case it stores `retry_unknown` instead;
 both delta seconds and HTTP-date are supported. HTTP-date also requires a valid
 provider `Date`, and the longer clock interpretation is used. A later request
 is refused until the interval has elapsed on both wall and monotonic clocks in
-the same boot. No provider call is retried automatically. MCP reports a safe
+the same boot. One automatic retry is allowed for a single-request operation
+only after a known 429 with `Retry-After` at most two seconds, provided the
+overall worker deadline leaves time for it. The retry reacquires the same gate;
+the composite article summary and unknown outcomes are not retried. MCP reports a safe
 `retry_after_seconds` in the tool error; `/api/read` may return `Retry-After`.
 An interval that could reproduce a seller key is not returned to the caller.
 The article summary performs two identity lookups and one posting-accrual read

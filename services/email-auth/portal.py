@@ -29,6 +29,7 @@ BRIDGE_OPERATIONS = {'unknown':'операция не определена', 'oz
     'ozon_posting_candidates':'номера отправлений Ozon',
     'ozon_realization_article_month':'месячный отчёт реализации артикула Ozon',
     'ozon_accrual_day':'начисления Ozon за день по SKU',
+    'ozon_return_events':'события возвратов Ozon',
     'wb_prices':'цены Wildberries', 'wb_commissions':'комиссии Wildberries',
     'wb_box_tariffs':'тарифы Wildberries', 'wb_sales_summary':'заказы и выкупы Wildberries'}
 OAUTH_PATHS = frozenset(('/.well-known/oauth-protected-resource',
@@ -67,6 +68,9 @@ def finance_request_preflight(operation, args, creds):
                 ozon_details._text(args['posting_number'],128,secret=api_key)
             if 'last_id' in args:
                 ozon_details._text(args['last_id'],512,empty=True,secret=api_key)
+        if operation == 'ozon_return_events' and isinstance(args,dict):
+            ozon_details._text(args.get('offer_id'),256,secret=api_key)
+            if 'last_id' in args: ozon_details._id(args['last_id'],api_key)
         ozon_mcp.build_request(operation,args,creds)
 
 
@@ -185,7 +189,7 @@ def _provider_read(operation, args, creds, *, request_timeout=15, absolute_deadl
             raw=resp.read(512001)
             if len(raw)>512000: raise finance_gate.ProviderResponseTooLarge('Provider response too large')
             data=decode_provider_payload(raw,preserve_decimal=operation in ('ozon_orders_analytics','ozon_realization_article_month'),
-                                         reject_duplicates=operation in ('ozon_products','ozon_posting_status','ozon_posting_candidates','ozon_realization_article_month','ozon_accrual_day') or operation in ozon_mcp.ozon_details.OPERATIONS)
+                                         reject_duplicates=operation in ('ozon_products','ozon_posting_status','ozon_posting_candidates','ozon_realization_article_month','ozon_accrual_day','ozon_return_events') or operation in ozon_mcp.ozon_details.OPERATIONS)
         except (finance_gate.ProviderResponseTooLarge, urllib.error.HTTPError): raise
         except TimeoutError: raise finance_gate.ProviderBodyTimeout('Provider response timed out') from None
         except urllib.error.URLError as exc:
@@ -332,23 +336,47 @@ def provider_read(operation, args, creds, finance_gate_dir=None):
     except (UnicodeError, json.JSONDecodeError, AttributeError, TypeError):
         raise ValueError('Invalid marketplace worker response') from None
 
+def _finance_read_with_retry(root, creds, read, deadline, *, allow_retry=True):
+    """One bounded retry only after a known short 429 and the shared cooldown."""
+    def attempt():
+        return finance_gate.run(root,creds.get('client_id'),read,(creds.get('api_key'),))
+    try:
+        return attempt()
+    except urllib.error.HTTPError as exc:
+        delay=getattr(exc,'retry_after_seconds',None)
+        source=getattr(exc,'retry_after_source',None)
+        wait=max(1,delay) if type(delay) is int else None
+        if (not allow_retry or exc.code != 429 or source not in ('delta_seconds','http_date') or
+                wait is None or wait > 2 or deadline-time.monotonic() < wait+3):
+            raise
+        original_error=exc
+        exc.close()
+    # Do not hold the shared lock while waiting; the second attempt must
+    # acquire the same gate, which preserves provider and concurrency limits.
+    time.sleep(wait)
+    if deadline-time.monotonic() < 3:
+        raise original_error
+    return attempt()
+
+
 def _provider_worker():
     """Private child entry point; exceptions and upstream bodies are not logged."""
     try:
         request=json.load(sys.stdin)
         if request['operation'] in finance_gate.FINANCE_OPERATIONS:
             finance_request_preflight(request['operation'],request['args'],request['creds'])
-        if request['operation'] == ozon_article_summary.OPERATION:
+        is_finance=request['operation'] in finance_gate.FINANCE_OPERATIONS
+        if is_finance:
             deadline=request.get('deadline_monotonic')
             if type(deadline) not in (int,float) or not math.isfinite(deadline) or deadline < 0:
                 raise ValueError('Invalid provider deadline')
         def read():
-            if request['operation'] == ozon_article_summary.OPERATION:
+            if is_finance:
                 return _provider_read(request['operation'],request['args'],request['creds'],absolute_deadline=deadline)
             return _provider_read(request['operation'],request['args'],request['creds'])
-        value = (finance_gate.run(request.get('finance_gate_dir'),request['creds'].get('client_id'),read,
-                                  (request['creds'].get('api_key'),))
-                 if request['operation'] in finance_gate.FINANCE_OPERATIONS else read())
+        value = (_finance_read_with_retry(request.get('finance_gate_dir'),request['creds'],read,deadline,
+                                          allow_retry=request['operation'] != ozon_article_summary.OPERATION)
+                 if is_finance else read())
         result={'kind':'ok', 'result':value}
     except urllib.error.HTTPError as exc:
         result={'kind':'http', 'status':exc.code}
