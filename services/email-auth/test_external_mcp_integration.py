@@ -249,6 +249,26 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
                     self.assertTrue(result['read_only'])
                     self.assertNotIn('synthetic-private',json.dumps(result))
 
+    def test_monthly_sku_conflict_reaches_mcp_as_blocked_without_quantities(self):
+        token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',self.create()['body']).group(1)
+        self.vault.save('ozon',{'client_id':'777','api_key':'synthetic-private'})
+        self.app.gateway=portal._provider_read
+        payload=test_ozon_finance_reports.monthly_payload()
+        payload['rows'][2]['item']['sku']=10
+        class Opener:
+            def open(self,request,timeout):
+                return test_ozon_article_summary.Response(json.dumps(payload,default=str,ensure_ascii=False).encode())
+        message={'jsonrpc':'2.0','id':7,'method':'tools/call',
+                 'params':{'name':'ozon_realization_article_month','arguments':test_ozon_finance_reports.MONTH_ARGS}}
+        with patch('portal.urllib.request.build_opener',return_value=Opener()):
+            output=json.loads(self.mcp(message,token)['body'])['result']
+        self.assertNotIn('isError',output)
+        result=json.loads(output['content'][0]['text'])
+        self.assertEqual(result['status'],'blocked')
+        self.assertEqual(result['reason'],'sku_offer_id_conflict')
+        self.assertIsNone(result['observed_delivery_units'])
+        self.assertNotIn('by_sku',result)
+
     def test_return_events_reach_authenticated_mcp(self):
         token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',self.create()['body']).group(1)
         self.vault.save('ozon',{'client_id':'777','api_key':'synthetic-private'})
