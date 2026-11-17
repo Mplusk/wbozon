@@ -28,8 +28,11 @@ class ReleaseError(Exception):
 
 WORKER_CONFIG = 'b9c000b89ec0921a9d07d678cd9b1b44a458d959414a579eb753a4942c792fa2'
 # Reviewed portal sources for initial adoption: storage remains compatible across this pair.
-ADOPTION_PORTALS = frozenset(('e0b80bfca4c06201f16ea7e4c6d2e8b89c034408770580e7ef5de6fa99de0b82',
-                              '1015ddabbed83b61e9c77ea66130de5a4a71a15d2a332924a1cba36d0d0dd32e'))
+ADOPTION_SOURCES = (
+    ('e0b80bfca4c06201f16ea7e4c6d2e8b89c034408770580e7ef5de6fa99de0b82',
+     'cf4ffc3a4d7172803836c37e8f26d42ff0dc606244729af94fd254eb0ffa90a4'),
+    ('1015ddabbed83b61e9c77ea66130de5a4a71a15d2a332924a1cba36d0d0dd32e',
+     '5c4d2e6cc80a2d49454256d95c1691478ee7cb1a0e565b459ac5914a0d2679c9'))
 
 
 def command(args, *, data=None, timeout=15):
@@ -111,16 +114,34 @@ def compatible(old, new):
         raise ReleaseError('SQL or schema access changed; a migration rollout is required')
     def storage_owners(directory):
         result = {}
-        for p in (directory / 'service').rglob('*.py'):
-            if p.name.startswith('test_'):
+        root = directory / 'service'
+        modules = {p.relative_to(root).as_posix().removesuffix('.py').replace('/', '.'): p
+                   for p in root.rglob('*.py') if not p.name.startswith('test_')}
+        pending = {n for n, p in modules.items() if p.name == 'portal.py' or
+                   re.search(rb'\b(?:import|from)\s+[^\n#]*\bsqlite3\b', p.read_bytes())}
+        # These named APIs receive provider payloads or presentation data. The audited
+        # portal does not pass them SQLite connections. Pin all other local helpers.
+        isolated = {'ui', 'ozon_mcp', 'ozon_details', 'ozon_article_summary', 'wb_mcp'}
+        while pending:
+            name = pending.pop()
+            p = modules[name]
+            rel = p.relative_to(root).as_posix()
+            if rel in result:
                 continue
             raw = p.read_bytes().replace(b'\r\n', b'\n')
-            if p.name == 'portal.py' or re.search(rb'\b(?:import|from)\s+[^\n#]*\bsqlite3\b', raw):
-                result[p.relative_to(directory / 'service').as_posix()] = digest(raw)
+            result[rel] = digest(raw)
+            for node in ast.walk(ast.parse(raw)):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    names = {alias.name for alias in node.names}
+                    if isinstance(node, ast.ImportFrom) and node.module:
+                        names |= {node.module, *(node.module + '.' + a.name for a in node.names)}
+                    pending.update((names & modules.keys()) - isolated)
         return result
     before, after = storage_owners(old), storage_owners(new)
-    if {before.get('portal.py'), after.get('portal.py')} == ADOPTION_PORTALS:
-        before['portal.py'] = after['portal.py']
+    core = ('portal.py', 'external_mcp.py')
+    if {tuple(s.get(k) for k in core) for s in (before, after)} == set(ADOPTION_SOURCES):
+        for k in core:
+            before[k] = after[k]
     if before != after:
         raise ReleaseError('storage-owning source changed outside the approved rollback contract')
 
@@ -260,7 +281,8 @@ class Host:
                     any(i+1 >= len(argv) or argv[i+1] != b'gunicorn.conf.py' for i in config_flags) or
                     digest((self.releases / release / 'service/gunicorn.conf.py').read_bytes().replace(b'\r\n', b'\n'))
                     != self.cfg.get('worker_config_sha256', WORKER_CONFIG) or any(
-                    a.startswith((b'-k', b'--worker-class', b'--threads', b'--config=', b'--chdir')) for a in argv)):
+                    a.startswith((b'-k', b'--worker-class', b'--threads', b'--config=', b'--chdir')) or
+                    a.startswith(b'-c') and a != b'-c' for a in argv)):
                 raise ReleaseError('unreviewed Gunicorn concurrency override')
             auth, vault = (Path(os.fsdecode(env[k])) for k in (b'DATABASE_PATH', b'VAULT_PATH'))
             gate = Path(os.fsdecode(env[b'OZON_FINANCE_GATE_DIR'])) if b'OZON_FINANCE_GATE_DIR' in env else vault.parent / '.ozon-finance-gates'

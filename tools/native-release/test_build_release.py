@@ -52,6 +52,14 @@ class BuildInputTests(unittest.TestCase):
                 f.write('def handle(db): sql(db, "ALTER " + "TABLE sessions ADD flag INT")\n')
             with self.assertRaises(ReleaseError):
                 compatible(*paths)
+            for p in paths:
+                module = p / 'service/portal.py'
+                module.write_text((paths[0] / 'service/portal.py').read_text().split('# helper')[0] +
+                                  '# helper\nimport helper\ndef migrate(db): helper.update(db)\n')
+                (p / 'service/helper.py').write_text('def update(db): pass')
+            (paths[1] / 'service/helper.py').write_text('def update(db): getattr(db, "execute")("ALTER " + "TABLE sessions ADD flag INT")')
+            with self.assertRaises(ReleaseError):
+                compatible(*paths)
 
     def test_schema_mismatch_keeps_ingress_closed_and_receipt_untouched(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -59,6 +67,6 @@ class BuildInputTests(unittest.TestCase):
             host.check_schema.side_effect = ReleaseError('schema mismatch')
             transaction = Transaction(host)
             with self.assertRaises(ReleaseError):
-                transaction.complete({'schemas': ['old']}, 'old', 'checksum')
-            host.barrier.assert_not_called()
+                transaction.complete({'schemas': ['old'], 'txn': 'fixture', 'mark': 1}, 'old', 'checksum')
+            host.barrier.assert_called_once_with('fixture', 1, True)
             self.assertFalse(transaction.active.exists())

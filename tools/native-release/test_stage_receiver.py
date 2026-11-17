@@ -71,6 +71,19 @@ class StageReceiverTests(unittest.TestCase):
                                  len(self.data), run_id=str(i), run_attempt='1')
             self.assertEqual(len(list(self.directory.glob('*-*-*.tar.gz'))), 2)
 
+    def test_quota_after_interrupted_cleanup_allows_verified_new_upload(self):
+        prior = self.directory / (self.commit + '-1-1.tar.gz')
+        prior.write_bytes(self.data)
+        prior.chmod(0o600)
+        with patch.object(receiver, 'MAX_ARTIFACTS', 1):
+            with self.assertRaises(receiver.Rejected):
+                receiver.receive(self.directory, io.BytesIO(b'bad'), self.commit, self.digest,
+                                 len(self.data), run_id='2', run_attempt='1')
+            self.assertEqual(prior.read_bytes(), self.data)
+            receiver.receive(self.directory, io.BytesIO(self.data), self.commit, self.digest,
+                             len(self.data), run_id='2', run_attempt='1')
+            self.assertFalse(prior.exists())
+
     def test_same_commit_from_different_workflow_attempts_does_not_conflict(self):
         receiver.receive(self.directory, io.BytesIO(self.data), self.commit, self.digest,
                          len(self.data), run_id='123456', run_attempt='1')

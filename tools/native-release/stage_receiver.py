@@ -181,9 +181,20 @@ def receive(directory, stream, commit, digest, size, now=None, run_id=None, run_
                 raise Rejected('unexpected staging entry requires inspection')
         if any(length > MAX_BYTES for _, length in artifacts):
             raise Rejected('oversized existing artifact')
-        if filename not in {a[0] for a in artifacts} and (
-                len(artifacts) >= MAX_ARTIFACTS or sum(a[1] for a in artifacts) + size > MAX_TOTAL_BYTES):
-            raise Rejected('staging storage limit reached')
+        removal = []
+        if filename not in dict(artifacts):
+            count = len(artifacts) + 1
+            total = sum(length for _, length in artifacts) + size
+            removable = sorted((os.stat(n, dir_fd=dfd, follow_symlinks=False).st_mtime_ns, n, length)
+                for n, length in artifacts if re.fullmatch(r'[0-9a-f]{40}-[1-9][0-9]{0,19}-[1-9][0-9]{0,4}\.tar\.gz', n))
+            for _, n, length in removable:
+                if count <= MAX_ARTIFACTS and total <= MAX_TOTAL_BYTES:
+                    break
+                removal.append(n)
+                count -= 1
+                total -= length
+            if count > MAX_ARTIFACTS or total > MAX_TOTAL_BYTES:
+                raise Rejected('staging storage limit reached')
         disk = os.fstatvfs(dfd)
         if filename not in {a[0] for a in artifacts} and disk.f_bavail * disk.f_frsize < MIN_FREE_BYTES + size:
             raise Rejected('insufficient staging space')
@@ -209,6 +220,13 @@ def receive(directory, stream, commit, digest, size, now=None, run_id=None, run_
                 raise Rejected('artifact digest mismatch')
             out.flush()
             os.fsync(out.fileno())
+        # A previous receiver can die immediately after linking an upload. Reclaim
+        # verified cache entries only once this replacement itself is complete.
+        for name in removal:
+            os.unlink(name, dir_fd=dfd)
+        if removal:
+            os.fsync(dfd)
+            artifacts = [(n, length) for n, length in artifacts if n not in removal]
         # Hard-linking is atomic and fails if the final name unexpectedly exists.
         os.link(tempname, filename, src_dir_fd=dfd, dst_dir_fd=dfd, follow_symlinks=False)
         os.unlink(tempname, dir_fd=dfd)

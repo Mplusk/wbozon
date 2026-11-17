@@ -108,7 +108,11 @@ class Transaction:
 
     def complete(self, j, name, sha):
         if 'schemas' in j:
-            self.host.check_schema(j['schemas'])
+            try:
+                self.host.check_schema(j['schemas'])
+            except Exception:
+                self.host.barrier(j['txn'], j['mark'], True)
+                raise
         atomic_json(self.active, {'release': name, 'manifest': sha, 'txn': j['txn'],
                                  'previous': j['old'] if name == j['new'] else j['previous']})
         self.host.barrier(j['txn'], j['mark'], False)
