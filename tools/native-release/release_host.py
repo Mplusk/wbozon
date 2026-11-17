@@ -65,6 +65,13 @@ def process_identity(pid):
     return fields[19], (proc / 'cgroup').read_text().strip().split('::')[-1]
 
 
+def process_uid(pid):
+    for line in Path('/proc', str(pid), 'status').read_text().splitlines():
+        if line.startswith('Uid:'):
+            return int(line.split()[2])
+    raise ReleaseError('missing process identity')
+
+
 def unit_properties(unit, names):
     raw = command(['/usr/bin/systemctl', 'show', unit, *['--property=' + n for n in names]])
     return dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
@@ -93,6 +100,28 @@ def compatible(old, new):
     first = contract(old)
     if len(first) != 5 or first != contract(new):
         raise ReleaseError('startup, storage or finance gate contract changed')
+    if database_access(old) != database_access(new):
+        raise ReleaseError('SQL or schema access changed; a migration rollout is required')
+
+
+def database_access(release):
+    """Compare SQL calls and schema statements across the shipped runtime modules."""
+    root = release / 'service'
+    result = {}
+    for p in root.rglob('*.py'):
+        if p.name.startswith('test_'):
+            continue
+        nodes = []
+        for node in ast.walk(ast.parse(p.read_bytes())):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in (
+                    'execute', 'executemany', 'executescript', 'backup', 'deserialize', 'load_extension'):
+                nodes.append(ast.dump(node))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and re.search(
+                    r'\b(?:ALTER\s+TABLE|(?:CREATE|DROP)\s+(?:TABLE|INDEX|TRIGGER|VIEW)|PRAGMA\s+\w+)', node.value, re.I):
+                nodes.append(node.value)
+        if nodes:
+            result[p.relative_to(root).as_posix()] = sorted(nodes)
+    return result
 
 
 class Host:
@@ -203,6 +232,10 @@ class Host:
             raise ReleaseError('running process and current release differ')
         if environment:
             env = dict(item.split(b'=', 1) for item in (proc / 'environ').read_bytes().split(b'\0') if b'=' in item)
+            argv = (proc / 'cmdline').read_bytes().split(b'\0')
+            if env.get(b'GUNICORN_CMD_ARGS', b'').strip() or any(
+                    a.startswith((b'-k', b'--worker-class', b'--threads')) for a in argv):
+                raise ReleaseError('unreviewed Gunicorn concurrency override')
             auth, vault = (Path(os.fsdecode(env[k])) for k in (b'DATABASE_PATH', b'VAULT_PATH'))
             gate = Path(os.fsdecode(env[b'OZON_FINANCE_GATE_DIR'])) if b'OZON_FINANCE_GATE_DIR' in env else vault.parent / '.ozon-finance-gates'
             if [str(auth), str(vault)] != self.cfg['databases'] or gate != self.gate:
@@ -224,7 +257,8 @@ class Host:
             for worker in members - {pid}:
                 proc = Path('/proc', str(worker))
                 fields = (proc / 'stat').read_text().rsplit(')', 1)[1].split()
-                if int(fields[1]) != pid or b'--provider-worker' in (proc / 'cmdline').read_bytes().split(b'\0'):
+                if (int(fields[1]) != pid or len(list((proc / 'task').iterdir())) != 1 or
+                        b'--provider-worker' in (proc / 'cmdline').read_bytes().split(b'\0')):
                     return False
         except FileNotFoundError:
             return False
@@ -244,25 +278,81 @@ class Host:
             raise ReleaseError('unexpected portal listeners')
         return connections
 
-    def drain(self, name, seconds=35):
+    def mark_socket(self, sock, mark):
+        if mark:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, mark.to_bytes(4, os.sys.byteorder))
+
+    def probe_owners(self, peers, pid, cgroup):
+        # Each sync worker reads exactly one HTTP request at a time. Holding an
+        # incomplete, root-originated request in BOTH workers proves even a handler
+        # whose client sent RST has finished. Process topology alone cannot prove it.
+        rows = Path('/proc/net/tcp').read_text().splitlines()[1:]
+        inodes = set()
+        for row in rows:
+            fields = row.split()
+            if (fields[1] == '0100007F:' + format(self.port, '04X') and fields[2] in peers and fields[3] == '01'):
+                inodes.add('socket:[' + fields[9] + ']')
+        if len(inodes) != 2:
+            return False
+        members = (Path('/sys/fs/cgroup') / cgroup.lstrip('/') / 'cgroup.procs').read_text().split()
+        owned = []
+        for child in members:
+            if int(child) == pid:
+                continue
+            fds = set()
+            for f in Path('/proc', child, 'fd').glob('*'):
+                try:
+                    fds.add(os.readlink(f))
+                except FileNotFoundError:
+                    pass
+            owned.append(fds & inodes)
+        return len(owned) == 2 and all(len(matches) == 1 for matches in owned) and owned[0] != owned[1]
+
+    def drain(self, name, mark, seconds=35, *, require_healthy=False):
         pid, generation, cgroup = self.process(name)
-        end, stable = time.monotonic() + seconds, 0
+        end = time.monotonic() + seconds
         while time.monotonic() < end:
             if not self.sockets() and self.workers_idle(pid, cgroup):
-                stable += 1
-                if stable >= 2 and self.process(name) == (pid, generation, cgroup):
-                    return pid, generation, cgroup
-            else:
-                stable = 0
-            time.sleep(.25)
+                peers = set()
+                with contextlib.ExitStack() as stack:
+                    probes = [stack.enter_context(socket.socket()) for _ in range(2)]
+                    for sock in probes:
+                        sock.settimeout(2)
+                        self.mark_socket(sock, mark)
+                        sock.connect((self.addresses[0], self.port))
+                        sock.sendall(('GET /healthz HTTP/1.1\r\nHost: ' + self.cfg['host'] +
+                                      '\r\nConnection: close\r\n').encode('ascii'))
+                        peers.add('0100007F:' + format(sock.getsockname()[1], '04X'))
+                    proven = False
+                    window = min(end, time.monotonic() + 3)
+                    while time.monotonic() < window:
+                        if (self.probe_owners(peers, pid, cgroup) and self.sockets() == 2 and
+                                self.workers_idle(pid, cgroup) and self.process(name) == (pid, generation, cgroup)):
+                            proven = True
+                            break
+                        time.sleep(.05)
+                    if proven:
+                        for sock in probes:
+                            sock.sendall(b'\r\n')
+                        for sock in probes:
+                            response = http.client.HTTPResponse(sock)
+                            response.begin()
+                            body = response.read(256)
+                            if require_healthy and (response.status != 200 or json.loads(body) != {'status': 'ok'}):
+                                raise ReleaseError('old release failed marked readiness')
+                if proven:
+                    while time.monotonic() < end:
+                        if not self.sockets() and self.workers_idle(pid, cgroup) and self.process(name) == (pid, generation, cgroup):
+                            return pid, generation, cgroup
+                        time.sleep(.05)
+            time.sleep(.1)
         raise ReleaseError('requests still active at drain deadline')
 
     def health(self, mark=0):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.settimeout(2)
-            if mark:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, mark.to_bytes(4, os.sys.byteorder))
+            self.mark_socket(sock, mark)
             sock.connect((self.addresses[0], self.port))
             sock.sendall(('GET /healthz HTTP/1.1\r\nHost: ' + self.cfg['host'] +
                           '\r\nConnection: close\r\n\r\n').encode('ascii'))
@@ -309,17 +399,19 @@ class Host:
     def holder(self):
         unit = self.cfg['holder']
         if unit_properties(unit, ['ActiveState'])['ActiveState'] != 'active':
-            command(['/usr/bin/systemd-run', '--quiet', '--collect', '--unit=' + unit,
+            command(['/usr/bin/systemd-run', '--quiet', '--collect', '--service-type=exec', '--unit=' + unit,
                      '--property=DynamicUser=yes', '--property=User=' + self.cfg['user'],
                      '--property=RuntimeMaxSec=600', '/usr/bin/sleep', '590'])
         hp = int(unit_properties(unit, ['MainPID'])['MainPID'])
         if hp <= 1:
             raise ReleaseError('service identity holder unavailable')
-        return Path('/proc', str(hp)).stat().st_uid
+        return process_uid(hp)
 
     def backup(self, txn):
         target = self.state / 'backups' / txn
         target.mkdir(mode=0o700)
+        atomic_json(target / 'cd-snapshot.json', {'txn': txn})
+        schemas = []
         for file, required in zip(self.cfg['databases'], (('tokens', 'sessions'), ('vault', 'connection_checks'))):
             p = Path(file)
             info = p.lstat()
@@ -334,7 +426,45 @@ class Host:
                     tables = {v[0] for v in dst.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                     if not set(required) <= tables or dst.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
                         raise ReleaseError('database snapshot verification failed')
+                    schemas.append(self.schema(dst))
                 with db.open('rb') as stream:
                     os.fsync(stream.fileno())
         syncdir(target)
         syncdir(target.parent)
+        return schemas
+
+    @staticmethod
+    def schema(db):
+        rows = db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name').fetchall()
+        return digest(json.dumps(rows, separators=(',', ':')).encode())
+
+    def check_schema(self, expected):
+        observed = []
+        for p in self.cfg['databases']:
+            with contextlib.closing(sqlite3.connect(Path(p).as_uri() + '?mode=ro', uri=True, timeout=3)) as db:
+                db.execute('PRAGMA trusted_schema=OFF')
+                observed.append(self.schema(db))
+        if observed != expected:
+            raise ReleaseError('database schema differs from its quiescent snapshot')
+
+    def reserve(self, allocate):
+        # Keep actual allocated blocks on each transaction filesystem for journal
+        # and symlink recovery. A capacity check alone cannot reserve blocks.
+        parents = [self.state]
+        if self.root.stat().st_dev != self.state.stat().st_dev:
+            parents.append(self.root)
+        for parent in parents:
+            p = parent / '.wbozon-cd-recovery-reserve'
+            if allocate:
+                fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                try:
+                    info = os.fstat(fd)
+                    if not stat.S_ISREG(info.st_mode) or info.st_uid or info.st_nlink != 1 or info.st_mode & 0o077:
+                        raise ReleaseError('untrusted recovery reserve')
+                    os.posix_fallocate(fd, 0, 8 * 1024 * 1024)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                syncdir(parent)
+            else:
+                discard(p)

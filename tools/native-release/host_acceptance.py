@@ -14,6 +14,7 @@ import secrets
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -32,6 +33,12 @@ def driver(cfg, name, sha, fault):
             super().phase(journal, phase)
             if phase == fault:
                 os.kill(os.getpid(), signal.SIGKILL)
+        def complete(self, journal, release, manifest):
+            if fault == 'unhealthy-after-open':
+                host.barrier(journal['txn'], journal['mark'], False)
+                (host.gate.parent / ('fail-' + release)).touch()
+                os.kill(os.getpid(), signal.SIGKILL)
+            super().complete(journal, release, manifest)
     with host.locked():
         Inject(host).activate(name, sha, lambda: None)
 
@@ -40,7 +47,7 @@ def suite(python, gate_source):
     tag = 'wbozon-qa-' + secrets.token_hex(3)
     unit, recover, holder = (tag + suffix + '.service' for suffix in ('', '-recover', '-holder'))
     run = str(secrets.randbelow(10**10) + 10**12)
-    root = Path('/opt') / tag
+    root = Path('/var/lib') / (tag + '-releases')
     state = Path('/var/lib') / (tag + '-cd')
     data = Path('/var/lib') / tag
     system = Path('/run/systemd/system')
@@ -130,6 +137,10 @@ def suite(python, gate_source):
         with concurrent.futures.ThreadPoolExecutor() as pool:
             response = pool.submit(request, '/hold')
             until(lambda: (data / 'started').exists())
+            with socket.create_connection(('127.0.0.1', port), timeout=3) as detached:
+                detached.sendall(b'GET /detached HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')
+                until(lambda: (data / 'detached-handler').exists())
+                detached.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
             proc = launch(new, 'none')
             until(lambda: (state / 'pending.json').exists() and
                   host.barrier_exists('wbozon_cd_' + json.loads((state / 'pending.json').read_text())['txn']))
@@ -140,8 +151,8 @@ def suite(python, gate_source):
             else:
                 raise AssertionError('new traffic admitted while draining')
             assert response.result() == b'finished' and proc.wait(timeout=150) == 0
-        assert checked(new) and (data / 'completed').read_text().splitlines() == ['finished', 'finished']
-        print('PASS in-flight finance read completed once; new connections fenced; new release served', flush=True)
+        assert checked(new) and (data / 'completed').read_text().splitlines() == ['finished'] * 3
+        print('PASS live and disconnected handlers completed their finance reads once; new connections fenced', flush=True)
         for phase in ('draining', 'stopping', 'switching', 'starting', 'committed'):
             target = old
             auto = phase != 'starting'
@@ -162,6 +173,11 @@ def suite(python, gate_source):
         until(lambda: checked(old), 140)
         assert not (state / 'permit.json').exists()
         print('PASS failed candidate health restored prior release', flush=True)
+        (data / ('fail-' + new)).unlink()
+        assert launch(new, 'unhealthy-after-open').wait(timeout=150) != 0
+        until(lambda: checked(old), 140)
+        assert not (state / 'permit.json').exists()
+        print('PASS failure after ingress reopened restored prior release', flush=True)
     finally:
         for u in (unit, holder, recover):
             subprocess.run(['/usr/bin/systemctl', 'stop', u], capture_output=True, timeout=100)

@@ -214,6 +214,19 @@ def receive(directory, stream, commit, digest, size, now=None, run_id=None, run_
         os.unlink(tempname, dir_fd=dfd)
         created = False
         os.fsync(dfd)
+        # These are replaceable CI cache copies. Keep legacy and unmanaged names;
+        # prune only completed, versioned uploads after the new one is durable.
+        versioned = []
+        for entry in os.listdir(dfd):
+            if entry != filename and re.fullmatch(r'[0-9a-f]{40}-[1-9][0-9]{0,19}-[1-9][0-9]{0,4}\.tar\.gz', entry):
+                oldfd = _open_regular(dfd, entry, os.O_RDONLY)
+                try:
+                    versioned.append((os.fstat(oldfd).st_mtime_ns, entry))
+                finally:
+                    os.close(oldfd)
+        for _, entry in sorted(versioned, reverse=True)[11:]:
+            os.unlink(entry, dir_fd=dfd)
+        os.fsync(dfd)
     finally:
         if created:
             try:

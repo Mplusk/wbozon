@@ -28,6 +28,9 @@ def application(env, start):
             return [b'{}']
         start('200 OK', [('Content-Type', 'application/json')])
         return [b'{"status":"ok"}']
+    if route == '/detached':
+        (data / 'detached-handler').touch()
+        time.sleep(7)
     for name, tables in (('auth.sqlite', ['tokens', 'sessions']), ('vault.sqlite', ['vault', 'connection_checks'])):
         with sqlite3.connect(data / name) as db:
             for table in tables:

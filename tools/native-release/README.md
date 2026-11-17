@@ -17,8 +17,10 @@ The controller and its trust policy are installed separately by the administrato
 Before stopping the portal, the controller fences new connections on its two
 listener addresses, waits for established requests and provider children to exit,
 then holds every existing Ozon finance lock. The deadline leaves a busy portal
-serving its original version. A stopped service gets consistent, checked SQLite
-backups. The release link changes atomically. Readiness checks cover the process
+serving its original version. Two marked connections verify that both sync workers
+have finished their handlers, including requests whose client disconnected.
+The controller backs up and checks both quiescent SQLite databases before stop.
+The release link changes atomically. Readiness checks cover the schema, process
 directory, two workers, real HTTP response and the existing finance gate in the
 running service's namespace.
 
@@ -28,7 +30,10 @@ failure. The timer also runs after boot and every 30 seconds. During an unfinish
 transaction the portal's ExecCondition requires a live controller holding the
 deployment lock. Recovery preserves the databases, finance epochs, provider
 cooldowns and uncertain outcomes. After the durable commit it completes activation
-of the healthy new version. Before that point it restores the verified prior version.
+of the healthy new version. A failed recheck after admission reopens also triggers
+a fresh drain and rollback. The controller reserves recovery disk blocks before
+fencing, keeps the five most recent managed builds and snapshots plus protected
+release targets, and discards temporary wheelhouses after each successful build.
 
 For operations, inspect the GitHub job **Deploy and verify production portal**,
 the journal of the corresponding wbozon-deploy-RUN-ATTEMPT.service and
@@ -247,9 +252,9 @@ release branch. A separate, fresh GitHub runner downloads the exact artifact ID
 and compares its tarball digest with the builder's job output; the build and tests
 do not run in the job containing the staging key. Uploads use
 pinned SSH host keys and encrypted GitHub secrets.
-Staging is bounded to 40 artifacts or 300 MB and does not automatically delete
-finished files; when full, it fails until an independently checked cleanup is
-performed. Upload rate limits use the host wall clock. The free-space precheck
+Staging is bounded to 40 artifacts or 300 MB. After a new upload is durable, it
+keeps the twelve newest versioned cache entries and preserves legacy names.
+Upload rate limits use the host wall clock. The free-space precheck
 does not reserve disk blocks against other services. Staging does **not** enable
 automatic deployment or switch the running service.
 Concurrent staging jobs are serialized by GitHub; a newer queued job may replace

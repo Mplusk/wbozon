@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import sys
 import time
 
@@ -14,7 +15,7 @@ import build_release
 import github_artifact
 from finance_guard import FinanceGuard
 from native_release import secure
-from release_host import Host, ReleaseError, atomic_json, boot_id, command, compatible, discard, process_identity
+from release_host import Host, ReleaseError, atomic_json, boot_id, command, compatible, discard, process_identity, process_uid
 
 CONFIG = '/etc/wbozon-cd.json'
 
@@ -79,6 +80,8 @@ class Transaction:
             self.host.check_unit()
             command(['/usr/bin/systemctl', 'start', self.host.unit], timeout=100)
             self.ready(j, name, guard)
+            if 'schemas' in j:
+                self.host.check_schema(j['schemas'])
         finally:
             discard(self.permit)
 
@@ -93,7 +96,7 @@ class Transaction:
                 self.host.sockets()
                 # systemd may reassign its DynamicUser after a reboot. Revalidate the
                 # same pinned directories, lock inodes, epochs and bytes with the new UID.
-                guard.uid = Path('/proc', str(pid)).stat().st_uid
+                guard.uid = process_uid(pid)
                 guard.verify('/proc/' + str(pid) + '/root', '/proc/' + str(pid) + '/ns/time')
                 if self.host.process(name) == (pid, generation, cgroup):
                     return
@@ -104,7 +107,8 @@ class Transaction:
             time.sleep(.3)
 
     def complete(self, j, name, sha):
-        atomic_json(self.active, {'release': name, 'manifest': sha, 'txn': j['txn']})
+        atomic_json(self.active, {'release': name, 'manifest': sha, 'txn': j['txn'],
+                                 'previous': j['old'] if name == j['new'] else j['previous']})
         self.host.barrier(j['txn'], j['mark'], False)
         self.host.health()
         discard(self.permit)
@@ -125,25 +129,28 @@ class Transaction:
         h.check_unit()
         h.settled()
         old_pid, _, _ = h.process(old)
-        if h.holder() != Path('/proc', str(old_pid)).stat().st_uid:
+        if h.holder() != process_uid(old_pid):
             raise ReleaseError('DynamicUser holder identity mismatch')
-        h.health()
         h.sockets()
         check_main()
+        h.reserve(True)
         j = {'txn': secrets.token_hex(8), 'mark': secrets.randbelow(2**30) + 1,
-             'old': old, 'old_sha': old_sha, 'new': name, 'new_sha': sha}
+             'old': old, 'old_sha': old_sha, 'new': name, 'new_sha': sha,
+             'previous': json.loads(secure(self.active).read_bytes()).get('previous', old) if self.active.exists() else old}
         self.phase(j, 'draining')
         h.barrier(j['txn'], j['mark'], True)
-        pid, generation, cg = h.drain(old)
+        pid, generation, cg = h.drain(old, j['mark'], require_healthy=True)
         with self.gate_lock() as guard:
             guard.verify('/proc/' + str(pid) + '/root', '/proc/' + str(pid) + '/ns/time')
             if h.sockets() or not h.workers_idle(pid, cg) or h.process(old) != (pid, generation, cg):
                 raise ReleaseError('portal changed during drain')
+            # Both sync workers have finished their handlers, the fence is closed
+            # and finance is locked. A full backup disk must leave this master alive.
+            j['schemas'] = h.backup(j['txn'])
             self.phase(j, 'stopping')
             h.stop()
             h.release_group(old_dir)
             h.verify(old, old_sha)
-            h.backup(j['txn'])
             guard.verify()
             check_main()
             self.phase(j, 'switching')
@@ -152,13 +159,29 @@ class Transaction:
             self.start(j, name, guard)
             self.phase(j, 'committed')
         self.complete(j, name, sha)
+        h.reserve(False)
 
     def recover(self):
         if not self.pending.exists():
             return
-        h = self.host
         j = json.loads(secure(self.pending).read_bytes())
+        self.host.reserve(False)
         committed = j['phase'] == 'committed'
+        if committed:
+            try:
+                self.reconcile(j, True)
+                return
+            except Exception:
+                # A new version can fail *after* private readiness, even after
+                # admission reopened. Fence and drain it again before switching back.
+                if not self.pending.exists():
+                    raise
+                self.host.verify(j['old'], j['old_sha'])
+                self.phase(j, 'rolling-back')
+        self.reconcile(j, False)
+
+    def reconcile(self, j, committed):
+        h = self.host
         name, sha = (j['new'], j['new_sha']) if committed else (j['old'], j['old_sha'])
         if h.current() not in (j['old'], j['new']):
             raise ReleaseError('unexpected release during recovery')
@@ -183,10 +206,10 @@ class Transaction:
         h.barrier(j['txn'], j['mark'], True)
         h.holder()
         if props['ActiveState'] == 'active':
-            h.drain(h.current())
+            h.drain(h.current(), j['mark'])
         with self.gate_lock(recovery=True) as guard:
             if props['ActiveState'] == 'active':
-                p, _, _ = h.drain(h.current())
+                p, _, _ = h.drain(h.current(), j['mark'])
                 guard.verify('/proc/' + str(p) + '/root', '/proc/' + str(p) + '/ns/time')
             if h.props()['ActiveState'] not in ('inactive', 'failed'):
                 h.stop()
@@ -197,6 +220,41 @@ class Transaction:
             h.switch(name, j['txn'])
             self.start(j, name, guard)
         self.complete(j, name, sha)
+
+
+def prune(host, txn):
+    # Only delete previously registered CI builds and controller-created snapshots.
+    # Always keep the running release, its predecessor and the five most recent entries.
+    from native_release import syncdir
+    current, _ = txn.receipt()
+    keep = {current, host.cfg['baseline']}
+    if txn.active.exists():
+        keep.add(json.loads(secure(txn.active).read_bytes()).get('previous'))
+    registry = host.state / 'managed'
+    registry.mkdir(mode=0o700, exist_ok=True)
+    receipts = sorted(registry.glob('*.json'), key=lambda p: p.stat().st_mtime_ns, reverse=True)
+    for receipt in receipts[5:]:
+        name = receipt.stem
+        if name in keep:
+            continue
+        if (not re.fullmatch(r'[0-9a-f]{40}-[1-9][0-9]{0,19}-[1-9][0-9]{0,4}', name) or
+                json.loads(secure(receipt).read_bytes()) != {'release': name}):
+            raise ReleaseError('invalid managed build receipt')
+        for parent in (host.releases, build_release.CANDIDATES):
+            path = parent / name
+            if path.exists():
+                shutil.rmtree(secure(path, True))
+                syncdir(parent)
+        discard(receipt)
+    snapshots = []
+    directory = host.state / 'backups'
+    for entry in directory.iterdir():
+        if re.fullmatch('[0-9a-f]{16}', entry.name) and (entry / 'cd-snapshot.json').is_file():
+            if json.loads(secure(entry / 'cd-snapshot.json').read_bytes()) == {'txn': entry.name}:
+                snapshots.append(entry)
+    for path in sorted(snapshots, key=lambda p: p.stat().st_mtime_ns, reverse=True)[5:]:
+        shutil.rmtree(secure(path, True))
+        syncdir(directory)
 
 
 def deploy(host, txn, request_file):
@@ -225,10 +283,19 @@ def deploy(host, txn, request_file):
         host.process(active)
         host.health()
         return
+    prune(host, txn)
+    for directory in (host.state, host.releases):
+        if shutil.disk_usage(directory).free < 512 * 1024**2:
+            raise ReleaseError('insufficient free space for another build')
     print('Verified GitHub artifact', request['artifact_id'], flush=True)
     release = host.releases / name
+    receipt = host.state / 'managed' / (name + '.json')
+    if release.exists() or (build_release.CANDIDATES / name).exists() or receipt.exists():
+        raise ReleaseError('build attempt already exists; use a fresh workflow attempt')
+    atomic_json(receipt, {'release': name})
     sha = build_release.prepare(files, release, build_release.CANDIDATES / name,
                                 run_id=run, attempt=attempt, release_gid=host.group)
+    shutil.rmtree(secure(build_release.CANDIDATES / name, True))
     txn.activate(name, sha, check_main)
 
 

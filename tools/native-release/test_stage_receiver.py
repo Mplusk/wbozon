@@ -55,6 +55,15 @@ class StageReceiverTests(unittest.TestCase):
         self.receive()
         self.assertEqual(path.read_bytes(), self.data)
 
+    def test_bounded_versioned_cache_keeps_legacy_and_new_upload(self):
+        self.receive()
+        for i in range(1, 15):
+            receiver.receive(self.directory, io.BytesIO(self.data), self.commit, self.digest,
+                             len(self.data), run_id=str(i), run_attempt='1')
+        self.assertEqual(len(list(self.directory.glob('*-*-*.tar.gz'))), 12)
+        self.assertTrue((self.directory / (self.commit + '.tar.gz')).exists())
+        self.assertTrue((self.directory / (self.commit + '-14-1.tar.gz')).exists())
+
     def test_same_commit_from_different_workflow_attempts_does_not_conflict(self):
         receiver.receive(self.directory, io.BytesIO(self.data), self.commit, self.digest,
                          len(self.data), run_id='123456', run_attempt='1')
