@@ -1,4 +1,46 @@
-# Manual native release controller (review-only, not installed)
+# Production deployment from GitHub Actions
+
+A push to main runs the repository, portal, egress and release tests. The native
+candidate job tests its packaged source and wheels. Its separate systemd fixture
+opens a synthetic finance request during deployment, kills controllers at five
+transaction phases and starts a candidate that deliberately fails readiness.
+The final production job waits for server activation and checks the public HTTPS
+health response. Branch builds do not activate production.
+
+The SSH deploy key runs only dispatch.py. It submits the GitHub job's temporary
+read token on stdin to a root-owned transient systemd service. The host verifies
+the run, successful jobs, current main, artifact digest, Git source and pinned
+wheels. It installs the native runtime offline and executes candidate tests under
+the dedicated wbozon-test identity with private networking and bounded tmpfs.
+The controller and its trust policy are installed separately by the administrator.
+
+Before stopping the portal, the controller fences new connections on its two
+listener addresses, waits for established requests and provider children to exit,
+then holds every existing Ozon finance lock. The deadline leaves a busy portal
+serving its original version. A stopped service gets consistent, checked SQLite
+backups. The release link changes atomically. Readiness checks cover the process
+directory, two workers, real HTTP response and the existing finance gate in the
+running service's namespace.
+
+A synced pending.json records the rollback target before ingress changes.
+The recovery service reconciles process state and the actual release link after
+failure. The timer also runs after boot and every 30 seconds. During an unfinished
+transaction the portal's ExecCondition requires a live controller holding the
+deployment lock. Recovery preserves the databases, finance epochs, provider
+cooldowns and uncertain outcomes. After the durable commit it completes activation
+of the healthy new version. Before that point it restores the verified prior version.
+
+For operations, inspect the GitHub job **Deploy and verify production portal**,
+the journal of the corresponding wbozon-deploy-RUN-ATTEMPT.service and
+wbozon-cd-recover.service, and the root-private active.json under
+/var/lib/3dprinta-native-deployer. The single-host adoption script verifies the
+original unit and baseline before installing the units in systemd/. Revisions
+that change the pinned dependency set, storage initialization or finance gate
+contract require a compatible rollout plan.
+
+## Historical manual controller
+
+The remaining notes describe the earlier manual prototype and staging design.
 
 Only `3dprinta-portal.service`, `/opt/3dprinta-portal/current` and its releases,
 and private `/var/lib/3dprinta-native-deployer` are in scope. No deployment workflow,

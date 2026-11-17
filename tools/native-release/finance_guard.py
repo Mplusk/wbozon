@@ -54,14 +54,15 @@ def _boot_id(path):
 
 
 class FinanceGuard:
-    def __init__(self, root, uid, wait_seconds=25):
+    def __init__(self, root, uid, wait_seconds=25, *, allow_uncertain=False):
         self.root = pathlib.Path(root)
         self.uid = uid
         if not self.root.is_absolute() or '..' in self.root.parts or not self.root.name:
             raise GuardError('absolute gate path required')
-        if type(uid) is not int or uid < 0 or not 0 <= wait_seconds <= 60:
+        if type(uid) is not int or uid < 0 or not 0 <= wait_seconds <= 60 or type(allow_uncertain) is not bool:
             raise GuardError('invalid guard settings')
         self.wait_seconds = wait_seconds
+        self.allow_uncertain = allow_uncertain
         self.stack = None
         self.locks = []
         self._used = False
@@ -253,6 +254,11 @@ class FinanceGuard:
             if status == 'idle':
                 if set(state) != {'version', 'status', 'generation'}:
                     raise GuardError('invalid gate state')
+            elif status in ('in_flight', 'retry_unknown') and self.allow_uncertain:
+                # Recovery may restore service availability, but never resets an
+                # uncertain provider outcome. The application keeps it blocked.
+                if set(state) != {'version', 'status', 'generation'}:
+                    raise GuardError('invalid uncertain gate state')
             elif status == 'retry':
                 if (set(state) != {'version','status','at_wall','at_monotonic','delay','source','boot','generation'} or
                         type(state['delay']) is not int or not 0 <= state['delay'] <= 2147483647 or
@@ -263,7 +269,8 @@ class FinanceGuard:
                 boot = _boot_id('/proc/sys/kernel/random/boot_id')
                 if (hashlib.sha256(boot).hexdigest() != state['boot'] or
                         time.monotonic() < state['at_monotonic']):
-                    raise GuardError('retry state has unknown remaining time')
+                    if not self.allow_uncertain:
+                        raise GuardError('retry state has unknown remaining time')
             else:
                 raise GuardError('uncertain finance state')
         if self.states is None:

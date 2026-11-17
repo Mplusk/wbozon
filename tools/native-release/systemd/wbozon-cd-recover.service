@@ -1,0 +1,11 @@
+[Unit]
+Description=Recover an interrupted marketplace portal deployment
+After=local-fs.target network-online.target
+ConditionPathExists=/var/lib/3dprinta-native-deployer/pending.json
+
+[Service]
+Type=oneshot
+UMask=0077
+LimitCORE=0
+TimeoutStartSec=4min
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/wbozon-cd/cd.py recover

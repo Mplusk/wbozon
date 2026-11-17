@@ -71,6 +71,19 @@ class FinanceGuardTests(unittest.TestCase):
             with self.guard():
                 self.fail('must not acquire')
 
+    def test_recovery_can_hold_unknown_state_without_clearing_it(self):
+        with self.assertRaises(TimeoutError):
+            finance_gate.run(self.root, '101', lambda: (_ for _ in ()).throw(TimeoutError()))
+        key = finance_gate._key('101')
+        state = pathlib.Path(self.root, key + '.json')
+        before = state.read_bytes()
+        with FinanceGuard(self.root, os.getuid(), .2, allow_uncertain=True) as guard:
+            guard.verify()
+        self.assertEqual(state.read_bytes(), before)
+        with self.assertRaises(finance_gate.GateError) as error:
+            finance_gate.run(self.root, '101', lambda: self.fail('unknown state must block retry'))
+        self.assertEqual(error.exception.reason, 'retry_time_unknown')
+
     def test_existing_request_is_allowed_to_finish_before_guard(self):
         started, finish = threading.Event(), threading.Event()
         def request():
@@ -130,6 +143,9 @@ class FinanceGuardTests(unittest.TestCase):
         with self.assertRaises(GuardError):
             with self.guard(.15):
                 self.fail('another process owns the client lock')
+        with self.assertRaises(GuardError):
+            with FinanceGuard(self.root, os.getuid(), .15, allow_uncertain=True):
+                self.fail('recovery must also wait for the provider')
         proc.stdin.write('\n')
         proc.stdin.flush()
         self.assertEqual(proc.wait(timeout=5), 0)
@@ -294,6 +310,27 @@ class FinanceGuardTests(unittest.TestCase):
         with self.assertRaises(finance_gate.GateError) as error:
             finance_gate.run(self.root, '101', lambda: self.fail('cooldown must remain'))
         self.assertEqual(error.exception.reason, 'cooldown')
+
+    def test_recovery_preserves_retry_from_another_boot(self):
+        def limited():
+            raise urllib.error.HTTPError('https://invalid.example', 429, 'synthetic', {'Retry-After': '20'}, None)
+        with self.assertRaises(urllib.error.HTTPError):
+            finance_gate.run(self.root, '101', limited)
+        state = pathlib.Path(self.root, finance_gate._key('101') + '.json')
+        value = json.loads(state.read_text())
+        value['boot'] = '0' * 64
+        state.write_text(json.dumps(value))
+        before = state.read_bytes()
+        with self.assertRaises(GuardError):
+            with self.guard():
+                self.fail('unknown retry must block a deployment')
+        with FinanceGuard(self.root, os.getuid(), .2, allow_uncertain=True) as guard:
+            guard.verify()
+        self.assertEqual(state.read_bytes(), before)
+
+        with self.assertRaises(finance_gate.GateError) as error:
+            finance_gate.run(self.root, '101', lambda: self.fail('unknown retry must remain blocked'))
+        self.assertEqual(error.exception.reason, 'retry_time_unknown')
 
     def test_cooldown_replaced_while_locked_is_detected(self):
         def limited():

@@ -190,6 +190,17 @@ jobs:
             --require-hashes -r "$bundle/requirements-offline.lock"
           (cd "$bundle/service" && PYTHONDONTWRITEBYTECODE=1 "$venv/bin/python" -m unittest -q)
           PYTHONDONTWRITEBYTECODE=1 "$venv/bin/python" "$bundle/test_native.py"
+      - name: Exercise draining and crash recovery on a separate local systemd portal
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo groupadd --system wbozon-release
+          sudo install -d -m 0755 /opt/staging-account-acceptance
+          sudo cp -a "$RUNNER_TEMP/native-candidate-venv" /opt/staging-account-acceptance/venv
+          sudo chmod -R a+rX /opt/staging-account-acceptance/venv
+          sudo python3 -u -I tools/native-release/host_acceptance.py \
+            --python /opt/staging-account-acceptance/venv/bin/python \
+            --gate-source services/email-auth/finance_gate.py
       - name: Package candidate with source provenance and hashes
         shell: bash
         run: |
@@ -297,3 +308,46 @@ jobs:
             -o GlobalKnownHostsFile=/dev/null -o ClearAllForwardings=yes \
             -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=2 \
             staging-account@portal.example.invalid "stage $GITHUB_SHA $GITHUB_RUN_ID $BUILD_ATTEMPT $digest $bytes" < "$artifact"
+
+  native-deploy:
+    name: Deploy and verify production portal
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [native-candidate, native-stage]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    concurrency:
+      group: wbozon-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      # This runner never checks out or executes application or artifact code.
+      - name: Request verified deployment and wait for production readiness
+        shell: bash
+        env:
+          HOST_KEY: ${{ secrets.WBOZON_STAGE_KNOWN_HOSTS }}
+          DEPLOY_KEY: ${{ secrets.WBOZON_DEPLOY_SSH_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ needs.native-candidate.outputs.artifact_id }}
+          BUILD_ATTEMPT: ${{ needs.native-candidate.outputs.artifact_attempt }}
+          TAR_SHA256: ${{ needs.native-candidate.outputs.artifact_sha256 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          keys="$(mktemp -d "$RUNNER_TEMP/wbozon-deploy.XXXXXX")"
+          trap 'rm -f "$keys/id" "$keys/known_hosts"; rmdir "$keys"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$keys/id"
+          printf '%s\n' "$HOST_KEY" > "$keys/known_hosts"
+          unset DEPLOY_KEY HOST_KEY
+          python3 -c 'import json,os,sys; e=os.environ; json.dump(dict(commit=e["GITHUB_SHA"],run_id=e["GITHUB_RUN_ID"],attempt=e["GITHUB_RUN_ATTEMPT"],artifact_id=e["ARTIFACT"],build_attempt=e["BUILD_ATTEMPT"],tar_sha256=e["TAR_SHA256"],token=e["GH_TOKEN"]),sys.stdout)' |
+            env -u GH_TOKEN ssh -T -i "$keys/id" -o IdentitiesOnly=yes -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$keys/known_hosts" \
+              -o GlobalKnownHostsFile=/dev/null -o ClearAllForwardings=yes \
+              -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=4 \
+              deploy-user@portal.example.invalid deploy
+      - name: Verify public health over HTTPS
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --retry 2 --max-time 12 https://3dprinta.shop/healthz |
+            python3 -c 'import json,sys; assert json.load(sys.stdin) == {"status":"ok"}'

@@ -1,0 +1,11 @@
+[Unit]
+Description=Reconcile an interrupted marketplace portal deployment after boot or process loss
+
+[Timer]
+OnBootSec=15s
+OnCalendar=*-*-* *:*:00,30
+AccuracySec=1s
+Unit=wbozon-cd-recover.service
+
+[Install]
+WantedBy=timers.target
