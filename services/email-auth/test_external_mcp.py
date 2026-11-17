@@ -4,6 +4,7 @@ import json
 import unittest
 
 import external_mcp as mcp
+import ozon_mcp
 
 
 class ExternalMCPTests(unittest.TestCase):
@@ -38,7 +39,7 @@ class ExternalMCPTests(unittest.TestCase):
     def test_read_only_tool_list_and_matching_validation(self):
         out=self.request(self.rpc('tools/list'),headers={'HTTP_MCP_PROTOCOL_VERSION':'2025-11-25'})
         tools=out['body']['result']['tools']
-        self.assertEqual({t['name'] for t in tools}, {'ozon_products','ozon_prices','ozon_orders_analytics','ozon_posting_status','wb_products','wb_prices','wb_commissions','wb_box_tariffs','wb_sales_summary'})
+        self.assertEqual({t['name'] for t in tools}, {'ozon_products','ozon_product_info','ozon_accrual_types','ozon_accrual_day','ozon_posting_accruals','ozon_article_summary','ozon_realization_article_month','ozon_prices','ozon_orders_analytics','ozon_posting_status','ozon_posting_candidates','wb_products','wb_prices','wb_commissions','wb_box_tariffs','wb_sales_summary'})
         self.assertTrue(all(t['annotations']['readOnlyHint'] and not t['annotations']['destructiveHint'] for t in tools))
         self.assertTrue(all(t['_meta']['securitySchemes']==[{'type':'oauth2','scopes':['mcp:read']}] for t in tools))
         self.assertTrue(all(t['securitySchemes']==t['_meta']['securitySchemes'] for t in tools))
@@ -51,6 +52,34 @@ class ExternalMCPTests(unittest.TestCase):
         self.assertEqual(out['body']['id'],'client-id')
         self.assertEqual(self.calls,[('key-id','wb_prices',params['arguments'])])
         self.assertTrue(json.loads(out['body']['result']['content'][0]['text'])['read_only'])
+
+    def test_oversized_tool_result_is_explicit_and_not_silently_truncated(self):
+        params={'name':'ozon_posting_accruals','arguments':{'posting_numbers':['A'],'view':'details'}}
+        out=self.request(self.rpc('tools/call',params),execute=lambda *_:{'data':'x'*(mcp.MAX_OUTPUT+1)})
+        result=out['body']['result']
+        self.assertTrue(result['isError'])
+        info=json.loads(result['content'][0]['text'])
+        self.assertEqual(info['error'],'response_too_large')
+        self.assertIn('не был обрезан',info['message'])
+        self.assertNotIn('x'*100, json.dumps(result))
+
+    def test_ozon_product_sku_reaches_mcp_client_with_limitations(self):
+        listed = self.request(self.rpc('tools/list'))['body']['result']['tools']
+        description = next(tool['description'] for tool in listed if tool['name'] == 'ozon_products')
+        self.assertIn('SKU', description)
+        self.assertIn('Названия не возвращаются', description)
+        self.assertIn('не подтверждены', description)
+        def run(_, name, args):
+            return ozon_mcp.project_response(name, args, {'result': {'items': [
+                {'product_id': 7, 'offer_id': '0007', 'sku': 9007199254740993}], 'last_id': ''}},
+                {'client_id': '123', 'api_key': 'synthetic-api-key'})
+        response = self.request(self.rpc('tools/call', {'name': 'ozon_products', 'arguments': {'limit': 1}}), execute=run)
+        result = json.loads(response['body']['result']['content'][0]['text'])
+        self.assertEqual(result['items'][0]['offer_id'], '0007')
+        self.assertEqual(result['items'][0]['sku'], '9007199254740993')
+        self.assertEqual(result['identity']['sku_coverage'], 'not_verified')
+        self.assertEqual(result['pagination_state'], 'empty_cursor')
+        self.assertNotIn('synthetic-api-key', json.dumps(response))
     def test_order_reports_accept_period_and_reject_invalid_arguments(self):
         period={'date_from':'2026-11-02', 'date_to':'2026-11-08'}
         for name in ('ozon_orders_analytics','wb_sales_summary'):
@@ -126,7 +155,7 @@ class ExternalMCPTests(unittest.TestCase):
         self.assertIn('2025-11-25',result['supportedVersions'])
         self.assertEqual(result['_meta']['io.modelcontextprotocol/serverInfo']['name'],'sidzen-marketplace-readonly')
         listed=self.modern('tools/list')['body']['result']
-        self.assertEqual(listed['resultType'],'complete');self.assertEqual(len(listed['tools']),9)
+        self.assertEqual(listed['resultType'],'complete');self.assertEqual(len(listed['tools']),len(mcp.TOOLS))
         self.assertEqual((listed['ttlMs'],listed['cacheScope']),(0,'private'))
         call=self.modern('tools/call',{'name':'ozon_products','arguments':{'limit':1}})
         self.assertEqual(call['body']['result']['resultType'],'complete')

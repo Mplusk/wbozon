@@ -18,6 +18,24 @@ class WBOperations(unittest.TestCase):
             self.assertTrue(any(handler is wb_mcp.NoRedirect for handler in opener.call_args.args))
             self.assertNotIn(self.secret,json.dumps(result,ensure_ascii=False))
             return result,request
+
+    def test_seller_identifier_is_exact_or_projection_is_rejected(self):
+        args={'date_from':'2026-11-09','date_to':'2026-11-15','limit':2}
+        metrics={'period':{'start':args['date_from'],'end':args['date_to']},
+                 'orderCount':1,'orderSum':10,'buyoutCount':0,'buyoutSum':0,'cancelCount':0,'cancelSum':0}
+        def payloads(value):
+            yield 'wb_products', {'limit':1}, {'cards':[{'nmID':13,'vendorCode':value}]}
+            yield 'wb_prices', {'limit':1}, {'data':{'listGoods':[{'nmID':13,'vendorCode':value}]}}
+            yield 'wb_sales_summary', args, {'data':{'currency':'RUB','products':[{'product':{'nmId':13,'vendorCode':value},'statistic':{'selected':metrics}}]}}
+        for value in ('3000030','003000030','[REDACTED]','X'*256,None):
+            for op, params, payload in payloads(value):
+                result,_=self.read(op,params,payload)
+                row=result['items'][0]
+                self.assertEqual((row['product'] if op=='wb_sales_summary' else row)['vendorCode'],value)
+        for value in ('X'*256+'A',self.secret,3000030,True):
+            for op,params,payload in payloads(value):
+                with self.subTest(op=op), self.assertRaisesRegex(ValueError,'^Unsafe provider identifier$'):
+                    self.read(op,params,payload)
     def test_products_cursor_request_and_projection(self):
         payload={'cards':[{'nmID':123,'title':'item','description':self.secret,'phone':'private','sizes':[{'skus':['private']}]}], 'cursor':{'updatedAt':'2026-11-15T12:00:00Z','nmID':123,'total':1},'error':False}
         args={'limit':1,'updated_at':'2026-11-14T12:00:00Z','nm_id':100}
@@ -51,13 +69,15 @@ class WBOperations(unittest.TestCase):
         payload['cursor']['nmID']=huge
         with self.assertRaises(ValueError):self.read('wb_products',{'limit':1},payload)
     def test_prices_offset_and_exact_product(self):
-        payload={'data':{'listGoods':[{'nmID':13,'currencyIsoCode4217':'RUB','vendorCode':self.secret,'sizes':[{'price':10,'other':self.secret}]}]},'error':False}
+        payload={'data':{'listGoods':[{'nmID':13,'currencyIsoCode4217':'RUB','vendorCode':'safe-offer','sizes':[{'price':10,'other':self.secret}]}]},'error':False}
         result,request=self.read('wb_prices',{'limit':1,'offset':20},payload)
         self.assertEqual(urlsplit(request.full_url).hostname,'discounts-prices-api.wildberries.ru')
         self.assertEqual(parse_qs(urlsplit(request.full_url).query),{'limit':['1'],'offset':['20']})
         self.assertEqual(result['offset'],20); self.assertEqual(result['next_offset'],21)
         self.assertEqual(result['items'][0]['currencyIsoCode4217'],'RUB')
-        self.assertEqual(result['items'][0]['vendorCode'],'[REDACTED]')
+        self.assertEqual(result['items'][0]['vendorCode'],'safe-offer')
+        unsafe={'data':{'listGoods':[{'nmID':13,'vendorCode':self.secret}]},'error':False}
+        with self.assertRaisesRegex(ValueError,'^Unsafe provider identifier$'): self.read('wb_prices',{'limit':1},unsafe)
         result,request=self.read('wb_prices',{'limit':1,'nm_id':13},payload)
         self.assertEqual(parse_qs(urlsplit(request.full_url).query)['filterNmID'],['13'])
         self.assertIsNone(result['next_offset'])
@@ -77,14 +97,14 @@ class WBOperations(unittest.TestCase):
         self.assertEqual(result['currency'],'RUB');self.assertEqual(result['items'],[{'warehouseName':'A','boxDeliveryBase':'100'}])
     def test_sales_funnel_period_pagination_and_separate_metrics(self):
         args={'date_from':'2026-11-09','date_to':'2026-11-15','limit':1}
-        row={'product':{'nmId':13,'vendorCode':self.secret,'title':'item','phone':self.secret},
+        row={'product':{'nmId':13,'vendorCode':'safe-offer','title':'item','phone':self.secret},
              'statistic':{'selected':{'period':{'start':args['date_from'],'end':args['date_to']},
                 'orderCount':4,'orderSum':400,'buyoutCount':2,'buyoutSum':200,'cancelCount':1,'cancelSum':100}}}
         result,request=self.read('wb_sales_summary',args,{'data':{'currency':'RUB','products':[row]}})
         self.assertEqual(request.full_url,'https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/products')
         self.assertEqual(request.method,'POST')
         self.assertEqual(json.loads(request.data),{'selectedPeriod':{'start':args['date_from'],'end':args['date_to']},'skipDeletedNm':False,'limit':1,'offset':0})
-        self.assertEqual(result['items'][0]['product'],{'nmId':13,'vendorCode':'[REDACTED]','title':'item'})
+        self.assertEqual(result['items'][0]['product'],{'nmId':13,'vendorCode':'safe-offer','title':'item'})
         self.assertEqual(result['items'][0]['metrics'],{'orderCount':4,'orderSum':400,'buyoutCount':2,'buyoutSum':200,'cancelCount':1,'cancelSum':100})
         self.assertEqual(result['page_totals'],result['items'][0]['metrics'])
         self.assertEqual(result['currency'],'RUB'); self.assertFalse(result['complete']);self.assertTrue(result['has_more']);self.assertEqual(result['next_offset'],1)
@@ -98,10 +118,61 @@ class WBOperations(unittest.TestCase):
         self.assertEqual(result['page_totals']['buyoutSum'],400)
         self.assertEqual(result['page_totals']['cancelSum'],200)
         self.assertTrue(result['complete'])
+        result,_=self.read('wb_sales_summary',{**args,'offset':1000000},{'data':{'currency':'RUB','products':[row]}})
+        self.assertTrue(result['has_more'])
+        self.assertIsNone(result['next_offset'])
+        self.assertFalse(result['complete'])
     def test_sales_funnel_incomplete_schema_never_implies_zero(self):
         args={'date_from':'2026-11-09','date_to':'2026-11-15'}
         for payload in ({'data':{'products':[]}}, {'data':{'currency':'RUB','products':[{'product':{},'statistic':{'selected':{}}}]}}, {'data':{'currency':'RUB','products':'bad'}}):
             with self.subTest(payload=payload),self.assertRaises(ValueError):self.read('wb_sales_summary',args,payload)
+    def test_sales_currency_never_exposes_token_when_normalized(self):
+        args={'date_from':'2026-11-09','date_to':'2026-11-15'}
+        for token, currency in (('RUB','RUB'), ('RUB','rub'), ('rub','rub')):
+            with self.subTest(case=(token,currency)):
+                self.secret=token
+                self.creds={'api_token':token}
+                with self.assertRaises(ValueError) as caught:
+                    self.read('wb_sales_summary',args,{'data':{'currency':currency,'products':[]}})
+                self.assertNotIn(token,str(caught.exception))
+    def test_numeric_provider_values_cannot_expose_saved_token(self):
+        token='9007199254740993'
+        self.secret=token
+        self.creds={'api_token':token}
+        args={'date_from':'2026-11-09','date_to':'2026-11-15'}
+        row={'product':{'nmId':int(token)}, 'statistic':{'selected':{
+            'period':{'start':args['date_from'],'end':args['date_to']},
+            'orderCount':1,'orderSum':100,'buyoutCount':0,'buyoutSum':0,
+            'cancelCount':0,'cancelSum':0}}}
+        with self.assertRaises(ValueError) as caught:
+            self.read('wb_sales_summary',args,{'data':{'currency':'RUB','products':[row]}})
+        self.assertNotIn(token,str(caught.exception))
+    def test_secret_in_provider_cursor_fails_closed_without_changing_cursor(self):
+        token='2026-11-15T12:00:00Z'
+        self.secret=token
+        self.creds={'api_token':token}
+        payload={'cards':[{'nmID':1}], 'cursor':{'updatedAt':token,'nmID':1,'total':1}}
+        with self.assertRaises(ValueError) as caught:
+            self.read('wb_products',{'limit':1},payload)
+        self.assertNotIn(token,str(caught.exception))
+    def test_secret_across_compact_json_values_fails_closed(self):
+        token='1,2'
+        self.secret=token
+        self.creds={'api_token':token}
+        payload={'cards':[{'nmID':3,'sizes':[{'skus':[1,2]}]}],
+                 'cursor':{'updatedAt':'2026-11-15T12:00:00Z','nmID':3,'total':1}}
+        with self.assertRaises(ValueError) as caught:
+            self.read('wb_products',{'limit':1},payload)
+        self.assertNotIn(token,str(caught.exception))
+    def test_key_with_quotes_in_compact_json_fails_closed(self):
+        token='"nmID":3'
+        self.secret=token
+        self.creds={'api_token':token}
+        payload={'cards':[{'nmID':3}],
+                 'cursor':{'updatedAt':'2026-11-15T12:00:00Z','nmID':4,'total':1}}
+        with self.assertRaises(ValueError) as caught:
+            self.read('wb_products',{'limit':1},payload)
+        self.assertNotIn(token,str(caught.exception))
     def test_invalid_inputs_fail_before_network(self):
         invalid=[('wb_products',{'nm_id':1}),('wb_products',{'updated_at':'not-date','nm_id':1}),('wb_products',{'updated_at':'2026-01-01T00:00:00Z','nm_id':True}),('wb_prices',{'offset':-1}),('wb_prices',{'offset':1,'nm_id':1,'limit':1}),('wb_prices',{'limit':True}),('wb_prices',{'url':'https://example.com'}),('wb_commissions',{'search':'x'*101}),('wb_commissions',{'subject_id':True}),('wb_box_tariffs',{'date':'2026-02-30'}),('wb_box_tariffs',{'date':'2026-01-01','warehouse':'x'*101}),('wb_sales_summary',{}),('wb_sales_summary',{'date_from':'2026-02-30','date_to':'2026-03-01'}),('wb_sales_summary',{'date_from':'2026-11-15','date_to':'2026-11-09'}),('wb_sales_summary',{'date_from':'2024-01-01','date_to':'2026-01-01'}),('wb_sales_summary',{'date_from':'2026-01-01','date_to':'2026-01-02','offset':True})]
         with patch('wb_mcp.urllib.request.build_opener') as opener:

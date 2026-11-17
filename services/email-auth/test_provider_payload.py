@@ -43,6 +43,25 @@ class ProviderPayloadTests(unittest.TestCase):
         result=self.read({'result':{'items':[{'product_id':456,'offer_id':'article','archived':False}]}},'ozon_products')
         self.assertEqual(result['items'][0],{'product_id':456,'offer_id':'article','archived':False})
 
+    def test_ozon_rejects_duplicate_json_keys_at_any_depth(self):
+        payloads = (
+            b'{"result":{"items":[{"product_id":1,"offer_id":"A","offer_id":"B"}]}}',
+            b'{"result":{"items":[{"product_id":1,"sku":1,"sku":2}]}}',
+            b'{"result":{"items":[],"metadata":{"k":1,"k":2}}}',
+        )
+        for raw in payloads:
+            with self.subTest(payload=raw), self.assertRaisesRegex(ValueError, 'Duplicate provider JSON key'):
+                self.read(raw, 'ozon_products')
+        self.assertEqual(decode_provider_payload(b'{"k":1,"k":2}'), {'k':2})
+
+    def test_ozon_raw_large_sku_and_client_id_collision_are_preserved(self):
+        raw = (b'{"result":{"items":[{"product_id":123,"offer_id":"ABC123",'
+               b'"sku":9007199254740993}],"last_id":"p123end"}}')
+        result = self.read(raw, 'ozon_products')
+        self.assertEqual(result['items'][0]['offer_id'], 'ABC123')
+        self.assertEqual(result['items'][0]['sku'], '9007199254740993')
+        self.assertEqual(result['last_id'], 'p123end')
+
     def test_order_analytics_preserves_original_json_decimal_precision(self):
         raw=(b'{"result":{"data":['
              b'{"dimensions":[{"id":"2026-11-09"}],"metrics":[1234567890.123456789,2]},'

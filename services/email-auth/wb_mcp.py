@@ -142,7 +142,17 @@ def read(operation, args, creds):
         return value if type(value) in (int, float, bool) or value is None else None
     def project(row, fields):
         if not isinstance(row, dict): raise ValueError('Unexpected row')
-        return {key: clean(row[key]) for key in fields if key in row}
+        projected = {}
+        for key in fields:
+            if key not in row: continue
+            value = row[key]
+            if key == 'vendorCode' and value is not None:
+                if not isinstance(value, str) or len(value) > 256 or (token and token in value):
+                    raise ValueError('Unsafe provider identifier')
+                projected[key] = value
+            else:
+                projected[key] = clean(value)
+        return projected
     result = {'read_only': True, 'untrusted_data': True}
     if operation == 'wb_products':
         rows = data.get('cards')
@@ -220,6 +230,10 @@ def read(operation, args, creds):
         currency = nested.get('currency')
         if not isinstance(currency, str) or not re.fullmatch(r'[A-Za-z]{3}', currency):
             raise ValueError('Missing sales currency')
+        # Reject instead of exposing credentials or silently inventing a
+        # currency when normalization would reproduce part of a token.
+        if token and token.casefold() in currency.casefold():
+            raise ValueError('Unsafe sales currency')
         items = []
         metric_names = ('orderCount', 'orderSum', 'buyoutCount', 'buyoutSum', 'cancelCount', 'cancelSum')
         for row in rows:
@@ -258,6 +272,17 @@ def read(operation, args, creds):
         result.update(items=items[:limit], matched_rows=len(items), returned_rows=min(len(items),limit), truncated=len(items)>limit)
     # The bridge and its caller enforce their own response budgets. Never let
     # a valid but very large page exceed that bound after JSON serialization.
-    if len(json.dumps(result, ensure_ascii=True, allow_nan=False).encode()) > MAX_ROW_BODY:
+    serialized = json.dumps(result, ensure_ascii=True, allow_nan=False)
+    # Numeric provider values and cursors can also reproduce a credential,
+    # even after the string-field projection above. Fail closed instead of
+    # returning a misleading redacted amount or a broken pagination cursor.
+    compact = json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+    escaped_token = json.dumps(token, ensure_ascii=True)[1:-1] if token else ''
+    compact_token = json.dumps(token, ensure_ascii=False)[1:-1] if token else ''
+    if escaped_token and any(value in representation
+                             for value in (token, escaped_token, compact_token)
+                             for representation in (serialized, compact)):
+        raise ValueError('Unsafe provider response')
+    if len(serialized.encode()) > MAX_ROW_BODY:
         raise ValueError('Projected response too large; request a smaller page')
     return result

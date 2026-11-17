@@ -5,6 +5,12 @@ import json
 import re
 import secrets
 import unittest
+import urllib.error
+from unittest.mock import patch
+import finance_gate
+import portal
+import test_ozon_article_summary
+import test_ozon_finance_reports
 
 import test_portal
 
@@ -118,7 +124,161 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
         self.assertTrue(self.mcp(message,token,'https://attacker.invalid')['status'].startswith('403'))
         result=self.mcp(message,token)
         self.assertEqual(result['headers'].get('Cache-Control'),'no-store')
-        self.assertEqual(len(json.loads(result['body'])['result']['tools']),9)
+        names={tool['name'] for tool in json.loads(result['body'])['result']['tools']}
+        self.assertEqual(names, {'ozon_products','ozon_product_info','ozon_accrual_types','ozon_accrual_day','ozon_article_summary','ozon_realization_article_month',
+                                 'ozon_posting_accruals','ozon_prices','ozon_orders_analytics',
+                                 'ozon_posting_status','ozon_posting_candidates','wb_products','wb_prices','wb_commissions',
+                                 'wb_box_tariffs','wb_sales_summary'})
+
+    def test_finance_429_propagates_delay_and_prevents_early_mcp_or_api_retry(self):
+        token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',self.create()['body']).group(1)
+        self.vault.save('ozon',{'client_id':'777','api_key':'synthetic-private'})
+        calls=[]
+        def gateway(*args):
+            calls.append(1)
+            raise urllib.error.HTTPError('',429,'synthetic-private',{'Retry-After':'45'},io.BytesIO(b'private'))
+        self.app.gateway=gateway
+        message={'jsonrpc':'2.0','id':7,'method':'tools/call',
+                 'params':{'name':'ozon_accrual_types','arguments':{}}}
+        first=json.loads(self.mcp(message,token)['body'])['result']
+        info=json.loads(first['content'][0]['text'])
+        self.assertTrue(first['isError'])
+        self.assertEqual(info['retry_after_seconds'],45)
+        second=json.loads(self.mcp(message,token)['body'])['result']
+        info=json.loads(second['content'][0]['text'])
+        self.assertEqual(info['reason'],'cooldown')
+        self.assertTrue(1 <= info['retry_after_seconds'] <= 45)
+        bridge=self.request('/api/read','POST',{'operation':'ozon_accrual_types','arguments':{}},auth=self.token)
+        self.assertTrue(bridge['status'].startswith('429'))
+        self.assertTrue(1 <= int(bridge['headers']['Retry-After']) <= 45)
+        self.assertEqual(len(calls),1)
+        self.assertNotIn('synthetic-private',json.dumps([first,second,bridge]))
+
+    def test_finance_429_without_delay_does_not_repeat(self):
+        token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',self.create()['body']).group(1)
+        self.vault.save('ozon',{'client_id':'777','api_key':'synthetic-private'})
+        calls=[]
+        def gateway(*args):
+            calls.append(1)
+            raise urllib.error.HTTPError('',429,'',{},io.BytesIO())
+        self.app.gateway=gateway
+        message={'jsonrpc':'2.0','id':7,'method':'tools/call',
+                 'params':{'name':'ozon_accrual_types','arguments':{}}}
+        for _ in range(2):
+            result=json.loads(self.mcp(message,token)['body'])['result']
+            info=json.loads(result['content'][0]['text'])
+            self.assertEqual(info['reason'],'retry_time_unknown')
+            self.assertIsNone(info['retry_after_seconds'])
+        self.assertEqual(len(calls),1)
+
+    def test_retry_interval_matching_secret_is_not_exposed_by_mcp_or_api(self):
+        token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',self.create()['body']).group(1)
+        self.vault.save('ozon',{'client_id':'777','api_key':'45'})
+        def gateway(*args): raise urllib.error.HTTPError('',429,'',{'Retry-After':'45'},io.BytesIO())
+        self.app.gateway=gateway
+        message={'jsonrpc':'2.0','id':7,'method':'tools/call',
+                 'params':{'name':'ozon_accrual_types','arguments':{}}}
+        with patch('finance_gate.time.time',return_value=1000.0), patch('finance_gate.time.monotonic',return_value=100.0):
+            response=self.mcp(message,token)
+            info=json.loads(json.loads(response['body'])['result']['content'][0]['text'])
+            self.assertIsNone(info['retry_after_seconds'])
+            self.assertEqual(info['reason'],'retry_interval_unavailable')
+            self.assertNotIn('45',response['body'])
+            bridge=self.request('/api/read','POST',{'operation':'ozon_accrual_types','arguments':{}},auth=self.token)
+        self.assertNotIn('Retry-After',bridge['headers'])
+        self.assertIsNone(json.loads(bridge['body'])['retry_after_seconds'])
+        self.assertNotIn('45',bridge['body'])
+
+    def test_known_oversized_provider_response_is_reported_without_locking_retries(self):
+        token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',self.create()['body']).group(1)
+        self.vault.save('ozon',{'client_id':'777','api_key':'synthetic-private'})
+        calls=[]
+        def gateway(*args):
+            calls.append(1)
+            if len(calls)==1: raise finance_gate.ProviderResponseTooLarge('private')
+            return {'types':[]}
+        self.app.gateway=gateway
+        message={'jsonrpc':'2.0','id':7,'method':'tools/call',
+                 'params':{'name':'ozon_accrual_types','arguments':{}}}
+        first=json.loads(self.mcp(message,token)['body'])['result']
+        info=json.loads(first['content'][0]['text'])
+        self.assertEqual(info['error'],'provider_response_too_large')
+        self.assertIn('Фильтр SKU или артикула не уменьшает',info['message'])
+        second=json.loads(self.mcp(message,token)['body'])['result']
+        self.assertNotIn('isError',second)
+        self.assertEqual(len(calls),2)
+
+    def test_partial_article_summary_reaches_authenticated_mcp(self):
+        token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',self.create()['body']).group(1)
+        self.vault.save('ozon',{'client_id':'777','api_key':'synthetic-private'})
+        self.app.gateway=portal._provider_read
+        opener=test_ozon_article_summary.FakeOpener(postings={'posting_accruals':[
+            {'posting_number':'A-1','accruals':[test_ozon_article_summary.accrual(10,'5.00')]}]})
+        message={'jsonrpc':'2.0','id':7,'method':'tools/call',
+                 'params':{'name':'ozon_article_summary','arguments':test_ozon_article_summary.ARGS}}
+        with patch('portal.urllib.request.build_opener',return_value=opener):
+            output=json.loads(self.mcp(message,token)['body'])['result']
+        self.assertNotIn('isError',output)
+        result=json.loads(output['content'][0]['text'])
+        self.assertEqual(result['status'],'partial')
+        self.assertEqual(result['identity']['sku_candidates'],['10','11'])
+        self.assertFalse(result['selection']['complete_period'])
+        self.assertIsNone(result['unknown_metrics']['buyout_units'])
+        self.assertEqual(len(opener.calls),3)
+
+    def test_daily_and_monthly_reports_reach_authenticated_mcp(self):
+        token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',self.create()['body']).group(1)
+        self.vault.save('ozon',{'client_id':'777','api_key':'synthetic-private'})
+        self.app.gateway=portal._provider_read
+        class Opener:
+            def open(self,request,timeout):
+                payload=(test_ozon_finance_reports.daily_payload() if request.full_url.endswith('/by-day')
+                         else test_ozon_finance_reports.monthly_payload())
+                return test_ozon_article_summary.Response(json.dumps(payload,default=str,ensure_ascii=False).encode())
+        calls=[('ozon_accrual_day',test_ozon_finance_reports.DAY_ARGS),
+               ('ozon_realization_article_month',test_ozon_finance_reports.MONTH_ARGS)]
+        with patch('portal.urllib.request.build_opener',return_value=Opener()):
+            for name,args in calls:
+                with self.subTest(name=name):
+                    message={'jsonrpc':'2.0','id':7,'method':'tools/call',
+                             'params':{'name':name,'arguments':args}}
+                    output=json.loads(self.mcp(message,token)['body'])['result']
+                    self.assertNotIn('isError',output)
+                    result=json.loads(output['content'][0]['text'])
+                    self.assertTrue(result['read_only'])
+                    self.assertNotIn('synthetic-private',json.dumps(result))
+
+    def test_new_finance_tools_share_429_cooldown_with_existing_tools(self):
+        token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',self.create()['body']).group(1)
+        calls=[]
+        def gateway(*args):
+            calls.append(1)
+            raise urllib.error.HTTPError('',429,'',{'Retry-After':'45'},io.BytesIO())
+        self.app.gateway=gateway
+        for index,(name,args) in enumerate([('ozon_accrual_day',test_ozon_finance_reports.DAY_ARGS),
+                                           ('ozon_realization_article_month',test_ozon_finance_reports.MONTH_ARGS)]):
+            self.vault.save('ozon',{'client_id':str(700+index),'api_key':'synthetic-private'})
+            message={'jsonrpc':'2.0','id':7,'method':'tools/call','params':{'name':name,'arguments':args}}
+            first=json.loads(self.mcp(message,token)['body'])['result']
+            self.assertTrue(first['isError'])
+            second=json.loads(self.mcp({'jsonrpc':'2.0','id':8,'method':'tools/call',
+                'params':{'name':'ozon_accrual_types','arguments':{}}},token)['body'])['result']
+            info=json.loads(second['content'][0]['text'])
+            self.assertEqual(info['reason'],'cooldown')
+            self.assertEqual(len(calls),index+1)
+            self.assertNotIn('synthetic-private',json.dumps([first,second]))
+
+    def test_new_finance_methods_reject_duplicate_json_and_oversized_response(self):
+        creds={'client_id':'777','api_key':'synthetic-private'}
+        for name,args in [('ozon_accrual_day',test_ozon_finance_reports.DAY_ARGS),
+                          ('ozon_realization_article_month',test_ozon_finance_reports.MONTH_ARGS)]:
+            for raw,exception in [(b'{"x":1,"x":2}',finance_gate.ProviderResponseInvalid),
+                                  (b' ' * 512001,finance_gate.ProviderResponseTooLarge)]:
+                class Opener:
+                    def open(self,request,timeout): return test_ozon_article_summary.Response(raw)
+                with self.subTest(name=name,exception=exception.__name__), \
+                     patch('portal.urllib.request.build_opener',return_value=Opener()), self.assertRaises(exception):
+                    portal._provider_read(name,args,creds)
 
 
 if __name__ == '__main__': unittest.main()

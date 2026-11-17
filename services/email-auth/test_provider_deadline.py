@@ -23,11 +23,12 @@ scenario = {scenario!r}
 class Response:
     def __enter__(self): return self
     def __exit__(self,*args): pass
-    def read(self,limit): return json.dumps({{'data':{{'listGoods':[{{'nmID':1,'vendorCode':'synthetic-secret'}}]}}}}).encode() if scenario == 'ok' else b'invalid-json'
+    def read(self,limit): return json.dumps({{'data':{{'listGoods':[{{'nmID':1,'vendorCode':'synthetic-secret' if scenario == 'unsafe_identifier' else 'safe-code','currencyIsoCode4217':'synthetic-secret'}}]}}}}).encode() if scenario in ('ok','unsafe_identifier') else b'invalid-json'
 class Opener:
     def open(self,request,timeout):
         if isinstance(scenario,int): raise urllib.error.HTTPError('https://example.invalid',scenario,'synthetic',{{}},io.BytesIO(b'synthetic'))
         if scenario == 'timeout': raise TimeoutError('synthetic')
+        if scenario == 'wrapped_timeout': raise urllib.error.URLError(TimeoutError('synthetic-secret'))
         if scenario == 'network': raise urllib.error.URLError('synthetic')
         return Response()
 portal.urllib.request.build_opener=lambda *args: Opener()
@@ -35,18 +36,28 @@ portal._provider_worker()
 '''
         with tempfile.TemporaryDirectory() as tmp:
             worker = Path(tmp) / 'worker.py'
-            for scenario in ('ok', 401, 403, 429, 503, 'timeout', 'network', 'invalid'):
+            for scenario in ('ok', 'unsafe_identifier', 401, 403, 429, 503, 'timeout', 'wrapped_timeout', 'network', 'invalid'):
                 with self.subTest(scenario=scenario):
                     worker.write_text(template.format(source_dir=source_dir, scenario=scenario), encoding='utf-8')
                     with patch('portal.PROVIDER_WORKER', str(worker)):
                         if scenario == 'ok':
-                            self.assertEqual(provider_read('wb_prices', {'limit':1}, {'api_token':'synthetic-secret'})['items'][0]['vendorCode'], '[REDACTED]')
+                            item = provider_read('wb_prices', {'limit':1}, {'api_token':'synthetic-secret'})['items'][0]
+                            self.assertEqual(item['vendorCode'], 'safe-code')
+                            self.assertEqual(item['currencyIsoCode4217'], '[REDACTED]')
+                        elif scenario == 'unsafe_identifier':
+                            with self.assertRaises(ValueError) as raised:
+                                provider_read('wb_prices', {'limit':1}, {'api_token':'synthetic-secret'})
+                            self.assertNotIn('synthetic-secret', str(raised.exception))
                         elif isinstance(scenario,int):
                             with self.assertRaises(urllib.error.HTTPError) as raised:
                                 provider_read('wb_prices', {'limit':1}, {'api_token':'synthetic-secret'})
                             self.assertEqual(raised.exception.code, scenario)
                             self.assertNotIn('synthetic-secret', str(raised.exception))
-                        elif scenario in ('timeout','network'):
+                        elif scenario in ('timeout','wrapped_timeout'):
+                            with self.assertRaises(TimeoutError) as raised:
+                                provider_read('wb_prices', {'limit':1}, {'api_token':'synthetic-secret'})
+                            self.assertNotIn('synthetic-secret', str(raised.exception))
+                        elif scenario == 'network':
                             with self.assertRaises(urllib.error.URLError):
                                 provider_read('wb_prices', {'limit':1}, {'api_token':'synthetic-secret'})
                         else:

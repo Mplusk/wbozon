@@ -57,7 +57,7 @@ def build_request(args, creds):
                  'Content-Type': 'application/json'}, method='POST')
 
 
-def project_response(args, data, creds):
+def _page(args, data, creds):
     validate_args(args)
     if not isinstance(data, dict):
         raise ValueError('Invalid response')
@@ -65,6 +65,18 @@ def project_response(args, data, creds):
     rows, has_next = parent.get('postings'), parent.get('has_next')
     if not isinstance(rows, list) or len(rows) > args.get('limit', 100) or type(has_next) is not bool:
         raise ValueError('Unexpected posting schema')
+    next_cursor = parent.get('cursor') if has_next else None
+    if has_next:
+        if not rows or not _cursor(next_cursor) or not next_cursor or next_cursor == args.get('cursor', ''):
+            raise ValueError('Invalid next cursor')
+        key = creds.get('api_key')
+        if isinstance(key, str) and key and key in next_cursor:
+            raise ValueError('Unsafe next cursor')
+    return rows, has_next, next_cursor
+
+
+def project_response(args, data, creds):
+    rows, has_next, next_cursor = _page(args, data, creds)
     counts = {}
     for row in rows:
         if not isinstance(row, dict):
@@ -85,12 +97,6 @@ def project_response(args, data, creds):
         bucket = counts.setdefault(status, {'postings': 0, 'units': 0})
         bucket['postings'] += 1
         bucket['units'] += quantity
-    next_cursor = parent.get('cursor') if has_next else None
-    if has_next:
-        if not rows or not _cursor(next_cursor) or not next_cursor or next_cursor == args.get('cursor', ''):
-            raise ValueError('Invalid next cursor')
-        if any(value in next_cursor for value in creds.values() if isinstance(value, str) and value):
-            raise ValueError('Unsafe next cursor')
     return {'source': 'Ozon Seller API ' + ENDPOINTS[args['scheme']].split('.ru', 1)[1],
             'scheme': args['scheme'], 'date_from': args['date_from'], 'date_to': args['date_to'],
             'period_timezone': 'UTC', 'as_of': datetime.now(timezone.utc).isoformat(),
@@ -102,3 +108,34 @@ def project_response(args, data, creds):
                      'с датой заказа в аналитике. Не смешивайте показатели с выкупами других площадок. '
                      'Для итогов схемы получите все страницы и сложите page_counts по статусам; '
                      'затем запросите вторую схему. Статусы могут изменяться между страницами.')}
+
+
+def project_candidates(args, data, creds):
+    """Expose one bounded page of posting numbers, without buyer details."""
+    rows, has_next, next_cursor = _page(args, data, creds)
+    numbers, seen = [], set()
+    key = creds.get('api_key') if isinstance(creds.get('api_key'),str) else None
+    requested_cursor=args.get('cursor','')
+    if key and key in requested_cursor: raise ValueError('Unsafe requested cursor')
+    for row in rows:
+        if not isinstance(row,dict): raise ValueError('Invalid posting')
+        number = row.get('posting_number')
+        if (not isinstance(number,str) or not number or len(number)>128 or
+                re.search(r'[\x00-\x1f\x7f]',number) or (key and key in number)):
+            raise ValueError('Invalid posting number')
+        if number in seen: raise ValueError('Duplicate posting number')
+        seen.add(number)
+        numbers.append(number)
+    return {'source':'Ozon Seller API '+ENDPOINTS[args['scheme']].split('.ru',1)[1],
+            'scheme':args['scheme'],'date_from':args['date_from'],'date_to':args['date_to'],
+            'selection_basis':'provider_posting_filter_period', 'selection_timezone':'UTC',
+            'relationship_to_order_or_accrual_date':'not_verified',
+            'posting_numbers':numbers, 'page_count':len(numbers),
+            'provider_has_next':has_next, 'requested_cursor':requested_cursor, 'next_cursor':next_cursor,
+            'page_or_period_completeness':'not_verified', 'other_schemes':'not_checked',
+            'as_of':datetime.now(timezone.utc).isoformat(), 'read_only':True, 'untrusted_data':True,
+            'note':('Одна страница одной схемы. Получите следующие страницы и другую схему; '
+                    'период фильтра отправлений не подтверждён как дата начисления или заказа. '
+                    'Даже все страницы не доказывают полноту начислений за период. '
+                    'Сохраняйте посещённые курсоры: при любом повторе остановитесь и отметьте обход '
+                    'неполным. Повторы между страницами и изменения данных не проверены.')}

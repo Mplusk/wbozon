@@ -38,14 +38,39 @@ def _tool(name, description, properties, required=()):
             '_meta':{'securitySchemes':[{'type':'oauth2','scopes':['mcp:read']}]}}
 
 TOOLS = [
-    _tool('ozon_products', 'Чтение страницы собственных товаров Ozon.',
+    _tool('ozon_products', 'Чтение одной страницы собственных товаров Ozon; SKU возвращается только если его прислал список. Названия не возвращаются; полнота связанных SKU и совпадения между страницами не подтверждены. Проверяйте pagination_state и identity.',
           {'limit':_integer(1,100), 'last_id':_text(512)}),
+    _tool('ozon_product_info', 'Названия, артикулы и все SKU, перечисленные Ozon в основных полях и sources выбранных товаров. Передайте ровно один массив идентификаторов; сохраняйте все SKU и учитывайте conflicts, incomplete_fields и unmatched_identifiers. Полнота источника не подтверждена.',
+          {'offer_ids':{'type':'array','minItems':1,'maxItems':100,'items':_text(256)},
+           'product_ids':{'type':'array','minItems':1,'maxItems':100,'items':_text(19)},
+           'skus':{'type':'array','minItems':1,'maxItems':100,'items':_text(19)}}),
+    _tool('ozon_accrual_types', 'Справочник видов начислений Ozon по ID. Названия и описания исходят от Ozon; известные точные пары названия и описания распределены на commission, logistics, last_mile и returns. Other означает не классифицировано и может содержать любую из этих статей. Классификация и итоги по категориям неполны. Returns означает начисления, связанные с возвратами, со знаком Ozon, а не количество товаров.', {}),
+    _tool('ozon_accrual_day', 'Одна страница начислений Ozon за конкретную дату начисления для переданных SKU. Предварительно получите все наблюдаемые SKU через ozon_product_info, а названия и категории по type_id — через ozon_accrual_types. По умолчанию summary группирует наблюдаемые строки по SKU, виду и валюте, но исключает поля цен, sale_amount, скидок и итога доставки: для них нужен details. Это арифметика видимых строк, а не подтверждённый финансовый итог. Не складывайте итог доставки с его услугами, а поля комиссии, цены и скидок друг с другом или с итогами: их независимость не подтверждена. Получите все страницы, проверяйте повтор курсоров и ID; полнота периода не подтверждена, расходы без SKU не распределяются.',
+          {'date':{'type':'string','format':'date'}, 'last_id':_text(512),
+           'skus':{'type':'array','minItems':1,'maxItems':100,'items':_text(19)},
+           'view':{'type':'string','enum':['summary','details']}}, ('date','skus')),
+    _tool('ozon_posting_accruals', 'Начисления Ozon по указанным отправлениям. Период date_from/date_to отбирает дату начисления, не заказа. view=summary считает арифметическую сумму возвращённых строк по SKU, типу и валюте; уникальность, аддитивность и полнота строк не подтверждены, финансовый итог неизвестен. Нельзя складывать вызовы с пересекающимися отправлениями. Для skus используйте все SKU из ozon_product_info и проверяйте конфликты; расходы без SKU не распределяются. Названия типов: ozon_accrual_types. Выкупы и выплаты не определяются.',
+          {'posting_numbers':{'type':'array','minItems':1,'maxItems':200,'items':_text(128)},
+           'date_from':{'type':'string','format':'date'}, 'date_to':{'type':'string','format':'date'},
+           'view':{'type':'string','enum':['details','summary']},
+           'skus':{'type':'array','minItems':1,'maxItems':100,'items':_text(19)}}, ('posting_numbers',)),
+    _tool('ozon_article_summary', 'Частичная сводка одного артикула Ozon только по переданным отправлениям: прямое и обратное сопоставление наблюдаемых SKU, период по дате начисления, строки по SKU/типу/валюте. Названия типов можно получить через ozon_accrual_types; категории без подтверждения не определяйте. Номера кандидатов доступны через ozon_posting_candidates, но его дата отбора не равна доказанно дате начисления. Откажется от неоднозначной идентичности. Полнота периода, текущих и исторических SKU, аддитивность, выкупы, возвраты и выплаты не подтверждены; не представляйте их как ноль или полный итог.',
+          {'offer_id':_text(256), 'posting_numbers':{'type':'array','minItems':1,'maxItems':200,'items':_text(128)},
+           'date_from':{'type':'string','format':'date'}, 'date_to':{'type':'string','format':'date'}},
+          ('offer_id','posting_numbers','date_from','date_to')),
+    _tool('ozon_realization_article_month', 'Строки официального месячного отчёта реализации Ozon по точному артикулу: название, наблюдаемые SKU и арифметика количеств доставок и возвратов в полученных строках со знаком Ozon. Уникальность и аддитивность строк не подтверждены: суммы не являются доказанным итогом выкупов. Месяц относится к отчёту реализации, не к дате заказа. Отчёт доступен, когда Ozon его сформировал; будущие возвраты и полнота исторических SKU не подтверждены. Не выдавайте отсутствие строк за подтверждённый ноль и не складывайте суммы разной природы.',
+          {'offer_id':_text(256), 'year':_integer(2023,9999), 'month':_integer(1,12)},
+          ('offer_id','year','month')),
     _tool('ozon_prices', 'Чтение цен и комиссий товаров Ozon.',
           {'limit':_integer(1,100), 'cursor':_text(512),
            'offer_ids':{'type':'array','maxItems':100,'items':_text(256)}}),
-    _tool('ozon_orders_analytics', 'Аналитика заказов Ozon за период включительно, по дням, максимум 90 дней. Это стоимость заказанных товаров, а не выкуп, прибыль или выплаты. Сравнивайте с суммой заказов WB, не с выкупами. Валюта компании company_currency получена из Ozon отдельно: если она совпадает с валютой WB, можно привести условную общую сумму, прямо указав предположение, что валюта отчёта Ozon совпадает с валютой компании; сам отчёт этого не подтверждает. Иначе не складывайте суммы.',
+    _tool('ozon_orders_analytics', 'Аналитика заказов Ozon за период включительно, по дням, максимум 90 дней. Суммы относятся только к возвращённым дням; полнота периода и отсутствие заказов в пропущенные дни не подтверждены, пустой ответ не означает ноль. Это стоимость заказанных товаров, а не выкуп, прибыль или выплаты. Сравнивайте с суммой заказов WB, не с выкупами. Валюта компании company_currency получена из Ozon отдельно: если она совпадает с валютой WB, можно привести условную общую сумму, прямо указав предположение, что валюта отчёта Ozon совпадает с валютой компании; сам отчёт этого не подтверждает. Иначе не складывайте суммы.',
           {'date_from':{'type':'string','format':'date'}, 'date_to':{'type':'string','format':'date'}}, ('date_from','date_to')),
     _tool('ozon_posting_status', 'Текущие статусы отправлений Ozon за период отбора API (UTC). Отдельно запросите FBO и FBS и все страницы: delivered — доставлено, cancelled — отменено; это не окончательные выкупы или возвраты. Период отбора может не совпадать с датами заказов аналитики.',
+          {'date_from':{'type':'string','format':'date'}, 'date_to':{'type':'string','format':'date'},
+           'scheme':{'type':'string','enum':['FBO','FBS']}, 'cursor':_text(512), 'limit':_integer(1,100)},
+          ('date_from','date_to','scheme')),
+    _tool('ozon_posting_candidates', 'Номера отправлений одной страницы FBO или FBS для дальнейшей частичной сводки. Период запроса — не более 90 дней; более длинный период разделите на интервалы. Проверьте обе схемы, страницы и повторы между ними. Запоминайте все посещённые курсоры; при любом повторе остановитесь и отметьте обход неполным. Период отбора отправлений Ozon не подтверждён как дата заказа или начисления; он не гарантирует полноту начислений за период. Покупательские данные не возвращаются.',
           {'date_from':{'type':'string','format':'date'}, 'date_to':{'type':'string','format':'date'},
            'scheme':{'type':'string','enum':['FBO','FBS']}, 'cursor':_text(512), 'limit':_integer(1,100)},
           ('date_from','date_to','scheme')),
@@ -71,18 +96,35 @@ _ERRORS = {
     'provider_timeout':'Маркетплейс не ответил вовремя.',
     'unavailable':'Не удалось получить данные маркетплейса.',
     'invalid_arguments':'Недопустимые параметры запроса.',
+    'response_too_large':'Готовый ответ слишком велик и не был обрезан. Если метод поддерживает размер страницы, список SKU или партию отправлений, уменьшите их. Если разделение не поддерживается, этот вызов не может безопасно вернуть полный ответ.',
+    'provider_response_too_large':'Исходный ответ Ozon слишком велик и не был обрезан. Для запроса по отправлениям уменьшите их партию. Фильтр SKU или артикула не уменьшает исходный отчёт за день или месяц; если сам ответ превышает предел, этот вызов не может его загрузить.',
+    'provider_response_invalid':'Маркетплейс вернул неполный или некорректный ответ; данные не использованы.',
 }
 
 class MCPToolError(Exception):
     """Only fixed, non-sensitive error codes may cross the client boundary."""
-    def __init__(self, code):
+    def __init__(self, code, retry_after_seconds=None, reason=None):
         if code not in _ERRORS: raise ValueError('Invalid tool error code')
+        if retry_after_seconds is not None and (code != 'rate_limited' or type(retry_after_seconds) is not int or
+                                                 not 0 <= retry_after_seconds <= 2147483647):
+            raise ValueError('Invalid retry interval')
+        if reason is not None and reason not in ('busy','cooldown','retry_time_unknown','storage_unavailable','retry_interval_unavailable'):
+            raise ValueError('Invalid error reason')
         self.code = code
+        self.retry_after_seconds = retry_after_seconds
+        self.reason = reason
         super().__init__(code)
 
-def _tool_error(code):
-    return {'content':[{'type':'text','text':json.dumps(
-        {'error':code, 'message':_ERRORS[code]}, ensure_ascii=False)}], 'isError':True}
+def _tool_error(code, retry_after_seconds=None, reason=None):
+    details={'error':code, 'message':_ERRORS[code]}
+    if code == 'rate_limited':
+        details['retry_after_seconds']=retry_after_seconds
+        if reason == 'retry_time_unknown':
+            details['message']='Время повтора неизвестно; автоматический повтор остановлен.'
+        elif reason == 'retry_interval_unavailable':
+            details['message']='Время повтора нельзя безопасно показать.'
+    if reason is not None: details['reason']=reason
+    return {'content':[{'type':'text','text':json.dumps(details, ensure_ascii=False)}], 'isError':True}
 
 def handle(environ, start_response, authenticate, execute, expected_origin):
     """Authenticate every request and return the MCP WSGI response.
@@ -211,10 +253,10 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
                 data = execute(key_id,name,args)
                 if not isinstance(data,dict): raise ValueError()
                 text = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(',',':'))
-                if len(text.encode('utf-8')) > MAX_OUTPUT: raise ValueError()
-                result = {'content':[{'type':'text','text':text}]}
+                result = (_tool_error('response_too_large') if len(text.encode('utf-8')) > MAX_OUTPUT
+                          else {'content':[{'type':'text','text':text}]})
             except MCPToolError as exc:
-                result = _tool_error(exc.code)
+                result = _tool_error(exc.code,exc.retry_after_seconds,exc.reason)
             except Exception:
                 result = _tool_error('unavailable')
     else:

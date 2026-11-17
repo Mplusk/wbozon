@@ -8,7 +8,7 @@ from email.message import EmailMessage
 from urllib.parse import parse_qs, urlsplit
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from app import LoginApp, smtp_mailer
-import ozon_mcp, wb_mcp, external_keys, external_mcp, oauth_mcp
+import ozon_mcp, ozon_details, ozon_article_summary, wb_mcp, external_keys, external_mcp, oauth_mcp, finance_gate
 
 FIELDS = {'ozon': ('client_id', 'api_key'), 'wb': ('api_token',)}
 CHECK_OPERATIONS = {'ozon':'ozon_products', 'wb':'wb_prices'}
@@ -23,12 +23,47 @@ CHECK_MESSAGES = {
 }
 BRIDGE_OPERATIONS = {'unknown':'операция не определена', 'ozon_products':'товары Ozon',
     'ozon_prices':'цены Ozon', 'ozon_orders_analytics':'заказы Ozon', 'ozon_posting_status':'статусы отправлений Ozon', 'wb_products':'товары Wildberries',
+    'ozon_product_info':'идентификаторы товаров Ozon', 'ozon_accrual_types':'виды начислений Ozon',
+    'ozon_posting_accruals':'начисления по отправлениям Ozon',
+    'ozon_article_summary':'частичная сводка артикула Ozon',
+    'ozon_posting_candidates':'номера отправлений Ozon',
+    'ozon_realization_article_month':'месячный отчёт реализации артикула Ozon',
+    'ozon_accrual_day':'начисления Ozon за день по SKU',
     'wb_prices':'цены Wildberries', 'wb_commissions':'комиссии Wildberries',
     'wb_box_tariffs':'тарифы Wildberries', 'wb_sales_summary':'заказы и выкупы Wildberries'}
 OAUTH_PATHS = frozenset(('/.well-known/oauth-protected-resource',
     '/.well-known/oauth-protected-resource/mcp', '/.well-known/oauth-authorization-server',
     '/oauth/register', '/oauth/authorize', '/oauth/token'))
 BRIDGE_OUTCOMES = {'ok':'данные получены', 'not_configured':'ключ не добавлен', 'failed':'не удалось получить данные', 'rate_limited':'превышен лимит запросов'}
+
+def public_retry_delay(delay, creds):
+    """Do not reproduce a seller secret through a numeric retry interval."""
+    if type(delay) is not int or not 0 <= delay <= finance_gate.MAX_RETRY_SECONDS:
+        return None
+    for field in ('api_key','api_token'):
+        secret=creds.get(field) if isinstance(creds,dict) else None
+        if isinstance(secret,str) and secret and secret in str(delay):
+            return None
+    return delay
+
+
+def finance_request_preflight(operation, args, creds):
+    """Reject local input errors before reserving a finance request."""
+    if operation not in finance_gate.FINANCE_OPERATIONS or not isinstance(creds,dict):
+        raise ValueError('Invalid financial request')
+    client_id, api_key = creds.get('client_id'), creds.get('api_key')
+    if (not isinstance(client_id,str) or not re.fullmatch(r'[0-9]{1,32}',client_id) or
+            not isinstance(api_key,str) or not re.fullmatch(r'[!-~]{1,2048}',api_key)):
+        raise ValueError('Invalid financial credentials')
+    if operation == ozon_article_summary.OPERATION:
+        ozon_article_summary.validate_args(args)
+        ozon_details.build_request('ozon_product_info',{'offer_ids':[args['offer_id']]},creds)
+        ozon_details.build_request('ozon_posting_accruals',{
+            'posting_numbers':args['posting_numbers'],'date_from':args['date_from'],
+            'date_to':args['date_to'],'view':'summary'},creds)
+    else:
+        ozon_mcp.build_request(operation,args,creds)
+
 
 class Vault:
     def __init__(self, path, key):
@@ -91,7 +126,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
-def decode_provider_payload(raw, preserve_decimal=False):
+def decode_provider_payload(raw, preserve_decimal=False, reject_duplicates=False):
     """Reject non-JSON constants and numeric overflow before normalizing data."""
     def reject_constant(value): raise ValueError('Invalid provider JSON number')
     def finite_float(value):
@@ -108,24 +143,55 @@ def decode_provider_payload(raw, preserve_decimal=False):
         number=float(value)
         if not math.isfinite(number): raise ValueError('Invalid provider JSON number')
         return number
-    payload=json.loads(raw,parse_constant=reject_constant,parse_float=finite_float)
+    def unique_pairs(pairs):
+        result={}
+        for key,value in pairs:
+            if key in result: raise ValueError('Duplicate provider JSON key')
+            result[key]=value
+        return result
+    payload=json.loads(raw,parse_constant=reject_constant,parse_float=finite_float,
+                       object_pairs_hook=unique_pairs if reject_duplicates else None)
     if not isinstance(payload,dict): raise ValueError('Invalid provider response')
     return payload
 
-def _provider_read(operation, args, creds):
+def _provider_read(operation, args, creds, *, request_timeout=15, absolute_deadline=None):
     """Bounded, read-only provider requests, within one deadline worker."""
     started=time.monotonic()
     if operation in wb_mcp.OPERATIONS:
         return wb_mcp.read(operation, args, creds)
     if operation not in ozon_mcp.OPERATIONS:
         raise ValueError('Unknown operation')
-    req=ozon_mcp.build_request(operation,args,creds)
-    opener=urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
-    with opener.open(req,timeout=15) as resp:
-        raw=resp.read(512001)
-        if len(raw)>512000: raise ValueError('Response too large')
-        data=decode_provider_payload(raw,preserve_decimal=operation=='ozon_orders_analytics')
-    result=ozon_mcp.project_response(operation,args,data,creds)
+    if operation == ozon_article_summary.OPERATION:
+        deadline=(started+max(0,PROVIDER_DEADLINE_SECONDS-2)
+                  if absolute_deadline is None else absolute_deadline)
+        return _read_article_summary(args,creds,deadline)
+    try:
+        req=ozon_mcp.build_request(operation,args,creds)
+        opener=urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+    except Exception:
+        raise finance_gate.LocalPreparationError('Provider request could not be prepared') from None
+    if absolute_deadline is not None:
+        remaining=absolute_deadline-time.monotonic()
+        if remaining <= 0.2:
+            raise finance_gate.LocalPreparationTimeout('Summary deadline reached before request')
+        request_timeout=min(request_timeout,remaining)
+    with opener.open(req,timeout=request_timeout) as resp:
+        try:
+            raw=resp.read(512001)
+            if len(raw)>512000: raise finance_gate.ProviderResponseTooLarge('Provider response too large')
+            data=decode_provider_payload(raw,preserve_decimal=operation in ('ozon_orders_analytics','ozon_realization_article_month'),
+                                         reject_duplicates=operation in ('ozon_products','ozon_posting_status','ozon_posting_candidates','ozon_realization_article_month','ozon_accrual_day') or operation in ozon_mcp.ozon_details.OPERATIONS)
+        except (finance_gate.ProviderResponseTooLarge, urllib.error.HTTPError): raise
+        except TimeoutError: raise finance_gate.ProviderBodyTimeout('Provider response timed out') from None
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason,TimeoutError): raise finance_gate.ProviderBodyTimeout('Provider response timed out') from None
+            raise finance_gate.ProviderResponseInvalid('Provider response could not be read') from None
+        except ValueError as exc:
+            message='Duplicate provider JSON key' if str(exc)=='Duplicate provider JSON key' else 'Invalid provider response'
+            raise finance_gate.ProviderResponseInvalid(message) from None
+        except Exception: raise finance_gate.ProviderResponseInvalid('Invalid provider response') from None
+    try: result=ozon_mcp.project_response(operation,args,data,creds)
+    except Exception: raise finance_gate.ProviderResponseInvalid('Invalid provider response') from None
     if operation=='ozon_orders_analytics':
         # Seller info is optional. Use a daemon thread with a hard wait bound:
         # DNS resolution may ignore urllib's socket timeout. Never let an
@@ -151,17 +217,69 @@ def _provider_read(operation, args, creds):
             if not worker.is_alive() and found:
                 result['company_currency']=found[0]
                 result['company_currency_source']='Ozon Seller API /v1/seller/info company.currency; company currency, not a guaranteed analytics currency.'
+    # The provider key accepts arbitrary printable ASCII. Numeric fields,
+    # derived totals, cursors or adjacent JSON values can reproduce it even
+    # when individual text fields were redacted. Fail closed rather than
+    # altering an amount or cursor. Client ID is an identifier, not this key.
+    return _guard_ozon_result(result,creds)
+
+
+def _guard_ozon_result(result,creds):
+    key=creds.get('api_key')
+    if isinstance(key,str) and key:
+        escaped_key=json.dumps(key,ensure_ascii=True)[1:-1]
+        try:
+            variants=(json.dumps(result,ensure_ascii=True,allow_nan=False),
+                      json.dumps(result,ensure_ascii=False,allow_nan=False,separators=(',',':')))
+        except (ValueError,TypeError): raise finance_gate.ProviderResponseInvalid('Invalid provider response') from None
+        if any(key in value or escaped_key in value for value in variants):
+            raise finance_gate.ProviderResponseInvalid('Unsafe provider response')
     return result
+
+
+def _read_article_summary(args,creds,deadline):
+    """Three sequential bounded read calls; a supplied posting set is partial."""
+    ozon_article_summary.validate_args(args)
+    def read(operation,arguments):
+        remaining=deadline-time.monotonic()
+        if remaining <= 0.2:
+            raise finance_gate.LocalPreparationTimeout('Summary deadline reached before request')
+        return _provider_read(operation,arguments,creds,request_timeout=min(15,remaining),
+                              absolute_deadline=deadline)
+    forward=read('ozon_product_info',{'offer_ids':[args['offer_id']]})
+    try: reverse_args,blocked=ozon_article_summary.prepare_identity(args,forward)
+    except Exception: raise finance_gate.ProviderResponseInvalid('Invalid identity projection') from None
+    if blocked is not None:
+        blocked.update(observed_at=datetime.now(timezone.utc).isoformat(),
+                       sources=['Ozon Seller API /v3/product/info/list'])
+        return _guard_ozon_result(blocked,creds)
+    reverse=read('ozon_product_info',reverse_args)
+    try: identity,blocked=ozon_article_summary.confirm_identity(args,forward,reverse)
+    except Exception: raise finance_gate.ProviderResponseInvalid('Invalid identity projection') from None
+    if blocked is not None:
+        blocked.update(observed_at=datetime.now(timezone.utc).isoformat(),
+                       sources=['Ozon Seller API /v3/product/info/list'])
+        return _guard_ozon_result(blocked,creds)
+    try: posting_args=ozon_article_summary.accrual_args(args,identity)
+    except Exception: raise finance_gate.ProviderResponseInvalid('Invalid identity projection') from None
+    accruals=read('ozon_posting_accruals',posting_args)
+    try: result=ozon_article_summary.finish(args,identity,accruals,datetime.now(timezone.utc).isoformat())
+    except Exception: raise finance_gate.ProviderResponseInvalid('Invalid accrual projection') from None
+    return _guard_ozon_result(result,creds)
 
 PROVIDER_DEADLINE_SECONDS = 20
 PROVIDER_WORKER = os.path.realpath(__file__)
 
-def provider_read(operation, args, creds):
+def provider_read(operation, args, creds, finance_gate_dir=None):
     """Bound the entire provider operation, including DNS and response reads.
 
     Credentials go over a private stdin pipe, never argv or the environment.
     Killing the subprocess on timeout also stops a stuck resolver/socket call.
     """
+    if operation in finance_gate.FINANCE_OPERATIONS and (not isinstance(finance_gate_dir,str) or not os.path.isabs(finance_gate_dir)):
+        raise finance_gate.GateError('storage_unavailable')
+    if operation in finance_gate.FINANCE_OPERATIONS:
+        finance_request_preflight(operation,args,creds)
     env = {'PATH': os.defpath, 'PYTHONDONTWRITEBYTECODE': '1'}
     # Preserve standard outbound network settings; never pass unrelated app secrets.
     for name in ('SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'HTTPS_PROXY', 'HTTP_PROXY',
@@ -169,8 +287,10 @@ def provider_read(operation, args, creds):
                  'no_proxy', 'SSL_CERT_FILE', 'SSL_CERT_DIR'):
         if name in os.environ: env[name] = os.environ[name]
     try:
+        deadline=time.monotonic()+max(0,PROVIDER_DEADLINE_SECONDS-2)
         process = subprocess.run([sys.executable, PROVIDER_WORKER, '--provider-worker'],
-            input=json.dumps({'operation':operation, 'args':args, 'creds':creds}).encode(),
+            input=json.dumps({'operation':operation, 'args':args, 'creds':creds,
+                              'finance_gate_dir':finance_gate_dir,'deadline_monotonic':deadline}).encode(),
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=PROVIDER_DEADLINE_SECONDS,
             env=env, check=False)
     except subprocess.TimeoutExpired:
@@ -180,7 +300,26 @@ def provider_read(operation, args, creds):
     try:
         result=json.loads(process.stdout)
         if result.get('kind') == 'http' and type(result.get('status')) is int:
-            raise urllib.error.HTTPError('', result['status'], 'Marketplace request failed', {}, None)
+            delay = result.get('retry_after_seconds')
+            if type(delay) is not int or not 0 <= delay <= finance_gate.MAX_RETRY_SECONDS: delay = None
+            headers = {'Retry-After':str(delay)} if delay is not None and result['status'] == 429 else {}
+            error = urllib.error.HTTPError('', result['status'], 'Marketplace request failed', headers, None)
+            error.retry_after_seconds = delay
+            error.retry_after_source = result.get('retry_after_source') if result.get('retry_after_source') in ('delta_seconds','http_date') else 'unknown'
+            raise error
+        if result.get('kind') == 'gate':
+            reason = result.get('reason')
+            if reason not in ('busy','cooldown','retry_time_unknown','storage_unavailable'): reason = 'storage_unavailable'
+            delay = result.get('retry_after_seconds')
+            if type(delay) is not int or not 0 <= delay <= finance_gate.MAX_RETRY_SECONDS: delay = None
+            raise finance_gate.GateError(reason, delay)
+        if result.get('kind') == 'provider_response_too_large':
+            raise finance_gate.ProviderResponseTooLarge('Provider response too large')
+        if result.get('kind') == 'provider_response_invalid':
+            raise finance_gate.ProviderResponseInvalid('Invalid provider response')
+        if result.get('kind') == 'local_preparation_failed':
+            raise finance_gate.LocalPreparationError('Provider request could not be prepared')
+        if result.get('kind') == 'timeout': raise TimeoutError('Marketplace request timed out')
         if result.get('kind') == 'unavailable': raise urllib.error.URLError('Marketplace unavailable')
         if result.get('kind') != 'ok' or not isinstance(result.get('result'),dict):
             raise ValueError('Marketplace response failed')
@@ -192,12 +331,43 @@ def _provider_worker():
     """Private child entry point; exceptions and upstream bodies are not logged."""
     try:
         request=json.load(sys.stdin)
-        result={'kind':'ok', 'result':_provider_read(request['operation'],request['args'],request['creds'])}
+        if request['operation'] in finance_gate.FINANCE_OPERATIONS:
+            finance_request_preflight(request['operation'],request['args'],request['creds'])
+        if request['operation'] == ozon_article_summary.OPERATION:
+            deadline=request.get('deadline_monotonic')
+            if type(deadline) not in (int,float) or not math.isfinite(deadline) or deadline < 0:
+                raise ValueError('Invalid provider deadline')
+        def read():
+            if request['operation'] == ozon_article_summary.OPERATION:
+                return _provider_read(request['operation'],request['args'],request['creds'],absolute_deadline=deadline)
+            return _provider_read(request['operation'],request['args'],request['creds'])
+        value = (finance_gate.run(request.get('finance_gate_dir'),request['creds'].get('client_id'),read,
+                                  (request['creds'].get('api_key'),))
+                 if request['operation'] in finance_gate.FINANCE_OPERATIONS else read())
+        result={'kind':'ok', 'result':value}
     except urllib.error.HTTPError as exc:
         result={'kind':'http', 'status':exc.code}
+        if exc.code == 429:
+            delay = getattr(exc,'retry_after_seconds',None)
+            source = getattr(exc,'retry_after_source',None)
+            if source is None: delay, source = finance_gate.parse_retry_after(exc.headers)
+            result.update(retry_after_seconds=delay,retry_after_source=source)
         exc.close()
-    except (TimeoutError,urllib.error.URLError):
-        result={'kind':'unavailable'}
+    except finance_gate.GateError as exc:
+        result={'kind':'gate','reason':exc.reason,'retry_after_seconds':exc.retry_after_seconds}
+    except finance_gate.ProviderResponseTooLarge:
+        result={'kind':'provider_response_too_large'}
+    except finance_gate.ProviderResponseInvalid:
+        result={'kind':'provider_response_invalid'}
+    except finance_gate.LocalPreparationError:
+        result={'kind':'local_preparation_failed'}
+    except TimeoutError:
+        result={'kind':'timeout'}
+    except urllib.error.URLError as exc:
+        # urllib can wrap socket.timeout (an alias of TimeoutError) as its
+        # reason. Preserve the timeout classification without forwarding the
+        # exception or its possibly sensitive message across the worker pipe.
+        result={'kind':'timeout' if isinstance(exc.reason, TimeoutError) else 'unavailable'}
     except Exception:
         result={'kind':'failed'}
     sys.stdout.write(json.dumps(result,ensure_ascii=True,allow_nan=False))
@@ -258,14 +428,29 @@ def render_preview(provider, result, fetched_at, sensitive_values=(), lookup_nm_
     return document(title,content)
 
 class Portal:
-    def __init__(self, login, vault, read_token_hash, gateway=provider_read, mcp_read_token_hash=None, external_key_store=None, oauth_store=None):
+    def __init__(self, login, vault, read_token_hash, gateway=provider_read, mcp_read_token_hash=None, external_key_store=None, oauth_store=None, finance_gate_dir=None):
         if not re.fullmatch(r'[0-9a-f]{64}',read_token_hash): raise ValueError('Expected SHA256 token hash')
         if mcp_read_token_hash is not None and (not re.fullmatch(r'[0-9a-f]{64}',mcp_read_token_hash) or hmac.compare_digest(read_token_hash,mcp_read_token_hash)):
             raise ValueError('Expected distinct SHA256 MCP token hash')
         self.login,self.vault,self.token_hash,self.gateway=login,vault,read_token_hash,gateway
+        self.finance_gate_dir=(finance_gate_dir if finance_gate_dir is not None else
+            os.path.join(os.path.dirname(os.path.abspath(vault.path)),'.ozon-finance-gates'))
+        if not isinstance(self.finance_gate_dir,str) or not os.path.isabs(self.finance_gate_dir):
+            raise ValueError('Absolute finance gate directory required')
         self.mcp_token_hash=mcp_read_token_hash
         self.external_keys=external_key_store if external_key_store is not None else external_keys.KeyStore(vault.path)
         self.oauth=oauth_store if oauth_store is not None else oauth_mcp.OAuthStore(vault.path,signing_secret=login.secret,clock=login.clock)
+    def read_gateway(self, operation, args, creds):
+        if operation not in finance_gate.FINANCE_OPERATIONS:
+            return self.gateway(operation,args,creds)
+        finance_request_preflight(operation,args,creds)
+        if self.gateway is provider_read:
+            # The worker, not its parent, owns the lock. If the parent dies,
+            # an orphaned worker cannot overlap another financial request.
+            return provider_read(operation,args,creds,finance_gate_dir=self.finance_gate_dir)
+        # Test/injected gateways use the same contract and serialization.
+        return finance_gate.run(self.finance_gate_dir,creds.get('client_id'),
+                                lambda:self.gateway(operation,args,creds),(creds.get('api_key'),))
     def request_budget(self, provider, now):
         """Read-only local limiter snapshot. It neither reserves nor grants a request."""
         if provider not in CHECK_OPERATIONS: raise ValueError('Invalid provider')
@@ -294,10 +479,10 @@ class Portal:
                     start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
         if path not in OAUTH_PATHS and path not in ('/settings','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/mcp','/api/read','/healthz'):
             return self.login(e,start)
-        def reply(text,code='200 OK',json_response=False):
+        def reply(text,code='200 OK',json_response=False,extra_headers=()):
             if not json_response and not text.lstrip().lower().startswith('<!doctype'): text=document('Кабинет', '<main id="content" class="error-card"><h1>Кабинет</h1><p>'+text+'</p></main>')
             body=(json.dumps(text) if json_response else text).encode()
-            start(code,[('Content-Type','application/json' if json_response else 'text/html; charset=utf-8'),('Content-Length',str(len(body))),('Cache-Control','no-store'),('Referrer-Policy','no-referrer' if json_response else 'strict-origin'),('X-Content-Type-Options','nosniff'),('Content-Security-Policy',CSP)]); return [body]
+            start(code,[('Content-Type','application/json' if json_response else 'text/html; charset=utf-8'),('Content-Length',str(len(body))),('Cache-Control','no-store'),('Referrer-Policy','no-referrer' if json_response else 'strict-origin'),('X-Content-Type-Options','nosniff'),('Content-Security-Policy',CSP)]+list(extra_headers)); return [body]
         if e.get('HTTP_HOST')!=urlsplit(self.login.origin).netloc: return reply('Invalid host','400 Bad Request')
         if path in OAUTH_PATHS:
             return oauth_mcp.handle(e,start,self.oauth,self.external_keys,self.login.origin)
@@ -311,11 +496,26 @@ class Portal:
                         raise external_mcp.MCPToolError('rate_limited')
                     creds=self.vault.read('ozon' if operation in ozon_mcp.OPERATIONS else 'wb')
                     if not creds: raise external_mcp.MCPToolError('not_configured')
-                    return self.gateway(operation,args,creds)
+                    return self.read_gateway(operation,args,creds)
                 except urllib.error.HTTPError as exc:
                     code='provider_access_denied' if exc.code in (401,403) else 'rate_limited' if exc.code==429 else 'unavailable'
+                    delay=getattr(exc,'retry_after_seconds',None) if exc.code==429 else None
+                    if exc.code==429 and delay is None: delay,_=finance_gate.parse_retry_after(exc.headers)
+                    raw_delay=delay
+                    delay=public_retry_delay(delay,creds)
                     exc.close()
-                    raise external_mcp.MCPToolError(code) from None
+                    reason='retry_time_unknown' if exc.code==429 and delay is None and operation in finance_gate.FINANCE_OPERATIONS else None
+                    if raw_delay is not None and delay is None: reason='retry_interval_unavailable'
+                    raise external_mcp.MCPToolError(code,retry_after_seconds=delay,reason=reason) from None
+                except finance_gate.GateError as exc:
+                    code='rate_limited' if exc.reason in ('busy','cooldown','retry_time_unknown') else 'unavailable'
+                    delay=public_retry_delay(exc.retry_after_seconds,creds)
+                    reason='retry_interval_unavailable' if exc.retry_after_seconds is not None and delay is None else exc.reason
+                    raise external_mcp.MCPToolError(code,retry_after_seconds=delay,reason=reason) from None
+                except finance_gate.ProviderResponseTooLarge:
+                    raise external_mcp.MCPToolError('provider_response_too_large') from None
+                except finance_gate.ProviderResponseInvalid:
+                    raise external_mcp.MCPToolError('provider_response_invalid') from None
                 except TimeoutError:
                     raise external_mcp.MCPToolError('provider_timeout') from None
             return external_mcp.handle(e,start,authenticate,execute,self.login.origin)
@@ -372,14 +572,35 @@ class Portal:
                 if not creds:
                     record_bridge(op,'not_configured')
                     return reply({'error':'not_configured'},'409 Conflict',True)
-                result=self.gateway(op,args,creds)
+                result=self.read_gateway(op,args,creds)
                 record_bridge(op,'ok')
                 return reply(result,json_response=True)
             except urllib.error.HTTPError as exc:
                 record_bridge(op,'failed')
                 if exc.code in (401,403): return reply({'error':'provider_access_denied'},'403 Forbidden',True)
-                if exc.code == 429: return reply({'error':'provider_rate_limited'},'429 Too Many Requests',True)
+                if exc.code == 429:
+                    delay=getattr(exc,'retry_after_seconds',None)
+                    if delay is None: delay,_=finance_gate.parse_retry_after(exc.headers)
+                    delay=public_retry_delay(delay,creds)
+                    headers=[('Retry-After',str(delay))] if delay is not None else []
+                    exc.close()
+                    return reply({'error':'provider_rate_limited','retry_after_seconds':delay},'429 Too Many Requests',True,headers)
                 return reply({'error':'read_failed'},'502 Bad Gateway',True)
+            except finance_gate.GateError as exc:
+                record_bridge(op,'failed')
+                limited=exc.reason in ('busy','cooldown','retry_time_unknown')
+                delay=public_retry_delay(exc.retry_after_seconds,creds)
+                headers=[('Retry-After',str(delay))] if delay is not None else []
+                return reply({'error':'provider_rate_limited' if limited else 'read_failed',
+                              'reason':exc.reason if exc.retry_after_seconds is None or delay is not None else 'retry_interval_unavailable',
+                              'retry_after_seconds':delay},
+                             '429 Too Many Requests' if limited else '502 Bad Gateway',True,headers)
+            except finance_gate.ProviderResponseTooLarge:
+                record_bridge(op,'failed')
+                return reply({'error':'provider_response_too_large'},'502 Bad Gateway',True)
+            except finance_gate.ProviderResponseInvalid:
+                record_bridge(op,'failed')
+                return reply({'error':'provider_response_invalid'},'502 Bad Gateway',True)
             except TimeoutError:
                 record_bridge(op,'failed')
                 return reply({'error':'provider_timeout'},'504 Gateway Timeout',True)
@@ -599,7 +820,8 @@ def create_portal():
     login=LoginApp(os.environ['DATABASE_PATH'],secret_file('SESSION_SECRET_FILE'),os.environ.get('BASE_URL','https://3dprinta.shop'),mailer=file_smtp_mailer)
     vault=Vault(os.environ['VAULT_PATH'],secret_file('VAULT_KEY_FILE',True))
     mcp_hash=secret_file('MCP_READ_TOKEN_HASH_FILE') if 'MCP_READ_TOKEN_HASH_FILE' in os.environ else None
-    return Portal(login,vault,secret_file('READ_TOKEN_HASH_FILE'),mcp_read_token_hash=mcp_hash)
+    return Portal(login,vault,secret_file('READ_TOKEN_HASH_FILE'),mcp_read_token_hash=mcp_hash,
+                  finance_gate_dir=os.environ.get('OZON_FINANCE_GATE_DIR'))
 
 if __name__ == '__main__' and sys.argv[1:] == ['--provider-worker']:
     _provider_worker()

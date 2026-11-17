@@ -5,6 +5,11 @@
 !Dockerfile
 !portal.py
 !ozon_mcp.py
+!ozon_details.py
+!ozon_article_summary.py
+!ozon_realization.py
+!ozon_accrual_day.py
+!finance_gate.py
 !ozon_posting_status.py
 !wb_mcp.py
 !external_keys.py
