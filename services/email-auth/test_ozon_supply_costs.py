@@ -184,6 +184,21 @@ class SupplyCostTests(unittest.TestCase):
             self.assertIn(reason,result['issues'])
             self.assertIsNone(result['allocated_total'])
 
+    def test_integer_ceilings_are_disclosed_but_only_per_unit_litres_weight_the_model(self):
+        rows = [item(20,3,0.4,total_volume_in_litres=2),item(21,2,0.4,total_volume_in_litres=1)]
+        result, _ = self.model([page(rows,2)], {**ARGS,'expense':{**EXPENSE,'amount':'-1.00'}})
+        self.assertEqual(result['status'],'modeled_on_document')
+        self.assertEqual(result['total_volume_litres'],'2')
+        self.assertEqual([r['allocated_amount'] for r in result['items']],['-0.60','-0.40'])
+        self.assertEqual([(v['quantity_times_unit_litres'],v['reported_total_litres'],v['relation'])
+                          for v in result['volume_differences']],
+                         [('1.2','2','equals_whole_litre_ceiling'),('0.8','1','equals_whole_litre_ceiling')])
+        rows[0]['total_volume_in_litres'] = 3
+        result, _ = self.model([page(rows,2)])
+        self.assertEqual(result['volume_differences'][0]['relation'],'unreconciled')
+        self.assertIn('inconsistent_provider_volumes',result['issues'])
+        self.assertIsNone(result['allocated_total'])
+
     def test_consistency_check_catches_changed_composition_with_stable_count_and_changed_bundle_link(self):
         first = [page([item(1),item(2)],4,more=True,cursor='A'),page([item(4),item(5)],4)]
         second = [page([item(2),item(3)],4,more=True,cursor='B'),page([item(4),item(5)],4)]

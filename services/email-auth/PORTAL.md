@@ -67,6 +67,8 @@ set is not a complete-period assertion. See `OZON_ARTICLE_SUMMARY.md`.
 `ozon_unallocated_accruals` reads one accrual date and one cursor for types 12, 133, 134, 77 and 46.
 The tool retrieves their current names from the Ozon dictionary by default. Both reads share one finance
 reservation. A 429 on the dictionary propagates with the normal cooldown. The composite request is never replayed.
+The seller's dictionary on 2026-11-18 at 02:04 MSK returned `12 CrossDock`, `133 CrossDockHandlingAtDropOff`,
+`134 CrossDockDeliveryToAcceptancePoint`, `77 SupplyInbound` and `46 Placements`.
 The by-day schema identifies the order or service with `unit_number` and has no supply ID. Rows carrying a SKU
 are returned separately. The original sign and currency come from each typed fee.
 [Daily accruals](https://docs.ozon.com/api/seller/#operation/GetFinanceAccrualByDay) · [Type dictionary](https://docs.ozon.com/api/seller/#operation/GetFinanceAccrualTypes)
@@ -80,7 +82,9 @@ and SKU totals reconcile in [ISO 4217 currency minor units](https://www.iso.org/
 A second traversal compares multi-page compositions, then the tool rechecks the order-to-bundle link.
 Ozon provides no snapshot guarantee across requests. Missing quantities or litres, inconsistent
 pages or an unverified financial accrual link leave the allocation unknown. Allocation uses declared
-quantities at read time. It is excluded from the actual article accrual summary.
+quantities and litres per unit at read time. When Ozon's row total equals the next whole litre above
+quantity times unit volume, the response shows both values and the model uses the unrounded weight.
+Other discrepancies block allocation. The model is excluded from the actual article accrual summary.
 [Supply orders](https://docs.ozon.com/api/seller/#operation/SupplyOrderList) · [Order details](https://docs.ozon.com/api/seller/#operation/SupplyOrderGet) · [Bundle](https://docs.ozon.com/api/seller/#operation/SupplyOrderBundle)
 
 The daily accrual tool defaults to a compact `summary` by observed SKU, type,

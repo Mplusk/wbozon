@@ -2,6 +2,7 @@
 from datetime import date
 from decimal import Decimal, localcontext
 from fractions import Fraction
+from math import ceil
 
 import ozon_fbo as fbo
 from ozon_details import _id, _money, _text
@@ -152,6 +153,7 @@ def calculate(args, read):
               'bundle_id': None, 'supply_state': None, 'composition_observed_from': None, 'composition_observed_to': None,
               'pages_observed': 0, 'validation_pages': 0, 'composition_check': 'not_completed',
               'snapshot_consistency': 'not_guaranteed_by_ozon', 'items': [], 'total_volume_litres': None, 'allocated_total': None,
+              'volume_basis': 'quantity_times_volume_in_litres', 'volume_differences': [],
               'ozon_expense_link_verified': False, 'included_in_article_actuals': False, 'read_only': True,
               'untrusted_data': True, 'quantity_basis': 'declared_bundle', 'volume_unit': 'litre',
               'sources': [fbo.ENDPOINTS[fbo.GET], fbo.ENDPOINTS[fbo.BUNDLE]],
@@ -160,6 +162,8 @@ def calculate(args, read):
               'rounding': 'Суммы по SKU распределены методом наибольших остатков до минимальной единицы валюты. '
                           'При равном остатке первым идёт меньший SKU. Ставка на штуку дана точной дробью в валюте строки.',
               'note': 'Оценка одной строки документа. Расход и его привязку указывает вызывающее приложение. '
+                      'База модели — количество × объём штуки. Если итог строки Ozon совпадает с округлением этой '
+                      'базы вверх до литра, оба значения видны в volume_differences. Способ тарификации неизвестен. '
                       'Количество и объём происходят из состава заявки за интервал чтения. Ozon не гарантирует '
                       'единого снимка между страницами. Фактическая приёмка, исторический состав, независимое '
                       'подтверждение документа и полнота всех затрат неизвестны.'}
@@ -197,8 +201,14 @@ def calculate(args, read):
         if row['quantity']:
             volume = Fraction(row['volume_in_litres']) * row['quantity']
             volumes.append(volume)
-            if row['total_volume_in_litres'] is not None and Fraction(row['total_volume_in_litres']) != volume:
-                issues.add('inconsistent_provider_volumes')
+            reported = row['total_volume_in_litres']
+            if reported is not None and Fraction(reported) != volume:
+                matches_ceiling = Fraction(reported) == ceil(volume)
+                result['volume_differences'].append({
+                    'sku': row['sku'], 'quantity_times_unit_litres': _exact_decimal(volume), 'reported_total_litres': reported,
+                    'relation': 'equals_whole_litre_ceiling' if matches_ceiling else 'unreconciled'})
+                if not matches_ceiling:
+                    issues.add('inconsistent_provider_volumes')
     if issues:
         return incomplete()
     try:
