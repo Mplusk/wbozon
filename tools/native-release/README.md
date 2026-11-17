@@ -14,6 +14,24 @@ Its current venv may contain symlinks, which this strict first version refuses.
 Do not run it against the current production layout until separately reviewing a
 migration to compatible immutable releases. Do not mutate a live release to pass checks.
 
+## CI native candidate
+
+In the branch containing this document, the `CI` workflow builds a native
+candidate only after the application tests, isolated Docker smoke, controller
+tests and egress tests succeed for the same commit. It reconstructs the tracked
+service from that commit, downloads hash-locked Linux wheels, installs them in a
+separate CI venv, runs the portal tests and a synthetic native Gunicorn smoke,
+and retains a private `native-portal-tested-<commit>` artifact for seven days.
+The artifact contains source, the wheelhouse, `PROVENANCE.json`, per-file
+`FILES.sha256`, and an outer `SHA256SUMS` for the archive. Verify the hashes and
+the exact repository, commit and successful workflow run from a trusted GitHub
+channel; a checksum inside the artifact alone is not proof of origin.
+
+This archive is **not** an installed or manifest-sealed release: it contains no
+prepared server venv, trusted current-release manifest, unit fingerprint, or
+server deployment. It must not be pointed at the controller unchanged. Host
+adoption and the controller checks below remain necessary before any CD step.
+
 1. Verify Python3.12 and trusted package hashes. Prepare candidate under its **final**
    root-owned `/opt/3dprinta-portal/releases/<release-name>` path with an isolated venv,
    no system site packages, only approved hash-locked offline wheels. Venv executable
