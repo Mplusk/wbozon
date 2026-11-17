@@ -69,7 +69,7 @@ def _recover_partials(directory):
             os.unlink(name, dir_fd=directory)
             changed = True
             continue
-        match = re.fullmatch(r'\.([0-9a-f]{40})\.partial', name)
+        match = re.fullmatch(r'\.([0-9a-f]{40}(?:-[1-9][0-9]{0,19}-[1-9][0-9]{0,4})?)\.partial', name)
         if not match:
             continue
         info = os.stat(name, dir_fd=directory, follow_symlinks=False)
@@ -133,17 +133,25 @@ def _rate_limit(directory, size, now):
         raise
 
 
-def receive(directory, stream, commit, digest, size, now=None):
+def receive(directory, stream, commit, digest, size, now=None, run_id=None, run_attempt=None):
     if (not re.fullmatch('[0-9a-f]{40}', commit) or not re.fullmatch('[0-9a-f]{64}', digest) or
             type(size) is not int or not 1 <= size <= MAX_BYTES):
         raise Rejected('invalid artifact metadata')
+    if (run_id is None) != (run_attempt is None):
+        raise Rejected('incomplete workflow identity')
+    stem = commit
+    if run_id is not None:
+        if (not isinstance(run_id, str) or not re.fullmatch('[1-9][0-9]{0,19}', run_id) or
+                not isinstance(run_attempt, str) or not re.fullmatch('[1-9][0-9]{0,4}', run_attempt)):
+            raise Rejected('invalid workflow identity')
+        stem += '-' + run_id + '-' + run_attempt
     directory = pathlib.Path(directory)
     if not directory.is_absolute() or '..' in directory.parts:
         raise Rejected('invalid staging directory')
     dfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     lockfd = None
-    tempname = '.' + commit + '.partial'
-    filename = commit + '.tar.gz'
+    tempname = '.' + stem + '.partial'
+    filename = stem + '.tar.gz'
     created = False
     try:
         info = os.fstat(dfd)
@@ -162,7 +170,7 @@ def receive(directory, stream, commit, digest, size, now=None):
         names = os.listdir(dfd)
         artifacts = []
         for name in names:
-            if re.fullmatch('[0-9a-f]{40}\\.tar\\.gz', name):
+            if re.fullmatch('[0-9a-f]{40}(?:-[1-9][0-9]{0,19}-[1-9][0-9]{0,4})?\\.tar\\.gz', name):
                 fd = _open_regular(dfd, name, os.O_RDONLY)
                 try:
                     entry = os.fstat(fd)
@@ -231,7 +239,7 @@ def _trusted_ancestors(directory):
 def main():
     # The forced command is never evaluated by a shell or used as a path.
     command = os.environ.get('SSH_ORIGINAL_COMMAND', '')
-    match = re.fullmatch(r'stage ([0-9a-f]{40}) ([0-9a-f]{64}) ([1-9][0-9]{0,7})', command)
+    match = re.fullmatch(r'stage ([0-9a-f]{40})(?: ([1-9][0-9]{0,19}) ([1-9][0-9]{0,4}))? ([0-9a-f]{64}) ([1-9][0-9]{0,7})', command)
     if not match or os.geteuid() == 0:
         print('Rejected staging request.', file=sys.stderr)
         return 1
@@ -239,7 +247,8 @@ def main():
     signal.alarm(180)
     try:
         _trusted_ancestors(DIRECTORY)
-        receive(DIRECTORY, sys.stdin.buffer, match[1], match[2], int(match[3]))
+        receive(DIRECTORY, sys.stdin.buffer, match[1], match[4], int(match[5]),
+                run_id=match[2], run_attempt=match[3])
     except (Rejected, OSError, ValueError):
         print('Staging outcome not confirmed; inspect before retrying.', file=sys.stderr)
         return 1

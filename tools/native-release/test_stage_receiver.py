@@ -55,6 +55,36 @@ class StageReceiverTests(unittest.TestCase):
         self.receive()
         self.assertEqual(path.read_bytes(), self.data)
 
+    def test_same_commit_from_different_workflow_attempts_does_not_conflict(self):
+        receiver.receive(self.directory, io.BytesIO(self.data), self.commit, self.digest,
+                         len(self.data), run_id='123456', run_attempt='1')
+        another = b'a different workflow artifact'
+        receiver.receive(self.directory, io.BytesIO(another), self.commit, hashlib.sha256(another).hexdigest(),
+                         len(another), run_id='123456', run_attempt='2')
+        self.assertEqual((self.directory / (self.commit + '-123456-1.tar.gz')).read_bytes(), self.data)
+        self.assertEqual((self.directory / (self.commit + '-123456-2.tar.gz')).read_bytes(), another)
+
+    def test_old_and_new_names_share_the_storage_limit(self):
+        self.receive()
+        with patch.object(receiver, 'MAX_ARTIFACTS', 1), self.assertRaises(receiver.Rejected):
+            receiver.receive(self.directory, io.BytesIO(self.data), self.commit, self.digest,
+                             len(self.data), run_id='123456', run_attempt='1')
+        self.assertEqual((self.directory / (self.commit + '.tar.gz')).read_bytes(), self.data)
+
+    def test_same_run_and_attempt_cannot_overwrite_different_payload(self):
+        receiver.receive(self.directory, io.BytesIO(self.data), self.commit, self.digest,
+                         len(self.data), run_id='123456', run_attempt='1')
+        other = b'an altered artifact'
+        with self.assertRaises(receiver.Rejected):
+            receiver.receive(self.directory, io.BytesIO(other), self.commit, hashlib.sha256(other).hexdigest(),
+                             len(other), run_id='123456', run_attempt='1')
+        self.assertEqual((self.directory / (self.commit + '-123456-1.tar.gz')).read_bytes(), self.data)
+
+    def test_invalid_workflow_identity_cannot_escape(self):
+        with self.assertRaises(receiver.Rejected):
+            receiver.receive(self.directory, io.BytesIO(self.data), self.commit, self.digest,
+                             len(self.data), run_id='../bad', run_attempt='1')
+
     def test_digest_mismatch_never_publishes_or_leaves_partial(self):
         with self.assertRaises(receiver.Rejected):
             self.receive(data=b'x' * len(self.data))
@@ -180,6 +210,25 @@ class StageReceiverTests(unittest.TestCase):
         self.receive()
         self.assertFalse((self.directory / ('.' + self.commit + '.partial')).exists())
         self.assertEqual((self.directory / (self.commit + '.tar.gz')).read_bytes(), self.data)
+
+    def test_new_run_name_recovers_kill_between_link_and_unlink(self):
+        code = ('import io,os,sys,stage_receiver as r\n'
+                'link=os.link\n'
+                'def paused(*a,**kw):\n'
+                ' link(*a,**kw); print("linked",flush=True); sys.stdin.readline()\n'
+                'os.link=paused\n'
+                'data=b"synthetic artifact bytes"\n'
+                'r.receive(sys.argv[1],io.BytesIO(data),sys.argv[2],sys.argv[3],len(data),run_id="55",run_attempt="2")')
+        process = self.child(code)
+        self.assertEqual(self.line(process), 'linked')
+        process.kill()
+        process.wait(timeout=5)
+        partial = self.directory / ('.' + self.commit + '-55-2.partial')
+        self.assertTrue(partial.exists())
+        receiver.receive(self.directory, io.BytesIO(self.data), self.commit, self.digest,
+                         len(self.data), run_id='55', run_attempt='2')
+        self.assertFalse(partial.exists())
+        self.assertEqual((self.directory / (self.commit + '-55-2.tar.gz')).read_bytes(), self.data)
 
     def test_alarm_cleans_own_partial(self):
         code = ('import signal,sys,stage_receiver as r\n'

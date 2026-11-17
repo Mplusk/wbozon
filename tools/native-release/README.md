@@ -21,7 +21,7 @@ candidate only after the application tests, isolated Docker smoke, controller
 tests and egress tests succeed for the same commit. It reconstructs the tracked
 service from that commit, downloads hash-locked Linux wheels, installs them in a
 separate CI venv, runs the portal tests and a synthetic native Gunicorn smoke,
-and retains a private `native-portal-tested-<commit>` artifact for seven days.
+and retains a private `native-portal-tested-<commit>-<run>-<attempt>` artifact for seven days.
 The artifact contains source, the wheelhouse, a separately hash-locked pip
 bootstrap wheel, `PROVENANCE.json`, per-file
 `FILES.sha256`, and an outer `SHA256SUMS` for the archive. Verify the hashes and
@@ -197,14 +197,22 @@ the archive. The SSH key cannot invoke a shell or write to the live release. The
 staged file and sender-supplied digest are **not** independent proof of CI origin;
 any future privileged promoter must obtain trusted provenance and verify the
 bytes again after copying them to a root-controlled location.
+The staging filename includes commit, workflow run and attempt so a rerun of
+the same commit does not overwrite a different artifact.
 
 The CI job stages only tested artifacts from `main` and the explicitly named
-release branch. Uploads use pinned SSH host keys and encrypted GitHub secrets.
+release branch. A separate, fresh GitHub runner downloads the exact artifact ID
+and compares its tarball digest with the builder's job output; the build and tests
+do not run in the job containing the staging key. Uploads use
+pinned SSH host keys and encrypted GitHub secrets.
 Staging is bounded to 40 artifacts or 300 MB and does not automatically delete
 finished files; when full, it fails until an independently checked cleanup is
 performed. Upload rate limits use the host wall clock. The free-space precheck
 does not reserve disk blocks against other services. Staging does **not** enable
 automatic deployment or switch the running service.
+Concurrent staging jobs are serialized by GitHub; a newer queued job may replace
+an older queued job. If a staging job needs rerunning, rerun the entire workflow
+until isolated job-only retry has been verified.
 
 The controller does not maintain a permanent guarantee about root operators or
 systemd configuration changes outside its lock. Passing local tests does not

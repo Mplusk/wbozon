@@ -149,9 +149,10 @@ jobs:
     needs: [email-auth, marketplace-egress]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    concurrency:
-      group: wbozon-native-candidate-and-staging
-      cancel-in-progress: false
+    outputs:
+      artifact_id: ${{ steps.native_artifact.outputs.artifact-id }}
+      artifact_attempt: ${{ github.run_attempt }}
+      artifact_sha256: ${{ steps.native_digest.outputs.sha256 }}
     steps:
       - name: Check out exact tested commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -218,30 +219,73 @@ jobs:
           (cd "$bundle" && sha256sum --check --strict FILES.sha256 >/dev/null)
           tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -C "$bundle" -cf - . | gzip -n > "$out/native-portal-${GITHUB_SHA}.tar.gz"
           (cd "$out" && sha256sum "native-portal-${GITHUB_SHA}.tar.gz" > SHA256SUMS)
+      - name: Capture candidate digest for the staging job
+        id: native_digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(sha256sum "$RUNNER_TEMP/native-artifact/native-portal-${GITHUB_SHA}.tar.gz" | cut -d ' ' -f1)"
+          [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+          printf 'sha256=%s\n' "$digest" >> "$GITHUB_OUTPUT"
       - name: Retain tested native candidate
+        id: native_artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: native-portal-tested-${{ github.sha }}
+          name: native-portal-tested-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native-artifact/
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
+  native-stage:
+    name: Deliver tested candidate to server staging
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/ozon-finance-partial-20261117')
+    needs: [native-candidate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: wbozon-native-staging
+      cancel-in-progress: false
+    steps:
+      - name: Verify artifact identity
+        env:
+          BUILD_ARTIFACT_ID: ${{ needs.native-candidate.outputs.artifact_id }}
+          BUILD_ATTEMPT: ${{ needs.native-candidate.outputs.artifact_attempt }}
+          BUILD_SHA256: ${{ needs.native-candidate.outputs.artifact_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$BUILD_ATTEMPT" =~ ^[1-9][0-9]*$ && "$BUILD_SHA256" =~ ^[0-9a-f]{64}$ ]]
+      - name: Download exact artifact from this run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.native-candidate.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/native-artifact
       - name: Deliver candidate to isolated server staging
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/ozon-finance-partial-20261117'
         env:
           STAGE_SSH_KEY: ${{ secrets.WBOZON_STAGE_SSH_KEY }}
           STAGE_KNOWN_HOSTS: ${{ secrets.WBOZON_STAGE_KNOWN_HOSTS }}
+          BUILD_ATTEMPT: ${{ needs.native-candidate.outputs.artifact_attempt }}
+          BUILD_SHA256: ${{ needs.native-candidate.outputs.artifact_sha256 }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$BUILD_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
           test -n "$STAGE_SSH_KEY"
           test -n "$STAGE_KNOWN_HOSTS"
           artifact="$RUNNER_TEMP/native-artifact/native-portal-${GITHUB_SHA}.tar.gz"
-          (cd "$RUNNER_TEMP/native-artifact" && sha256sum --check --strict SHA256SUMS)
-          digest="$(sha256sum "$artifact" | cut -d ' ' -f1)"
+          test -f "$artifact" && test ! -L "$artifact"
+          test -f "$RUNNER_TEMP/native-artifact/SHA256SUMS" && test ! -L "$RUNNER_TEMP/native-artifact/SHA256SUMS"
+          test "$(find "$RUNNER_TEMP/native-artifact" -mindepth 1 -maxdepth 1 | wc -l)" -eq 2
           bytes="$(stat -c '%s' "$artifact")"
-          [[ "$digest" =~ ^[0-9a-f]{64}$ && "$bytes" =~ ^[1-9][0-9]*$ ]]
+          [[ "$bytes" =~ ^[1-9][0-9]*$ ]] && (( bytes <= 30000000 ))
+          (( $(stat -c '%s' "$RUNNER_TEMP/native-artifact/SHA256SUMS") <= 200 ))
+          digest="$(sha256sum "$artifact" | cut -d ' ' -f1)"
+          [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+          test "$digest" = "$BUILD_SHA256"
+          test "$(cat "$RUNNER_TEMP/native-artifact/SHA256SUMS")" = "$digest  native-portal-${GITHUB_SHA}.tar.gz"
           private_dir="$RUNNER_TEMP/wbozon-stage-ssh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           umask 077
           mkdir -m 700 "$private_dir"
@@ -252,4 +296,4 @@ jobs:
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$private_dir/known_hosts" \
             -o GlobalKnownHostsFile=/dev/null -o ClearAllForwardings=yes \
             -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=2 \
-            staging-account@portal.example.invalid "stage $GITHUB_SHA $digest $bytes" < "$artifact"
+            staging-account@portal.example.invalid "stage $GITHUB_SHA $GITHUB_RUN_ID $BUILD_ATTEMPT $digest $bytes" < "$artifact"
