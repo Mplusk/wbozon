@@ -22,7 +22,8 @@ tests and egress tests succeed for the same commit. It reconstructs the tracked
 service from that commit, downloads hash-locked Linux wheels, installs them in a
 separate CI venv, runs the portal tests and a synthetic native Gunicorn smoke,
 and retains a private `native-portal-tested-<commit>` artifact for seven days.
-The artifact contains source, the wheelhouse, `PROVENANCE.json`, per-file
+The artifact contains source, the wheelhouse, a separately hash-locked pip
+bootstrap wheel, `PROVENANCE.json`, per-file
 `FILES.sha256`, and an outer `SHA256SUMS` for the archive. Verify the hashes and
 the exact repository, commit and successful workflow run from a trusted GitHub
 channel; a checksum inside the artifact alone is not proof of origin.
@@ -37,6 +38,11 @@ adoption and the controller checks below remain necessary before any CD step.
    no system site packages, only approved hash-locked offline wheels. Venv executable
    shebangs depend on this path. Run portal regression and synthetic native smoke
    before sealing. Runtime must not write pycache, secrets, logs or DB inside release.
+   The CI test uses `venv --without-pip --copies` and runs pip from the pinned
+   bootstrap wheel. A host still needs a compatible Python and the `venv` module;
+   when those are already present, missing `ensurepip` does not by itself require
+   package updates. Verify the source and both lockfiles against the trusted CI
+   artifact before use.
 2. Release tree and all parent paths must be root-owned, not group/other writable,
    regular files/directories only, **no symlinks** (including Python/lib64 venv links).
    Prepare Python executable copies; resolve nonessential venv links in staging only
@@ -164,7 +170,24 @@ preserve pending journal, inspect actual jobs and reconcile before explicit reco
 - Actual systemd sandbox/lifecycle/recovery acceptance during authorized window.
 - Recheck activation graph for concurrent host/dependency changes.
 
+## Experimental finance lock guard
+
+`finance_guard.py` is a separately tested building block. It opens only an existing
+gate, takes its bootstrap and registered client locks, checks identities,
+generations and cooldowns, and refuses uncertain or changed state. It does not
+create or reset any gate data. It is **not integrated into the controller**,
+installed on the host, or sufficient to authorize a deployment. Holding the locks
+temporarily causes concurrent finance calls to fail busy; it does not drain OAuth,
+SMTP, other marketplace calls, or general HTTP requests.
+
+Any future integration must derive the gate path, UID, PID and invocation identity
+from the trusted actual unit, not from a CI client; compare every relevant gate
+inode and time namespace with the running service before and after switching; keep
+the guard outside the service cgroup; and account for the fact that locks disappear
+when the guard process dies. It must independently establish secure path ownership,
+writer and mount-namespace assumptions, a durable recovery plan and bounded disk
+I/O supervision. Synthetic tests do not prove real systemd drain or recovery.
+
 The controller does not maintain a permanent guarantee about root operators or
-systemd configuration changes outside its lock. No server mutation, repository push
-or automation activation was performed by this local contract update.46 local tests
-pass; these tests do not constitute host acceptance.
+systemd configuration changes outside its lock. Passing local tests does not
+constitute host acceptance or enable automatic deployment.

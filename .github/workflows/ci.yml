@@ -162,10 +162,14 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           python3 -c 'import platform,sys; assert sys.version_info[:2] == (3,12); assert platform.machine() == "x86_64"'
           bundle="$RUNNER_TEMP/native-candidate"
-          mkdir -p "$bundle/service" "$bundle/wheelhouse" "$RUNNER_TEMP/native-artifact"
+          mkdir -p "$bundle/service" "$bundle/wheelhouse" "$bundle/bootstrap" "$RUNNER_TEMP/native-artifact"
           git archive "$GITHUB_SHA" services/email-auth | tar -x -C "$bundle/service" --strip-components=2
           cp tools/native-test-bundle/requirements-offline.lock "$bundle/requirements-offline.lock"
+          cp tools/native-test-bundle/requirements-bootstrap.lock "$bundle/requirements-bootstrap.lock"
           cp tools/native-test-bundle/test_native.py "$bundle/test_native.py"
+          python3 -m pip download --isolated --index-url https://pypi.org/simple \
+            --only-binary=:all: --require-hashes --no-deps \
+            --dest "$bundle/bootstrap" -r "$bundle/requirements-bootstrap.lock"
           python3 -m pip download --isolated --index-url https://pypi.org/simple \
             --only-binary=:all: --require-hashes --no-deps \
             --dest "$bundle/wheelhouse" -r "$bundle/requirements-offline.lock"
@@ -175,8 +179,10 @@ jobs:
           set -euo pipefail
           bundle="$RUNNER_TEMP/native-candidate"
           venv="$RUNNER_TEMP/native-candidate-venv"
-          python3 -m venv "$venv"
-          "$venv/bin/python" -m pip install --isolated --no-index --find-links "$bundle/wheelhouse" \
+          # Production may lack ensurepip; bootstrap from a separate hash-locked wheel.
+          python3 -m venv --without-pip --copies "$venv"
+          "$venv/bin/python" -c 'import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); runpy.run_module("pip",run_name="__main__")' \
+            "$bundle/bootstrap/pip-26.3-py3-none-any.whl" install --isolated --no-index --find-links "$bundle/wheelhouse" \
             --require-hashes -r "$bundle/requirements-offline.lock"
           (cd "$bundle/service" && PYTHONDONTWRITEBYTECODE=1 "$venv/bin/python" -m unittest -q)
           PYTHONDONTWRITEBYTECODE=1 "$venv/bin/python" "$bundle/test_native.py"
