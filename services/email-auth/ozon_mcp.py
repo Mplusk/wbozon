@@ -159,8 +159,10 @@ def validate_args(operation, args):
         except (TypeError, ValueError): raise ValueError('Invalid date') from None
         if not 0 <= (end - start).days < 90: raise ValueError('Period must be 1 to 90 days')
         return
-    allowed = {'limit', 'last_id'} if operation == 'ozon_products' else {'limit', 'cursor', 'offer_ids'}
+    allowed = {'limit', 'last_id', 'include_identity'} if operation == 'ozon_products' else {'limit', 'cursor', 'offer_ids'}
     if set(args) - allowed: raise ValueError('Invalid arguments')
+    if operation == 'ozon_products' and 'include_identity' in args and type(args['include_identity']) is not bool:
+        raise ValueError('Invalid identity enrichment flag')
     limit = args.get('limit', 20)
     if type(limit) is not int or not 1 <= limit <= 100: raise ValueError('Invalid limit')
     cursor_key = 'last_id' if operation == 'ozon_products' else 'cursor'
@@ -288,6 +290,134 @@ def project_response(operation, args, data, creds):
         result['catalog_completeness'] = 'not_verified'
         result['identity'] = _page_identity(out)
     return result
+
+
+def product_enrichment_request(page):
+    """Request only unambiguous product IDs from the current projected page."""
+    if not isinstance(page,dict) or not isinstance(page.get('items'),list):
+        raise ValueError('Invalid product page')
+    counts={}
+    for item in page['items']:
+        if not isinstance(item,dict): raise ValueError('Invalid product page item')
+        try: product=ozon_details._id(item.get('product_id'))
+        except ValueError: continue
+        counts[product]=counts.get(product,0)+1
+    conflict_indices={index for group in page.get('identity',{}).get('conflicts',[])
+                      for index in group.get('row_indices',[])}
+    ids=[]
+    for index,item in enumerate(page['items']):
+        try: product=ozon_details._id(item.get('product_id'))
+        except ValueError: continue
+        if (counts[product]==1 and index not in conflict_indices and
+                type(item.get('offer_id')) is str and item['offer_id']):
+            ids.append(product)
+    return {'product_ids':ids} if ids else None
+
+
+def enrich_product_page(page, info):
+    """Attach observations only when product ID and exact offer both agree.
+
+    This validates the available response, not historical or cross-page SKU
+    coverage. An ambiguous product is left without an attributed name or SKU.
+    """
+    request=product_enrichment_request(page)
+    requested=set(request['product_ids']) if request else set()
+    if not isinstance(info,dict) or not isinstance(info.get('items'),list):
+        raise ValueError('Invalid product identity response')
+    # Inspect all available page and card observations before attaching any
+    # candidate. A card may be absent for a conflicting page item, and an
+    # unmatched card may still identify another owner of the same SKU.
+    owners={}
+    uncheckable_page_sku=False
+    def remember(raw_sku,product,offer):
+        nonlocal uncheckable_page_sku
+        try: sku=ozon_details._optional_sku(raw_sku,None)
+        except ValueError:
+            uncheckable_page_sku=True;return
+        if sku is None:return
+        try: product=ozon_details._id(product)
+        except ValueError: product=None
+        if type(offer) is not str or not offer:offer=None
+        owners.setdefault(sku,set()).add((product,offer))
+    for item in page['items']:
+        raw=item.get('sku')
+        for sku in raw if isinstance(raw,list) else [raw]:
+            remember(sku,item.get('product_id'),item.get('offer_id'))
+    for item in info['items']:
+        if not isinstance(item,dict): raise ValueError('Invalid product identity item')
+        for sku in item.get('sku_candidates',[]):
+            remember(sku,item.get('product_id'),item.get('offer_id'))
+    conflicts={sku for sku,values in owners.items() if
+               (len({product for product,_ in values if product is not None})>1 or
+                len({offer for _,offer in values if offer is not None})>1)}
+    incomplete={sku for sku,values in owners.items()
+                if any(product is None or offer is None for product,offer in values)}
+    invalid={index for group in info.get('conflicts',[]) for index in group.get('row_indices',[])}
+    invalid.update(info.get('unmatched_row_indices',[]))
+    by_id={}
+    for index,item in enumerate(info['items']):
+        if not isinstance(item,dict): raise ValueError('Invalid product identity item')
+        product=item.get('product_id')
+        if product in requested:
+            by_id.setdefault(product,[]).append((index,item))
+    enriched=0
+    for item in page['items']:
+        item['identity_status']='unavailable'
+        base=item.get('sku')
+        try:
+            base_skus={ozon_details._optional_sku(value,None)
+                       for value in (base if isinstance(base,list) else [base])}
+        except ValueError:
+            item['identity_status']='page_sku_unverifiable';continue
+        base_skus.discard(None)
+        if base_skus & conflicts:
+            item['identity_status']='sku_conflict';continue
+        if base_skus & incomplete:
+            item['identity_status']='sku_owner_incomplete';continue
+        try: product=ozon_details._id(item.get('product_id'))
+        except ValueError: continue
+        matches=by_id.get(product,[])
+        if product not in requested or len(matches)!=1 or matches[0][0] in invalid:
+            continue
+        candidate=matches[0][1]
+        if candidate.get('offer_id') != item.get('offer_id'):
+            item['identity_status']='offer_mismatch';continue
+        existing=item.get('sku')
+        existing=existing if isinstance(existing,list) else [existing]
+        try: existing={ozon_details._optional_sku(value,None) for value in existing}
+        except ValueError:
+            item['identity_status']='invalid_list_sku';continue
+        existing.discard(None)
+        observed=set(candidate.get('sku_candidates',[]))
+        if uncheckable_page_sku:
+            item['identity_status']='page_sku_unverifiable';continue
+        if observed & conflicts:
+            item['identity_status']='sku_conflict';continue
+        if observed & incomplete:
+            item['identity_status']='sku_owner_incomplete';continue
+        if not existing.issubset(observed):
+            item['identity_status']='sku_mismatch';continue
+        item['name']=candidate.get('name')
+        item['sku_candidates']=list(candidate.get('sku_candidates',[]))
+        item['sku_sources']=list(candidate.get('sources',[]))
+        item['stock_sku_sources']=list(candidate.get('stock_sources',[]))
+        item['identity_status']='incomplete' if candidate.get('incomplete_fields') else 'observed'
+        item['identity_incomplete_fields']=list(candidate.get('incomplete_fields',[]))
+        enriched+=1
+    page['identity_enrichment']={'source':'Ozon Seller API /v3/product/info/list',
+        'scope':'current_page_only','items_enriched':enriched,
+        'items_unavailable':len(page['items'])-enriched,'sku_coverage':'not_verified',
+        'items_with_name':sum(1 for item in page['items'] if isinstance(item.get('name'),str) and item['name']),
+        'lookup_performed':bool(request),'conflicting_skus':sorted(conflicts,key=int)[:50],
+        'sku_owners_incomplete':sorted(incomplete,key=int)[:50],
+        'diagnostics_truncated':len(conflicts)>50 or len(incomplete)>50,
+        'uncheckable_sku_present':uncheckable_page_sku,
+        'snapshot_consistency':'not_verified'}
+    page['identity']['scope']='list_response_only'
+    # This nested diagnostic describes the list response, not the later card
+    # enrichment. Card-name coverage lives under identity_enrichment.
+    page['identity']['name_in_projection']=False
+    return page
 
 
 def _project_orders_analytics(args, data, creds):

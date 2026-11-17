@@ -40,6 +40,20 @@ class PreviewTests(unittest.TestCase):
         self.app.gateway=lambda op,args,creds:{'items':[{'product_id':7,'offer_id':'article','archived':False,'is_fbo_visible':True,'internal_secret':'hidden'}]}
         page=self.preview('ozon')['body'];self.assertIn('article',page);self.assertNotIn('hidden',page)
         self.assertIn('Видимость FBO по API',page);self.assertIn('<dd>нет</dd>',page)
+
+    def test_ozon_preview_shows_all_observed_skus_and_escapes_name(self):
+        result={'items':[{'product_id':7,'offer_id':'0030','name':'<b>Name</b>secret',
+                          'sku_candidates':['10','11'],'identity_status':'observed'}]}
+        page=render_preview('ozon',result,0,sensitive_values=('secret',))
+        self.assertIn('&lt;b&gt;Name&lt;/b&gt;[REDACTED]',page)
+        self.assertNotIn('<b>Name</b>',page)
+        self.assertIn('Наблюдаемые SKU: 10, 11.',page)
+        self.assertIn('сопоставлены с текущим ответом Ozon',page)
+
+    def test_ozon_preview_does_not_hide_skus_after_first_hundred(self):
+        skus=[str(n) for n in range(1,102)]
+        page=render_preview('ozon',{'items':[{'sku_candidates':skus}]},0)
+        self.assertIn(', 100, 101.',page)
     def test_shared_rate_limit_with_checks(self):
         self.save();self.preview()
         self.assertTrue(self.preview()['status'].startswith('429'))

@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import external_mcp
+import finance_gate
 import ozon_mcp
 import portal
 
@@ -142,7 +143,7 @@ class IndependentProductProjection(unittest.TestCase):
     def test_upstream_size_limit_is_not_silent_truncation(self):
         with patch('portal.urllib.request.build_opener') as build:
             build.return_value.open.return_value.__enter__.return_value.read.return_value = b'x' * 512001
-            with self.assertRaisesRegex(ValueError, 'Response too large'):
+            with self.assertRaises(finance_gate.ProviderResponseTooLarge):
                 portal._provider_read('ozon_products', {'limit': 1}, CREDS)
 
     def test_mcp_returns_projected_data_and_read_only_descriptor(self):

@@ -9,8 +9,11 @@ OPERATION = 'ozon_article_summary'
 
 
 def validate_args(args):
-    if not isinstance(args,dict) or set(args) != {'offer_id','posting_numbers','date_from','date_to'}:
+    required={'offer_id','posting_numbers','date_from','date_to'}
+    if not isinstance(args,dict) or not required <= set(args) or set(args)-required-{'include_types'}:
         raise ValueError('Invalid summary arguments')
+    if 'include_types' in args and type(args['include_types']) is not bool:
+        raise ValueError('Invalid type enrichment flag')
     ozon_details.validate_args('ozon_product_info',{'offer_ids':[args['offer_id']]})
     ozon_details.validate_args('ozon_posting_accruals',{
         'posting_numbers':args['posting_numbers'],'date_from':args['date_from'],
@@ -102,8 +105,10 @@ def confirm_identity(args, forward, reverse):
 
 def accrual_args(args, identity):
     validate_args(args)
-    return {'posting_numbers':list(args['posting_numbers']),'date_from':args['date_from'],
+    result={'posting_numbers':list(args['posting_numbers']),'date_from':args['date_from'],
             'date_to':args['date_to'],'view':'summary','skus':list(identity['sku_candidates'])}
+    if 'include_types' in args:result['include_types']=args['include_types']
+    return result
 
 
 def finish(args, identity, accruals, observed_at):
@@ -117,19 +122,33 @@ def finish(args, identity, accruals, observed_at):
             not isinstance(accruals.get('breakdown'),list)):
         raise ValueError('Invalid accrual projection')
     result=_base(args)
+    selected_skus=set(identity['sku_candidates'])
+    by_posting=[{**posting,'same_posting_equal_projection_groups':[
+                    group for group in posting.get('same_posting_equal_projection_groups',[])
+                    if group.get('sku') in selected_skus],
+                 'row_indices_scope':'date_filtered_rows_before_sku_filter'}
+                for posting in accruals.get('by_posting',[])]
     result['selection'].update(returned_posting_numbers=accruals['returned_posting_numbers'],
                                unreturned_posting_numbers=accruals['unreturned_posting_numbers'])
     result.update(status='partial',identity=identity,observed_at=observed_at,
         observations={'breakdown':accruals['breakdown'],
+                      'observed_category_breakdown':accruals.get('observed_category_breakdown'),
+                      'by_posting':by_posting,
+                      'category_completeness':accruals.get('category_completeness','not_verified'),
+                      'category_classification':('current_type_dictionary' if accruals.get('type_source') else 'not_requested'),
+                      'category_note':accruals.get('category_note'),
+                      'type_history':accruals.get('type_history','not_verified'),
+                      'type_snapshot_consistency':accruals.get('type_snapshot_consistency','not_verified'),
                       'unattributed_rows_excluded':accruals['unattributed_rows_excluded'],
                       'other_sku_rows_excluded':accruals['other_sku_rows_excluded'],
                       'same_posting_equal_projection_groups':[
                           group for group in accruals['same_posting_equal_projection_groups']
-                          if group.get('sku') in set(identity['sku_candidates'])],
+                          if group.get('sku') in selected_skus],
                       'row_indices_scope':'date_filtered_rows_before_sku_filter',
                       'row_identity':'not_verified','financial_additivity':'not_verified',
                       'financial_completeness':'not_verified'},
-        sources=['Ozon Seller API /v3/product/info/list','Ozon Seller API /v1/finance/accrual/postings'],
+        sources=['Ozon Seller API /v3/product/info/list','Ozon Seller API /v1/finance/accrual/postings']+
+                ([accruals['type_source']] if accruals.get('type_source') else []),
         snapshot_consistency='not_verified',
         note=('Только переданные отправления. Дата относится к начислению, а не к заказу или реализации. '
               'Суммы — арифметика видимых строк, не выплаты и не подтверждённый финансовый итог. '

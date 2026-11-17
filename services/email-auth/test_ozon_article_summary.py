@@ -47,6 +47,8 @@ class FakeOpener:
             data=self.forward if 'offer_id' in body else self.reverse
         elif request.full_url.endswith('/v1/finance/accrual/postings'):
             data=self.postings
+        elif request.full_url.endswith('/v1/finance/accrual/types'):
+            data={'accrual_types':[{'id':1,'name':'SaleCommission','description':'Вознаграждение за продажу'}]}
         else:
             raise AssertionError('Unexpected endpoint')
         return Response(json.dumps(data,ensure_ascii=False).encode('utf-8'))
@@ -76,6 +78,9 @@ class OzonArticleSummaryTests(unittest.TestCase):
         self.assertFalse(result['period']['realization_date_used'])
         self.assertFalse(result['selection']['complete_period'])
         self.assertEqual(result['selection']['unreturned_posting_numbers'],['B-1'])
+        self.assertEqual(result['observations']['type_history'],'not_verified')
+        self.assertIn('/v1/finance/accrual/types',result['sources'][-1])
+        self.assertIn('не подтверждено',result['observations']['category_note'])
         self.assertTrue(all(value is None for value in result['unknown_metrics'].values()))
         groups={(group['sku'],group['currency']):group for group in result['observations']['breakdown']}
         self.assertEqual(groups[('10','RUB')]['row_count'],2)
@@ -88,7 +93,7 @@ class OzonArticleSummaryTests(unittest.TestCase):
         self.assertEqual(result['observations']['same_posting_equal_projection_groups'],
                          [{'posting_number':'A-1','row_indices':[0,1],'sku':'10'}])
         self.assertEqual([call[1] for call in opener.calls],
-                         [{'offer_id':['0030']},{'sku':['10','11']},{'posting_numbers':['A-1','B-1']}])
+                         [{'offer_id':['0030']},{'sku':['10','11']},{'posting_numbers':['A-1','B-1']},{}])
         self.assertTrue(all(0 < call[2] <= 15 for call in opener.calls))
         self.assertNotIn(CREDS['api_key'],json.dumps(result,ensure_ascii=False))
 
@@ -145,6 +150,16 @@ class OzonArticleSummaryTests(unittest.TestCase):
         self.assertFalse(result['selection']['complete_period'])
         self.assertTrue(all(value is None for value in result['unknown_metrics'].values()))
 
+    def test_types_can_be_disabled_without_discarding_posting_data(self):
+        opener=FakeOpener(fail_at=4,postings={'posting_accruals':[{'posting_number':'A-1',
+            'accruals':[accrual(10,'5.00')]}]})
+        result=self.execute(opener,{**ARGS,'include_types':False})
+        self.assertEqual(len(opener.calls),3)
+        self.assertEqual(result['observations']['breakdown'][0]['observed_row_sum'],'5.00')
+        self.assertIsNone(result['observations']['observed_category_breakdown'])
+        self.assertEqual(result['observations']['category_classification'],'not_requested')
+        self.assertEqual(len(result['sources']),2)
+
     def test_assembled_output_cannot_reproduce_a_synthetic_api_key(self):
         creds={'client_id':'123','api_key':'false,"returned_posting_numbers"'}
         opener=FakeOpener()
@@ -165,6 +180,9 @@ class OzonArticleSummaryTests(unittest.TestCase):
         observations=result['observations']
         self.assertEqual(observations['other_sku_rows_excluded'],2)
         self.assertEqual(observations['same_posting_equal_projection_groups'],[])
+        self.assertEqual(observations['by_posting'][0]['same_posting_equal_projection_groups'],[])
+        self.assertEqual(observations['by_posting'][0]['row_indices_scope'],
+                         'date_filtered_rows_before_sku_filter')
         self.assertEqual(observations['row_indices_scope'],'date_filtered_rows_before_sku_filter')
 
     def test_invalid_input_rejected_before_provider_call(self):
@@ -176,7 +194,7 @@ class OzonArticleSummaryTests(unittest.TestCase):
                 ozon_mcp.validate_args('ozon_article_summary',args)
 
     def test_finance_gate_retains_429_and_prevents_second_provider_call(self):
-        for failure in (1,2,3):
+        for failure in (1,2,3,4):
             opener=FakeOpener(fail_at=failure)
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
                 root=os.path.join(tmp,'gate')
@@ -207,7 +225,7 @@ class OzonArticleSummaryTests(unittest.TestCase):
                     'class Opener:\n'
                     ' def open(self,req,timeout):\n'
                     '  data=json.loads(req.data); calls.append(data)\n'
-                    '  payload={"items":[item]} if req.full_url.endswith("/v3/product/info/list") else {"posting_accruals":[]}\n'
+                    '  payload=({"items":[item]} if req.full_url.endswith("/v3/product/info/list") else {"accrual_types":[]} if req.full_url.endswith("/v1/finance/accrual/types") else {"posting_accruals":[]})\n'
                     '  return Response(json.dumps(payload,ensure_ascii=False).encode())\n'
                     'portal.urllib.request.build_opener=lambda *a: Opener()\n'
                     'portal._provider_worker()\n'
@@ -221,7 +239,7 @@ class OzonArticleSummaryTests(unittest.TestCase):
             self.assertEqual(result['selection']['unreturned_posting_numbers'],['A-1','B-1'])
             with open(marker,encoding='utf-8') as file: calls=json.load(file)
             self.assertEqual(calls,[{'offer_id':['0030']},{'sku':['10','11']},
-                                    {'posting_numbers':['A-1','B-1']}])
+                                    {'posting_numbers':['A-1','B-1']},{}])
             self.assertEqual(finance_gate.run(os.path.join(tmp,'gate'),CREDS['client_id'],lambda:'next'),'next')
 
     def test_worker_deadline_includes_slow_gate_setup_before_any_network_call(self):

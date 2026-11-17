@@ -11,7 +11,8 @@ class ProviderPayloadTests(unittest.TestCase):
         creds={'api_token':'synthetic-secret'} if operation=='wb_prices' else {'client_id':'123','api_key':'synthetic-secret'}
         with patch('portal.urllib.request.build_opener') as build:
             build.return_value.open.return_value.__enter__.return_value.read.return_value=raw
-            return provider_read(operation,{'limit':1},creds)
+            args={'limit':1,'include_identity':False} if operation=='ozon_products' else {'limit':1}
+            return provider_read(operation,args,creds)
     def test_wb_error_flag_cannot_become_empty_success(self):
         for flag in (True,None,0,1,'false',[],{}):
             with self.subTest(flag=flag), self.assertRaisesRegex(ValueError,'Provider reported an error'):

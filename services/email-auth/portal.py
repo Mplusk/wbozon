@@ -201,6 +201,35 @@ def _provider_read(operation, args, creds, *, request_timeout=15, absolute_deadl
         except Exception: raise finance_gate.ProviderResponseInvalid('Invalid provider response') from None
     try: result=ozon_mcp.project_response(operation,args,data,creds)
     except Exception: raise finance_gate.ProviderResponseInvalid('Invalid provider response') from None
+    if operation=='ozon_products' and args.get('include_identity',True):
+        # A single page is enriched by product ID and exact offer_id; neither
+        # SKU ordering nor a successful catalog lookup proves historical coverage.
+        try: enrichment_args=ozon_mcp.product_enrichment_request(result)
+        except Exception: raise finance_gate.ProviderResponseInvalid('Invalid product page') from None
+        identity_error=None
+        if enrichment_args is None:
+            info={'items':[]}
+        else:
+            deadline=(started+max(0,PROVIDER_DEADLINE_SECONDS-2)
+                      if absolute_deadline is None else absolute_deadline)
+            try:
+                info=_provider_read('ozon_product_info',enrichment_args,creds,
+                                    request_timeout=request_timeout,absolute_deadline=deadline)
+            except urllib.error.HTTPError as exc:
+                if exc.code not in (401,403): raise
+                identity_error='provider_access_denied'
+                exc.close()
+                info={'items':[]}
+        try: result=ozon_mcp.enrich_product_page(result,info)
+        except Exception: raise finance_gate.ProviderResponseInvalid('Invalid product identity response') from None
+        if identity_error:result['identity_enrichment']['error']=identity_error
+    if operation=='ozon_posting_accruals' and args.get('include_types',True):
+        deadline=(started+max(0,PROVIDER_DEADLINE_SECONDS-2)
+                  if absolute_deadline is None else absolute_deadline)
+        types=_provider_read('ozon_accrual_types',{},creds,
+                             request_timeout=request_timeout,absolute_deadline=deadline)
+        try: result=ozon_details.label_posting_accruals(result,types)
+        except Exception: raise finance_gate.ProviderResponseInvalid('Invalid accrual type response') from None
     if operation=='ozon_orders_analytics':
         # Seller info is optional. Use a daemon thread with a hard wait bound:
         # DNS resolution may ignore urllib's socket timeout. Never let an
@@ -247,7 +276,7 @@ def _guard_ozon_result(result,creds):
 
 
 def _read_article_summary(args,creds,deadline):
-    """Three sequential bounded read calls; a supplied posting set is partial."""
+    """Sequential bounded reads; a supplied posting set is partial."""
     ozon_article_summary.validate_args(args)
     def read(operation,arguments):
         remaining=deadline-time.monotonic()
@@ -375,7 +404,9 @@ def _provider_worker():
                 return _provider_read(request['operation'],request['args'],request['creds'],absolute_deadline=deadline)
             return _provider_read(request['operation'],request['args'],request['creds'])
         value = (_finance_read_with_retry(request.get('finance_gate_dir'),request['creds'],read,deadline,
-                                          allow_retry=request['operation'] != ozon_article_summary.OPERATION)
+                  allow_retry=(request['operation'] != ozon_article_summary.OPERATION and
+                    (request['operation'] != 'ozon_posting_accruals' or
+                     not request['args'].get('include_types',True))))
                  if is_finance else read())
         result={'kind':'ok', 'result':value}
     except urllib.error.HTTPError as exc:
@@ -412,15 +443,16 @@ def render_preview(provider, result, fetched_at, sensitive_values=(), lookup_nm_
     if lookup_nm_id is not None and (provider!='wb' or type(lookup_nm_id) is not int or not 1<=lookup_nm_id<=9223372036854775807): raise ValueError('Invalid WB article')
     title='Товар Wildberries по артикулу' if lookup_nm_id is not None else 'Первые товары Ozon' if provider=='ozon' else 'Первые цены Wildberries'
     stamp=datetime.fromtimestamp(fetched_at,timezone.utc).strftime('%d.%m.%Y %H:%M:%S UTC')
-    def text(value):
+    def text(value, maximum=256):
         if value is None: return 'не указано'
         if type(value) is bool: return 'да' if value else 'нет'
         if not isinstance(value,(str,int,float)): return 'не указано'
         rendered=str(value)
         for secret in sensitive_values:
             if isinstance(secret,str) and secret: rendered=rendered.replace(secret,'[REDACTED]')
-        return html.escape(rendered[:256],quote=True)
+        return html.escape(rendered[:maximum],quote=True)
     def field_text(key,value):
+        if key=='name': return text(value,1024)
         if key=='currencyIsoCode4217':
             # Display the provider's code verbatim, never assume RUB or convert prices.
             if not isinstance(value,str) or not re.fullmatch(r'[A-Z]{3}',value): return 'не указано'
@@ -446,7 +478,23 @@ def render_preview(provider, result, fetched_at, sensitive_values=(), lookup_nm_
         if not isinstance(row,dict): raise ValueError('Invalid row')
         content+='<section><h2>Товар '+str(index)+'</h2>'
         if provider=='ozon':
-            content+=fields(row,(('product_id','ID товара'),('offer_id','Артикул продавца'),('archived','В архиве'),('is_fbo_visible','Видимость FBO по API'),('is_fbs_visible','Видимость FBS по API')))
+            content+=fields(row,(('product_id','ID товара'),('offer_id','Артикул продавца'),('name','Название товара'),('archived','В архиве'),('is_fbo_visible','Видимость FBO по API'),('is_fbs_visible','Видимость FBS по API')))
+            skus=row.get('sku_candidates')
+            if skus is not None and not isinstance(skus,list):raise ValueError('Invalid product SKUs')
+            if skus:
+                content+='<p>Наблюдаемые SKU: '+', '.join(text(sku) for sku in skus)+'.</p>'
+            else:content+='<p>SKU карточки не получены или сопоставление не подтверждено.</p>'
+            statuses={'observed':'Название и SKU сопоставлены с текущим ответом Ozon.',
+                      'incomplete':'В карточке отсутствуют некоторые данные; список SKU может быть неполным.',
+                      'sku_conflict':'Обнаружен конфликт SKU; сопоставление не показано.',
+                      'sku_owner_incomplete':'Владельца SKU нельзя определить; сопоставление не показано.',
+                      'offer_mismatch':'Артикул карточки не совпал; сопоставление не показано.',
+                      'sku_mismatch':'SKU списка и карточки не совпали; сопоставление не показано.',
+                      'page_sku_unverifiable':'Формат SKU списка не удалось проверить.',
+                      'invalid_list_sku':'Формат SKU списка не удалось проверить.',
+                      'unavailable':'Данные карточки не получены или неоднозначны.'}
+            if row.get('identity_status') in statuses:
+                content+='<p>'+statuses[row['identity_status']]+'</p>'
         else:
             content+=fields(row,(('nmID','Артикул Wildberries'),('vendorCode','Артикул продавца'),('discount','Скидка по API, %'),('clubDiscount','Скидка WB Клуба по API, %'),('currencyIsoCode4217','Код валюты из API')))
             sizes=row.get('sizes',[])
@@ -705,6 +753,7 @@ class Portal:
             except Exception: return reply('Не удалось прочитать настройки. <a href="/settings">Настройки</a>','503 Service Unavailable')
             try:
                 arguments={'limit':20 if path=='/settings/preview' else 1}
+                if provider=='ozon' and path=='/settings/check': arguments['include_identity']=False
                 if lookup: arguments['nm_id']=nm_id
                 result=self.gateway(CHECK_OPERATIONS[provider],arguments,creds)
                 if not isinstance(result,dict) or not isinstance(result.get('items'),list): raise ValueError('Invalid response')
@@ -805,7 +854,7 @@ class Portal:
                 content+='<p>Проверка прочитает до одной записи через API маркетплейса, не меняя товары, цены или заказы.</p>'
                 label='Показать первые товары Ozon' if provider=='ozon' else 'Показать первые цены Wildberries'
                 content+='<form class="secondary" method="post" action="/settings/preview"><input type="hidden" name="provider" value="'+provider+'"><input type="hidden" name="csrf" value="'+html.escape(session[1],quote=True)+'"><button>'+label+'</button></form>'
-                content+='<p>Просмотр загрузит только первую страницу, до 20 товаров. Данные не сохраняются в кабинете. Проверка и просмотр используют общий лимит: один запрос кабинета в минуту, всего не более 10 запросов в час.</p>' 
+                content+='<p>Просмотр загрузит только первую страницу, до 20 товаров. Для Ozon название и SKU запрашиваются дополнительно из карточек. Данные не сохраняются в кабинете. Проверка и просмотр используют общий лимит: один запрос кабинета в минуту, всего не более 10 запросов в час.</p>'
                 if provider=='wb':
                     content+='<form class="save-form" method="post" action="/settings/wb-lookup"><input type="hidden" name="csrf" value="'+html.escape(session[1],quote=True)+'"><label for="wb-lookup-id">Артикул Wildberries (nmID), не артикул продавца</label><input id="wb-lookup-id" type="text" name="nm_id" inputmode="numeric" pattern="[1-9][0-9]{0,18}" maxlength="19" required><button>Показать цены этого товара</button></form><p>Поиск читает до одного товара по точному артикулу и использует тот же общий лимит проверки и просмотра. Товары, цены и заказы не изменяются.</p>'
             if provider=='ozon': content+='<p>Введите Client ID и API-ключ из кабинета продавца Ozon. Оба значения нужно сохранить вместе.</p>'

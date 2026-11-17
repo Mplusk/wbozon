@@ -45,7 +45,7 @@ class ConnectionCheckTests(unittest.TestCase):
     def test_ozon_empty_products_success(self):
         self.request(method='POST',data={'provider':'ozon','csrf':self.csrf,'client_id':'123','api_key':'synthetic-key'})
         self.assertTrue(self.check('ozon')['status'].startswith('303'))
-        self.assertEqual(self.calls[0][:2],('ozon_products',{'limit':1}))
+        self.assertEqual(self.calls[0][:2],('ozon_products',{'limit':1,'include_identity':False}))
         self.assertEqual(self.vault.check_status('ozon')[0],'ok')
     def test_check_after_five_minutes_does_not_allow_key_change(self):
         self.save();self.now+=301

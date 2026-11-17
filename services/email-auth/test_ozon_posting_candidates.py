@@ -109,7 +109,7 @@ class OzonPostingCandidateTests(unittest.TestCase):
         self.assertEqual(result['selection']['unreturned_posting_numbers'],['B-1'])
         self.assertIsNone(result['unknown_metrics']['financial_total'])
         self.assertEqual(result['observations']['breakdown'][0]['observed_row_sum'],'5.00')
-        self.assertEqual(len(opener.calls),4)
+        self.assertEqual(len(opener.calls),5)
 
     def test_mcp_advertises_and_validates_candidates(self):
         client=test_external_mcp.ExternalMCPTests()

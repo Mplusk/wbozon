@@ -225,7 +225,7 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
         self.assertEqual(result['identity']['sku_candidates'],['10','11'])
         self.assertFalse(result['selection']['complete_period'])
         self.assertIsNone(result['unknown_metrics']['buyout_units'])
-        self.assertEqual(len(opener.calls),3)
+        self.assertEqual(len(opener.calls),4)
 
     def test_daily_and_monthly_reports_reach_authenticated_mcp(self):
         token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',self.create()['body']).group(1)

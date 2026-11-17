@@ -82,8 +82,10 @@ def validate_args(operation, args):
         if not values: raise ValueError('No identifiers')
         normalized = [(_text(value, 256) if field == 'offer_ids' else _id(value)) for value in values]
     else:
-        if set(args) - {'posting_numbers', 'date_from', 'date_to', 'view', 'skus'} or 'posting_numbers' not in args:
+        if set(args) - {'posting_numbers', 'date_from', 'date_to', 'view', 'skus', 'include_types'} or 'posting_numbers' not in args:
             raise ValueError('Invalid arguments')
+        if 'include_types' in args and type(args['include_types']) is not bool:
+            raise ValueError('Invalid type enrichment flag')
         values = _items(args['posting_numbers'], 200)
         if not values: raise ValueError('No posting numbers')
         normalized = [_text(value, 128) for value in values]
@@ -241,7 +243,74 @@ def _money(value, secret):
     return {'amount': amount, 'currency': currency}
 
 
-def _postings(args, data, secret):
+def label_posting_accruals(result, type_response):
+    """Label provider rows and sum observed classified rows without claiming completeness."""
+    if not isinstance(result,dict) or not isinstance(type_response,dict) or not isinstance(type_response.get('types'),list):
+        raise ValueError('Invalid accrual type projection')
+    types={row['id']:row for row in type_response['types']}
+    def label(row):
+        entry=types.get(row['type_id'])
+        row['type_name']=entry['name'] if entry else None
+        row['type_description']=entry['description'] if entry else None
+        row['category']=entry['category'] if entry else 'other'
+        row['type_classification']='not_reported_by_provider' if not entry else (
+            'unclassified' if entry['category']=='other' else 'known_pair')
+    if 'posting_accruals' in result:
+        for posting in result['posting_accruals']:
+            for row in posting['accruals']:label(row)
+    elif 'breakdown' in result:
+        category_groups={}
+        # SKU-less charges, unclassified types and unknown currencies can
+        # affect a category even when the gap is on another type_id.
+        unattributed=bool(result.get('unattributed_rows_excluded')) or any(
+            row.get('sku') is None for row in result['breakdown'])
+        for row in result['breakdown']:
+            label(row)
+            key=(row['sku'],row['category'],row['currency'])
+            group=category_groups.setdefault(key,{'sku':key[0],'category':key[1],'currency':key[2],
+                'type_ids':[],'observed_row_sum':None,'incomplete':None,'financial_total':None,
+                'completeness':'not_verified'})
+            group['type_ids'].append(row['type_id'])
+            if row.get('observed_sum_has_missing_or_unattributed_data'):
+                group['incomplete']=True
+            value=row.get('observed_row_sum')
+            if value is not None:
+                with localcontext() as context:
+                    context.prec=100
+                    group['observed_row_sum']=format(Decimal(group['observed_row_sum'] or '0')+Decimal(value),'f')
+        unknown_type_skus={row['sku'] for row in result['breakdown'] if row['category']=='other'}
+        unknown_currency_pairs={(row['sku'],row['category']) for row in result['breakdown'] if row['currency'] is None}
+        for group in category_groups.values():
+            unknown_type=group['sku'] in unknown_type_skus
+            unknown_currency=(group['sku'],group['category']) in unknown_currency_pairs
+            group['unattributed_rows_present']=unattributed
+            group['unclassified_types_present_for_sku']=unknown_type
+            group['unknown_currency_for_category']=unknown_currency
+            if unattributed or unknown_type or unknown_currency:
+                group['incomplete']=True
+        result['observed_category_breakdown']=list(category_groups.values())
+    else: raise ValueError('Invalid posting projection')
+    result['type_source']='Ozon Seller API /v1/finance/accrual/types'
+    result['type_history']='not_verified'
+    result['type_snapshot_consistency']='not_verified'
+    result['category_completeness']='not_verified'
+    result['category_note']=('Категории назначены только известным точным названиям и описаниям Ozon. '
+        'Other означает не классифицировано. Наблюдаемые суммы не подтверждают полноту, '
+        'аддитивность или финансовый итог; расходы без SKU не распределяются. Returns — '
+        'начисления за связанные с возвратами услуги, а не деньги или количество возвращённых товаров. '
+        'Справочник текущий; соответствие type_id прошлым периодам не подтверждено.')
+    for posting in result.get('by_posting',[]):
+        label_posting_accruals(posting,type_response)
+        # Keep per-posting category totals compact; type-level breakdown and
+        # shared classification metadata remain in the top-level summary.
+        posting.pop('breakdown',None)
+        for field in ('type_source','type_history','type_snapshot_consistency',
+                      'category_completeness','category_note'):
+            posting.pop(field,None)
+    return result
+
+
+def _postings(args, data, secret, *, include_by_posting=True):
     requested = set(args['posting_numbers'])
     rows = _items(data.get('posting_accruals'), len(requested))
     seen, out, count = set(), [], 0
@@ -344,7 +413,21 @@ def _postings(args, data, secret):
         result['breakdown'] = breakdown
         result['summary_scope'] = 'requested_postings_only'
         if selected_skus is not None:
+            result['same_posting_equal_projection_groups']=[group for group in identical
+                                                           if group.get('sku') in selected_skus]
             result['filtered_skus'] = sorted(selected_skus, key=int)
             result['unattributed_rows_excluded'] = unattributed
             result['other_sku_rows_excluded'] = other_sku
+        if include_by_posting:
+            per_posting=[]
+            for posting in out:
+                one_args={**args,'posting_numbers':[posting['posting_number']]}
+                part=_postings(one_args,{'posting_accruals':[posting]},secret,include_by_posting=False)
+                per_posting.append({'posting_number':posting['posting_number'],
+                    'breakdown':part['breakdown'],
+                    'same_posting_equal_projection_groups':part['same_posting_equal_projection_groups'],
+                    'unattributed_rows_excluded':part.get('unattributed_rows_excluded',0),
+                    'other_sku_rows_excluded':part.get('other_sku_rows_excluded',0),
+                    'financial_completeness':'not_verified'})
+            result['by_posting']=per_posting
     return result

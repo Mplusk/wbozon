@@ -67,7 +67,8 @@ class ExternalMCPTests(unittest.TestCase):
         listed = self.request(self.rpc('tools/list'))['body']['result']['tools']
         description = next(tool['description'] for tool in listed if tool['name'] == 'ozon_products')
         self.assertIn('SKU', description)
-        self.assertIn('Названия не возвращаются', description)
+        self.assertIn('название', description)
+        self.assertIn('identity_enrichment', description)
         self.assertIn('не подтверждены', description)
         def run(_, name, args):
             return ozon_mcp.project_response(name, args, {'result': {'items': [
