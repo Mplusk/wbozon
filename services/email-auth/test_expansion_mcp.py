@@ -353,11 +353,14 @@ class ReportHistoryTests(unittest.TestCase):
                 db.execute("INSERT INTO quota VALUES(?,?,0)", (legacy, time.time() + 300))
             with patch.object(first.opener, "open") as http, patch.object(rotated.opener, "open") as rotated_http:
                 with self.assertRaises(urllib.error.HTTPError) as old_slot:
-                    first("POST", endpoint, body={}, interval=60, basic_interval=10800)
+                    rotated("POST", endpoint, body={}, interval=60, basic_interval=10800)
                 self.assertEqual(old_slot.exception.code, 429)
                 http.assert_not_called()
+                with self.assertRaises(urllib.error.HTTPError):
+                    first("POST", endpoint, body={}, interval=60, basic_interval=10800)
+                rotated_http.assert_not_called()
                 with first.db() as db:
-                    db.execute("UPDATE quota SET until_at=0 WHERE k=?", (legacy,))
+                    db.execute("UPDATE quota SET until_at=0")
                 response = http.return_value.__enter__.return_value
                 response.status, response.read.return_value = 200, b"{}"
                 first("POST", endpoint, body={}, interval=60, basic_interval=10800)
@@ -367,7 +370,16 @@ class ReportHistoryTests(unittest.TestCase):
                 rotated_http.assert_not_called()
                 with first.db() as db:
                     old_until, = db.execute("SELECT until_at FROM quota WHERE k=?", (legacy,)).fetchone()
+                    rotated_legacy = market_transport._id([rotated.scope, host, path])
+                    after_rollback, = db.execute("SELECT until_at FROM quota WHERE k=?", (rotated_legacy,)).fetchone()
                 self.assertGreater(old_until - time.time(), 10790)
+                self.assertEqual(after_rollback, old_until)
+                unused = {"api_token": "replacement-never-used"}
+                market_transport.remember_wb_feed_credentials(Path(directory) / "gate", first.creds, unused)
+                saved_slot = market_transport._id([market_transport._id(["wb", unused]), host, path])
+                with first.db() as db:
+                    saved_until, = db.execute("SELECT until_at FROM quota WHERE k=?", (saved_slot,)).fetchone()
+                self.assertEqual(saved_until, old_until)
 
     def test_omitted_sku_does_not_become_an_observed_empty_stock_snapshot(self):
         with TemporaryDirectory() as directory:

@@ -133,6 +133,40 @@ def _id(value):
     return hashlib.sha256(_json(value).encode()).hexdigest()
 
 
+WB_FEED_HOST = "seller-analytics-api.wildberries.ru"
+WB_FEED_PATH = "/api/analytics/v1/order-feed"
+WB_FEED_CABINET = _id(["wb-cabinet", WB_FEED_HOST, WB_FEED_PATH])
+
+
+def _register_feed_slots(db, keys, now):
+    db.execute("CREATE TABLE IF NOT EXISTS wb_feed_slots(k TEXT PRIMARY KEY)")
+    for key in keys:
+        if not db.execute("INSERT OR IGNORE INTO wb_feed_slots VALUES(?)", (key,)).rowcount:
+            continue
+        # Old keys are opaque. A still-active finite pacing interval can belong
+        # to an earlier token. Bound this initial import by the published maximum.
+        until, = db.execute("SELECT MAX(until_at) FROM quota WHERE until_at>?", (now,)).fetchone()
+        db.execute("INSERT INTO quota VALUES(?,?,0) ON CONFLICT(k) DO UPDATE SET "
+                   "until_at=MAX(quota.until_at,excluded.until_at)",
+                   (WB_FEED_CABINET, min(until or now, now + 10800)))
+    until, unknown = db.execute("SELECT MAX(until_at),MAX(unknown) FROM quota "
+                                "WHERE k=? OR k IN (SELECT k FROM wb_feed_slots)", (WB_FEED_CABINET,)).fetchone()
+    for k in keys:
+        db.execute("INSERT INTO quota VALUES(?,?,?) ON CONFLICT(k) DO UPDATE SET "
+                   "until_at=MAX(quota.until_at,excluded.until_at),unknown=MAX(quota.unknown,excluded.unknown)",
+                   (k, until or now, unknown or 0))
+
+
+def remember_wb_feed_credentials(directory, *accounts):
+    # Register the old and replacement keys before the replacement becomes visible.
+    # Only existing receipt/interval metadata and one-way slot identifiers are used.
+    slots = [_id([_id(["wb", account]), WB_FEED_HOST, WB_FEED_PATH]) for account in accounts if account]
+    wire = Wire("wb", accounts[-1], directory, time.monotonic())
+    with wire.db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        _register_feed_slots(db, slots, time.time())
+
+
 def _wb_personal(token):
     # Token class only selects a local pacing policy. The provider checks authorization.
     try:
@@ -467,6 +501,8 @@ class Wire:
             with self.db() as db:
                 db.execute("BEGIN IMMEDIATE")
                 now = time.time()
+                if cabinet_key:
+                    _register_feed_slots(db, [key], now)
                 until, unknown = db.execute(
                     "SELECT MAX(until_at),MAX(unknown) FROM quota WHERE k IN (?,?)", keys
                 ).fetchone()
@@ -476,6 +512,9 @@ class Wire:
                 if not wait:
                     db.executemany("INSERT OR REPLACE INTO quota VALUES(?,?,0)",
                                    [(k, now + interval) for k in set(keys)])
+                    if cabinet_key:
+                        db.execute("UPDATE quota SET until_at=MAX(until_at,?) WHERE k IN (SELECT k FROM wb_feed_slots)",
+                                   (now + interval,))
                     return
             if wait>2 or not self.wait(wait):
                 delay = math.ceil(wait)
@@ -568,8 +607,8 @@ class Wire:
         quota = _id([self.scope, parts.netloc, group or parts.path])
         # The WB order feed has one pacing interval per seller. Keep writing
         # the old token slot too, as the preceding release reads it on rollback.
-        cabinet_quota = (_id(["wb-cabinet", parts.netloc, parts.path]) if self.provider == "wb" and
-                         parts.path == "/api/analytics/v1/order-feed" else None)
+        cabinet_quota = (WB_FEED_CABINET if self.provider == "wb" and parts.netloc == WB_FEED_HOST and
+                         parts.path == WB_FEED_PATH else None)
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if self.provider == "wb":
             headers["Authorization"] = self.creds["api_token"]
