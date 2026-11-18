@@ -1,4 +1,5 @@
 """Verify the published service inventories and crash recovery order on the host controller."""
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import sys
@@ -27,13 +28,16 @@ class CutoverRecovery(unittest.TestCase):
         host, guard = Mock(state=Path('state')), Mock()
         txn = Transaction(host)
         host.process.return_value = (123, 'generation', '/unit')
-        host.workers_idle.side_effect = [False, True, True]
-        host.health.side_effect = [TimeoutError(), None]
-        with patch('cd.time.monotonic', side_effect=[0, 20, 47]), patch('cd.time.sleep'), patch('cd.process_uid', return_value=400):
-            txn.ready({'phase':'starting', 'mark':7}, 'new', guard)
-        self.assertEqual(host.health.call_count, 2)
-        host.sockets.assert_called_once_with()
-        guard.verify.assert_called_once_with('/proc/123/root', '/proc/123/ns/time')
+        for phase in ('starting', 'restoring'):
+            host.workers_idle.side_effect = [False, True, True]
+            host.health.side_effect = [TimeoutError(), None]
+            with (self.subTest(phase=phase), patch('cd.time.monotonic', side_effect=[0, 20, 47]),
+                  patch('cd.time.sleep'), patch('cd.process_uid', return_value=400)):
+                txn.ready({'phase':phase, 'mark':7}, 'release', guard)
+        self.assertEqual(host.health.call_count, 4)
+        self.assertEqual(host.sockets.call_count, 2)
+        self.assertEqual(guard.verify.call_count, 2)
+        guard.verify.assert_called_with('/proc/123/root', '/proc/123/ns/time')
         self.assertEqual(guard.uid, 400)
 
     def test_cold_start_stops_if_marked_health_never_passes(self):
@@ -41,11 +45,26 @@ class CutoverRecovery(unittest.TestCase):
         txn = Transaction(host)
         host.process.return_value = (123, 'generation', '/unit')
         host.health.side_effect = TimeoutError()
-        for phase, budget in (('starting', 90), ('committed', 18), ('restoring', 18)):
+        for phase, budget in (('starting', 90), ('committed', 18), ('restoring', 90)):
             with self.subTest(phase=phase), patch('cd.time.monotonic', side_effect=[0, budget]):
                 with self.assertRaisesRegex(ReleaseError, 'marked health response'):
                     txn.ready({'phase':phase, 'mark':7}, 'new', guard)
         guard.verify.assert_not_called()
+
+    def test_interrupted_cold_restore_verifies_the_same_process_before_restarting(self):
+        host = Mock(state=Path('state'))
+        host.current.return_value = 'old'
+        host.props.return_value = {'ActiveState':'active'}
+        txn = Transaction(host)
+        journal = {'phase':'restoring', 'mark':7, 'old':'old', 'new':'new', 'old_sha':'old-sha'}
+        guard = Mock()
+        with (patch.object(txn, 'gate_lock', return_value=nullcontext(guard)) as lock,
+              patch.object(txn, 'ready') as ready, patch.object(txn, 'complete') as complete):
+            txn.reconcile(journal, False)
+        lock.assert_called_once_with(recovery=True)
+        ready.assert_called_once_with(journal, 'old', guard)
+        complete.assert_called_once_with(journal, 'old', 'old-sha')
+        host.stop.assert_not_called()
 
     def test_only_repeat_a_timed_out_drain_for_the_same_service_within_budget(self):
         host = Mock(state=Path('state'))

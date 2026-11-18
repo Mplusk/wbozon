@@ -147,8 +147,9 @@ class Transaction:
     def ready(self, j, name, guard):
         # systemd reports the Gunicorn master started before its sync workers
         # have imported the application. Keep ingress fenced during cold start.
-        # Recovery has its own four-minute systemd limit and may try both releases.
-        deadline = time.monotonic() + (90 if j['phase'] == 'starting' else 18)
+        # A recovery may try the committed candidate before restoring the previous
+        # release. Reserve the longer wait for forward startup and the fallback.
+        deadline = time.monotonic() + (18 if j['phase'] == 'committed' else 90)
         while True:
             try:
                 checking = 'running process'
@@ -318,7 +319,14 @@ class Transaction:
                 self.complete(j, name, sha)
                 return
             try:
-                h.health(j['mark'])
+                if j['phase'] == 'restoring' and not committed:
+                    # Recovery itself may have been interrupted while the old
+                    # workers were booting. Verify the existing process before
+                    # considering another stop/start of the very same release.
+                    with self.gate_lock(recovery=True) as guard:
+                        self.ready(j, name, guard)
+                else:
+                    h.health(j['mark'])
             except (OSError, ValueError, ReleaseError):
                 pass
             else:
