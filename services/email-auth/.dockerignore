@@ -14,6 +14,15 @@
 !ozon_supply_allocation.py
 !market_specs.py
 !market_transport.py
+!market_archive.py
+!market_composites.py
+!market_diagnostics.py
+!market_health.py
+!market_history.py
+!posting_discovery.py
+!supply_history.py
+!wb_reports.py
+!wb_legacy_reports.py
 !expansion_gateway.py
 !ozon_expansion.py
 !ozon_performance.py

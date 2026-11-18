@@ -83,6 +83,13 @@ def read(vault, directory, args, names, credentials):
         )
     archive = []
     from market_archive import DATASETS
+    import json
+    from pathlib import Path
+
+    try:
+        updates = json.loads(Path("/run/wbozon-market-updates/status.json").read_text(encoding="utf8"))
+    except (OSError, ValueError):
+        updates = {}
 
     for dataset in DATASETS:
         name = {"wb_availability": "wb_stocks", "ozon_availability": "ozon_stocks_analytics"}.get(
@@ -110,6 +117,7 @@ def read(vault, directory, args, names, credentials):
         tool_count=len(all_names),
         tokens=tokens,
         archive=archive,
+        api_updates=updates,
         status_basis="last_observed_authorized_call_with_current_credentials",
         changelogs=["https://dev.wildberries.ru/release-notes", "https://docs.ozon.ru/api/seller/"],
         data_as_of=market_history.utc(),

@@ -229,6 +229,52 @@ def _finance_period(args, wire):
         )
 
 
+def _wb_daily_totals(name,args,wire):
+    query={k:v for k,v in args.items() if k not in ("limit","offset","mode","archive")}
+    with wire.progress("wb-period-summary-v2",[name,query]) as (saved,save):
+        state=saved or {"next":None,"events":{},"done":False,"seen":[]}
+        status="pending"
+        delay=None
+        for _ in range(12):
+            if state["done"] or time.monotonic()+2>=wire.deadline: break
+            cursor=state["next"]
+            source=dict(query,limit=2000)
+            if cursor is not None: source["cursor"]=cursor
+            try:
+                page=wb_expansion._stats(name,source,wire)
+            except urllib.error.HTTPError as exc:
+                if exc.code!=429: raise
+                delay,_=finance_gate.parse_retry_after(exc.headers)
+                exc.close()
+                break
+            for row in page["items"]:
+                key=row.get("sale_id" if name=="wb_sales" else "srid")
+                if not key: return market_specs.result([],complete=False,status="missing_event_id")
+                value=[row.get("article"),row["date"][:10],row.get("warehouse"),row.get("region"),row.get("event_type","cancelled" if row.get("cancelled") else "order"),row["quantity"],row.get("last_change")]
+                prior=state["events"].get(key)
+                if prior and prior!=value and (not value[-1] or not prior[-1] or value[-1]<=prior[-1]):
+                    return market_specs.result([],complete=False,status="conflicting_event_revision")
+                state["events"][key]=value
+            marker=page["next_cursor"]
+            if page.get("issues") or (marker is not None and marker in state["seen"]):
+                status="nonadvancing_source"
+                break
+            if len(state["events"])>50000: return market_specs.result([],complete=False,status="narrow_period")
+            state.update(next=marker,done=page["complete"])
+            if marker is not None: state["seen"].append(marker)
+            save(state,1800 if state["done"] else 86400)
+        groups={}
+        for article,day,warehouse,region,event,units,_ in state["events"].values():
+            key=article,day,warehouse,region,event
+            groups[key]=groups.get(key,0)+units
+        items=[{"article":a,"date":d,"warehouse":w,"region":r,"event":e,"units":q} for (a,d,w,r,e),q in sorted(groups.items(),key=str)]
+        offset,limit=args.get("offset",0),args.get("limit",100)
+        more=offset+limit<len(items)
+        return market_specs.result(items[offset:offset+limit],offset+limit if more else None,
+             complete=state["done"] and not more,status="ready" if state["done"] else status,
+             retry_after_seconds=delay,summary_scope="observed_period",date_basis="event_date_moscow")
+
+
 def _ozon_order_counts(wire, args, skus):
     """Count unique orders containing each SKU across FBO and FBS, including split postings."""
     query = [args["date_from"], args["date_to"], sorted(skus)]
@@ -542,7 +588,9 @@ def execute(name, args, creds, directory, deadline):
                                 [], complete=False, status="unverified_article_mapping"
                             )
                         args = dict(args, nm_id=exact["nm_id"])
-                    if (
+                    if name in ("wb_orders","wb_sales") and args.get("mode")=="summary" and "cursor" not in args and ("article" in args or "nm_id" in args):
+                        data=_wb_daily_totals(name,args,wire)
+                    elif (
                         name == "wb_finance_report"
                         and args.get("mode") == "summary"
                         and "cursor" not in args
@@ -643,7 +691,7 @@ def execute(name, args, creds, directory, deadline):
                     finance_gate.ProviderResponseTooLarge,
                 ):
                     data["company_currency"] = None
-            if args.get("mode") == "summary":
+            if args.get("mode") == "summary" and data.get("summary_scope")!="observed_period":
                 _summary(name, data)
         stamps=[t for w in used_wires for t in getattr(w,"fetch_times",())]
         fetched=datetime.fromtimestamp(min(stamps),timezone.utc).isoformat() if stamps and None not in stamps else None

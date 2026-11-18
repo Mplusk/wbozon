@@ -201,6 +201,24 @@ class ReleaseTests(unittest.TestCase):
 if __name__ == '__main__': unittest.main()
 
 class PortalRuntimeContractTests(unittest.TestCase):
+    def test_reachable_application_modules_are_packaged(self):
+        import ast
+        root=Path(__file__).parent
+        copied={part for line in (root/'Dockerfile').read_text().splitlines() if line.startswith('COPY ') for part in line.split()[1:-1]}
+        allowed=set((root/'.dockerignore').read_text().splitlines())
+        local={p.stem:p for p in root.glob('*.py')}
+        pending,seen=['portal','candidate'],set()
+        while pending:
+            name=pending.pop()
+            if name in seen: continue
+            seen.add(name)
+            filename=local[name].name
+            self.assertIn(filename,copied)
+            self.assertIn('!'+filename,allowed)
+            for node in ast.walk(ast.parse(local[name].read_text(encoding='utf8'))):
+                deps=[a.name for a in node.names] if isinstance(node,ast.Import) else [node.module] if isinstance(node,ast.ImportFrom) else []
+                pending.extend(n for n in deps if n in local and n not in seen)
+
     def test_container_entrypoint_and_no_plaintext_env(self):
         root=Path(__file__).parent
         dockerfile=(root/'Dockerfile').read_text()

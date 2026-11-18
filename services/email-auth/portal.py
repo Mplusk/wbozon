@@ -469,6 +469,18 @@ def _provider_worker():
                     (request['operation'] not in ('ozon_posting_accruals',ozon_mcp.ozon_unallocated.OPERATION) or
                      not request['args'].get('include_types',True))))
                  if is_finance else read())
+        if request['operation'] in market_specs.TOOLS or request['operation'] in ('wb_sales_summary','wb_prices','archive_market_day'):
+            def amounts(obj):
+                if isinstance(obj,Decimal) and obj.is_finite(): return str(obj)
+                raise TypeError('Unexpected projected value')
+            encoded=json.dumps(value,ensure_ascii=False,separators=(',',':'),allow_nan=False,default=amounts)
+            def check(payload):
+                for k,v in payload.items():
+                    if isinstance(v,dict): check(v)
+                    elif k in ('api_key','api_token','client_secret') and isinstance(v,str) and v and json.dumps(v,ensure_ascii=False)[1:-1] in encoded:
+                        raise finance_gate.ProviderResponseInvalid('Unsafe response')
+            check(request['creds'])
+            value=json.loads(encoded)
         result={'kind':'ok', 'result':value}
     except urllib.error.HTTPError as exc:
         result={'kind':'http', 'status':exc.code}

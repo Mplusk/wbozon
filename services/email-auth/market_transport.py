@@ -471,7 +471,7 @@ class Wire:
                 if not wait:
                     db.execute("INSERT OR REPLACE INTO quota VALUES(?,?,0)", (key, now + interval))
                     return
-            if not self.wait(wait):
+            if wait>2 or not self.wait(wait):
                 delay = math.ceil(wait)
                 raise urllib.error.HTTPError(
                     "", 429, "Method request interval", {"Retry-After": str(delay)}, None

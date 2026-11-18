@@ -1,0 +1,17 @@
+[Unit]
+Description=Track changes to published marketplace API specifications
+After=network-online.target
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+StateDirectory=wbozon-market-updates
+RuntimeDirectory=wbozon-market-updates
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+ProtectHome=true
+ProtectSystem=strict
+NoNewPrivileges=true
+PrivateTmp=true
+ExecStart=/usr/bin/python3 -B -I /usr/local/libexec/wbozon-cd/market_updates.py
+TimeoutStartSec=150
