@@ -598,33 +598,37 @@ class Wire:
                     self.store(key, raw, ttl)
                 return value
             except urllib.error.HTTPError as exc:
-                if job and exc.code in (400, 401, 403, 404, 422, 429):
-                    with self.db() as db:
-                        db.execute("DELETE FROM jobs WHERE k=?", (key,))
-                    if self.provider == "performance":
-                        with self.db() as db:
+                rejected_job = job and exc.code in (400, 401, 403, 404, 422, 429)
+                if not rejected_job and exc.code != 429:
+                    raise
+                if exc.code == 429:
+                    delay, _ = finance_gate.parse_retry_after(exc.headers)
+                    if delay is None:
+                        wb_retry = exc.headers.get("X-Ratelimit-Retry", "")
+                        if wb_retry.isdigit() and len(wb_retry) < 10:
+                            delay = int(wb_retry)
+                    exc.retry_after_seconds = delay
+                    if delay is not None:
+                        exc.headers["Retry-After"] = str(delay)
+                # The durable creation marker also protects a worker killed before this commit.
+                with self.db() as db:
+                    if exc.code == 429:
+                        if delay is None:
+                            db.execute("UPDATE quota SET unknown=1 WHERE k=?", (quota,))
+                        else:
+                            db.execute(
+                                "UPDATE quota SET until_at=MAX(until_at,?) WHERE k=?",
+                                (time.time() + max(1, delay), quota),
+                            )
+                    if rejected_job:
+                        db.execute("DELETE FROM jobs WHERE k=? AND binding='awaiting_provider_id'", (key,))
+                        if self.provider == "performance":
                             db.execute(
                                 "DELETE FROM jobs WHERE k=? AND binding=?",
                                 (_id([self.scope, "active-report"]), key),
                             )
                 if exc.code != 429:
                     raise
-                delay, _ = finance_gate.parse_retry_after(exc.headers)
-                if delay is None:
-                    wb_retry = exc.headers.get("X-Ratelimit-Retry", "")
-                    if wb_retry.isdigit() and len(wb_retry) < 10:
-                        delay = int(wb_retry)
-                exc.retry_after_seconds = delay
-                if delay is not None:
-                    exc.headers["Retry-After"] = str(delay)
-                with self.db() as db:
-                    if delay is None:
-                        db.execute("UPDATE quota SET unknown=1 WHERE k=?", (quota,))
-                    else:
-                        db.execute(
-                            "UPDATE quota SET until_at=MAX(until_at,?) WHERE k=?",
-                            (time.time() + max(1, delay), quota),
-                        )
                 if (
                     delay is None
                     or attempt

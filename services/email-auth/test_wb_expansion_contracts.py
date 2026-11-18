@@ -1,15 +1,19 @@
 """Offline contracts for the WB expansion, based on the official FBW, reports,
 finance, analytics and feedback schemas retrieved on 18 November 2026.
 """
+import contextlib
 import io
 import json
+import os
+import subprocess
+import sys
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.parse import parse_qsl, urlsplit
 
@@ -25,6 +29,7 @@ FEEDBACK = 'https://feedbacks-api.wildberries.ru'
 ADVERT = 'https://advert-api.wildberries.ru'
 SLOTS = 'https://common-api.wildberries.ru/api/tariffs/v1/acceptance/coefficients'
 TASK_ID = '7d89a7d8-15cc-43a4-90ab-5bc37e41efac'
+REPORT_DATES = {'dateFrom': '2026-11-01', 'dateTo': '2026-11-02'}
 # Rolling dates also exercise the statistics provider's 90-day retention rule.
 END = datetime.now(timezone(timedelta(hours=3))).date() - timedelta(days=1)
 START = END - timedelta(days=6)
@@ -72,7 +77,58 @@ def report_download(report, payload):
                 ('GET', task + '/download', payload))
 
 
+def creation_fixture(provider, directory):
+    performance = provider == 'performance'
+    creds = {'client_id': 'test', 'client_secret': 'synthetic'} if performance else {'api_token': 'synthetic'}
+    wire = market_transport.Wire(provider, creds, directory, time.monotonic() + 5)
+    wire.token = 'synthetic'
+    wire.opener = Mock()
+    if performance:
+        return wire, ('POST', 'https://api-performance.ozon.ru/api/client/statistics'), {'body': {'campaigns': ['12']}}
+    return wire, ('GET', ANALYTICS + '/api/v1/paid_storage'), {'query': REPORT_DATES}
+
+
+def interrupted_report_fixture(directory, provider, phase):
+    """Terminate the provider worker between an HTTP 429 and its durable handling."""
+    wire, args, params = creation_fixture(provider, directory)
+    wire.opener.open.side_effect = HTTPError('', 429, '', {}, None)
+    if phase == 'before_parse':
+        with patch.object(market_transport.finance_gate, 'parse_retry_after', side_effect=lambda _: os._exit(73)):
+            wire(*args, **params, interval=0, job=True)
+    else:
+        original = wire.db
+        @contextlib.contextmanager
+        def interrupt_transaction():
+            with original() as db:
+                db.create_function('interrupt_worker', 0, lambda: os._exit(73))
+                db.execute("CREATE TEMP TRIGGER interrupt_on_marker AFTER DELETE ON jobs "
+                           "WHEN OLD.binding='awaiting_provider_id' BEGIN SELECT interrupt_worker(); END")
+                yield db
+        wire.db = interrupt_transaction
+        wire(*args, **params, interval=0, job=True)
+
+
 class WBExpansionContracts(unittest.TestCase):
+    def test_worker_killed_on_creation_429_cannot_repeat_the_report(self):
+        for provider in ('wb', 'performance'):
+            for phase in ('before_parse', 'inside_transaction'):
+                with self.subTest(provider=provider, phase=phase), TemporaryDirectory() as directory:
+                    gate = str(Path(directory) / 'gate')
+                    probe = ('import sys; from test_wb_expansion_contracts import interrupted_report_fixture; '
+                             'interrupted_report_fixture(*sys.argv[1:])')
+                    died = subprocess.run([sys.executable, '-B', '-c', probe, gate, provider, phase],
+                                          cwd=Path(__file__).parent, capture_output=True, timeout=15)
+                    self.assertEqual(died.returncode, 73, died.stderr)
+                    fresh, args, params = creation_fixture(provider, gate)
+                    with self.assertRaises(market_transport.finance_gate.GateError) as stopped:
+                        fresh(*args, **params, interval=0, job=True)
+                    self.assertEqual(stopped.exception.reason, 'retry_time_unknown')
+                    if provider == 'performance':
+                        with self.assertRaises(market_transport.finance_gate.GateError) as busy:
+                            fresh(*args, body={'campaigns': ['13']}, interval=0, job=True)
+                        self.assertEqual(busy.exception.reason, 'busy')
+                    fresh.opener.open.assert_not_called()
+
     def read(self, tool, arguments, wire):
         result = wb_expansion.read(tool, arguments, wire)
         self.assertFalse(wire.responses, 'The fixture contains an unperformed provider request')
