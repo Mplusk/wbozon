@@ -117,7 +117,8 @@ def _read_bundle(bundle_id, read):
             if row['sku'] in seen:
                 result['issues'].add('repeated_sku')
             seen.add(row['sku'])
-        if result['issues'] or page['has_next'] is False:
+        # Keep later composition rows when one item is incomplete but the next page is usable.
+        if page['has_next'] is not True or not page['items']:
             break
         cursor = page['next_cursor']
         if not cursor or cursor in requested:

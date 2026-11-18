@@ -176,6 +176,26 @@ class SupplyCostTests(unittest.TestCase):
         self.assertFalse(result['ozon_expense_link_verified'])
         self.assertFalse(result['included_in_article_actuals'])
 
+    def test_incomplete_first_item_keeps_later_bundle_pages_without_an_allocation(self):
+        first = item(11, name=None, quantity=None)
+        result, calls = self.model([page([first],2,more=True,cursor='next'),page([item(12)],2)])
+        self.assertEqual([request['last_id'] for path,request in calls if path == fbo.ENDPOINTS[fbo.BUNDLE]],['','next'])
+        self.assertEqual([row['sku'] for row in result['items']],['11','12'])
+        self.assertTrue({'missing_item_name','missing_item_quantity'} <= set(result['issues']))
+        self.assertEqual(result['status'],'incomplete')
+        self.assertIsNone(result['allocated_total'])
+        self.assertFalse(result['included_in_article_actuals'])
+
+    def test_page_budget_marks_remaining_composition_unknown(self):
+        count = allocation.MAX_PAGES
+        pages = [page([item(i+1)],count+1,more=True,cursor=str(i+1)) for i in range(count)]
+        result, _ = self.model(pages)
+        self.assertEqual(result['pages_observed'],count)
+        self.assertEqual(len(result['items']),count)
+        self.assertIn('bundle_page_limit_reached',result['issues'])
+        self.assertEqual(result['status'],'incomplete')
+        self.assertIsNone(result['allocated_total'])
+
     def test_different_quantities_and_volumes_credit_and_currency_precision(self):
         args = {**ARGS,'expense':{**EXPENSE,'amount':'0.010','currency':'KWD'}}
         result, _ = self.model([page([item(20,2,0.2,total_volume_in_litres=0.4),item(21,1,0.1)], 2)], args)

@@ -89,9 +89,15 @@ Other discrepancies block allocation. The model is excluded from the actual arti
 
 The daily accrual tool defaults to a compact `summary` by observed SKU, type,
 source component and currency; its `coverage_by_sku` records missing delivery
-and commission containers. `details` retains per-posting and per-item fields.
+and commission containers. The optional `posting_number` filter matches the raw
+`unit_number` reference in POSTING rows. The daily endpoint describes this
+as an order or service identifier. Lookup by posting is available separately.
+That response has no common accrual ID to establish identity with the daily row.
 The monthly realization tool projects only the chosen offer ID and labels the
-report month distinctly from order or accrual dates. Neither tool establishes
+report month distinctly from order or accrual dates. It reports observed per-unit
+amounts separately for delivery and return rows of each SKU in the report currency.
+The article summary uses the quantities of one accrual type for each service rate.
+Neither tool establishes
 complete buyouts or per-unit profit. The upstream response limit is 512,000 bytes;
 SKU filtering is applied after reading and does not reduce the provider response.
 See `OZON_REAL_DATA_STATUS.md` for the dated real-API checks and limitations.

@@ -191,6 +191,10 @@ def project_response(operation, args, data):
                 issues.add('repeated_sku')
             if any(not row['sku'] or not row['offer_id'] for row in items):
                 issues.add('incomplete_item_identity')
+            if any(not row['name'] for row in items):
+                issues.add('missing_item_name')
+            if any(row['quantity'] is None for row in items):
+                issues.add('missing_item_quantity')
             result = {'bundle_id': args['bundle_id'], 'items': items, 'has_next': more,
                       'total_count': _count(data.get('total_count')), 'quantity_basis': 'declared_bundle',
                       'volume_unit': 'litre', 'coverage': 'one_page'}
