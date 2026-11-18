@@ -179,6 +179,10 @@ class Reports(unittest.TestCase):
                     "groups": [{"group_name": "service", "items": []}], "localization_index": source})
                 self.assertEqual(result["localization_index"], expected)
                 self.assertEqual(len(result["items"]), 1)
+        partial = ozon_expansion.read('ozon_rating', {}, lambda *a, **kw: {'localization_index': index})
+        self.assertFalse(partial['complete'])
+        self.assertEqual(partial['groups_status'], 'not_reported')
+        self.assertEqual(partial['localization_index'], [index])
 
     def test_return_to_seller_does_not_invent_sale_price_or_quantity(self):
         page = wb_reports.returns(

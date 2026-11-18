@@ -784,18 +784,22 @@ def read(name, args, request):
             localization = [localization] if localization else []
         elif localization is None:
             localization = []
+        groups = raw.get('groups')
         data = [
             {
                 "group_name": g.get("group_name"),
+                "items_reported": g.get('items') is not None,
                 "items": [
                     select(r, "name rating current_value past_value status value_type rating_direction")
-                    for r in rows(g.get("items", []))
+                    for r in rows(g['items'] if g.get('items') is not None else [])
                 ],
             }
-            for g in rows(raw.get("groups"))
+            for g in rows(groups if groups is not None else [])
         ]
         return result(
             data,
+            complete=groups is not None and all(g['items_reported'] for g in data),
+            groups_status='reported' if groups is not None else 'not_reported',
             localization_index=[
                 select(r, "calculation_date localization_percentage")
                 for r in rows(localization)
