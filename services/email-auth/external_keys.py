@@ -15,6 +15,7 @@ TOKEN_PATTERN = re.compile(r'mcp_[A-Za-z0-9_-]{43}\Z')
 ID_PATTERN = re.compile(r'(?:(?:av|all)_)?[0-9a-f]{24}\Z')
 ACCESS_LABELS = {'marketplaces': 'Ozon и Wildberries', 'avito': 'Авито', 'all': 'Ozon, Wildberries и Авито'}
 REQUEST_PATTERN = re.compile(r'[A-Za-z0-9_-]{22}\Z')
+KEY_COLUMNS = 'public_id,token_hash,name,created_at,revoked_at,last_used_at,request_hash'
 
 
 class KeyLimitError(ValueError):
@@ -45,7 +46,8 @@ def key_connection(path):
     try:
         database.execute('ATTACH DATABASE ? AS additional_keys', (companion,))
         database.execute('CREATE TEMP VIEW mcp_keys_for_access AS '
-                         'SELECT * FROM main.external_mcp_keys UNION ALL SELECT * FROM additional_keys.external_mcp_keys')
+                         f'SELECT {KEY_COLUMNS} FROM main.external_mcp_keys UNION ALL '
+                         f'SELECT {KEY_COLUMNS} FROM additional_keys.external_mcp_keys')
         return database
     except Exception:
         database.close()
@@ -70,6 +72,7 @@ class KeyStore:
                 public_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
                 name TEXT NOT NULL, created_at REAL NOT NULL, revoked_at REAL,
                 last_used_at REAL, request_hash TEXT NOT NULL UNIQUE)''')
+                c.execute(f'SELECT {KEY_COLUMNS} FROM external_mcp_keys LIMIT 0')
 
     def create(self, name, request_id, at, access="marketplaces"):
         if not _valid_name(name) or not isinstance(request_id, str) or not REQUEST_PATTERN.fullmatch(request_id) or not _valid_time(at):

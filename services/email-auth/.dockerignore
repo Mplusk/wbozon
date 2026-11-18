@@ -13,6 +13,8 @@
 !ozon_fbo.py
 !ozon_supply_allocation.py
 !market_specs.py
+!avito_mcp.py
+!avito_contracts.json
 !market_transport.py
 !market_archive.py
 !market_composites.py

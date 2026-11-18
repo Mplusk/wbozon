@@ -20,7 +20,7 @@ class ScopedSnapshot(unittest.TestCase):
             host = SimpleNamespace(cfg={'databases':['',str(root/'vault.db')]}, state=root, gate=root/'gate')
             source = root / 'vault.db.avito-keys'
             with contextlib.closing(sqlite3.connect(source)) as writer:
-                writer.execute('CREATE TABLE invalid (id INTEGER)')
+                writer.execute('CREATE TABLE external_mcp_keys (id INTEGER)')
                 source.chmod(0o600)
                 writer.execute('BEGIN EXCLUSIVE')
                 # The systemd acceptance suite separately validates the real root-owned snapshot directory.

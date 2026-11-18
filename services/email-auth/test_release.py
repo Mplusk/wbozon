@@ -206,6 +206,8 @@ class PortalRuntimeContractTests(unittest.TestCase):
         root=Path(__file__).parent
         copied={part for line in (root/'Dockerfile').read_text().splitlines() if line.startswith('COPY ') for part in line.split()[1:-1]}
         allowed=set((root/'.dockerignore').read_text().splitlines())
+        self.assertIn('avito_contracts.json',copied)
+        self.assertIn('!avito_contracts.json',allowed)
         local={p.stem:p for p in root.glob('*.py')}
         pending,seen=['portal','candidate'],set()
         while pending:

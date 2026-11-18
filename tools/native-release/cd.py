@@ -23,6 +23,8 @@ from release_host import Host, ReleaseError, atomic_json, boot_id, command, comp
 
 CONFIG = '/etc/wbozon-cd.json'
 SCOPED_BACKUP_SECONDS = 5
+# Table columns, constraints and unique indexes created by the reviewed KeyStore.
+SCOPED_KEYS_SCHEMA = '01adb0bd15e847f9d1fadccb4b45169c0271bb00a15f7667d69d796787278723'
 
 MARKET_BASE = 'b543e1568394095a20f14213feb3a194a456716c70d43b95c06b33c98cd32aed'
 MARKET_BRIDGE = '4fbd8858010f37f39b7676c4b34fede5526aa56623569bbc231e77524edce0cf'
@@ -36,7 +38,7 @@ MARKET_V2_REPORT_FIX = '85d5b8a840f480678fe83fbf3bbd301a8db75d0910b8dfb39dfdce5f
 # SHA-256 inventories of subsequent reviewed services, in deployment order.
 MARKET_REPORT_SUCCESSORS = (
     'ea75c8c64e6a3295f2c3e4c8e483b15e7194e89bb300587ff9b936bf04e18dba',
-    '06e0304dde40dc3358908eb36fa8811ef5d194aeddec0f7883f7c882aadd7952',
+    '013c84e6a33beb009e7498468adbbe43950835cba416fd6ee690bf5b89f50a0f',
 )
 
 
@@ -75,8 +77,7 @@ def backup_scoped_keys(host, txn):
                 src.backup(dest, pages=128, progress=progress, sleep=0.05)
                 dest.execute('PRAGMA trusted_schema=OFF')
                 dest.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
-                tables = dest.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-                if tables != [('external_mcp_keys',)] or dest.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+                if Host.schema(dest) != SCOPED_KEYS_SCHEMA or dest.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
                     raise ReleaseError('scoped key snapshot verification failed')
         with partial.open('rb') as stream:
             os.fsync(stream.fileno())
