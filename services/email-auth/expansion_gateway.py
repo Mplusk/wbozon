@@ -234,6 +234,9 @@ def _wb_daily_totals(name,args,wire):
     query={k:v for k,v in args.items() if k not in ("limit","offset","mode","archive","group_by")}
     with wire.progress("wb-period-summary-v2",[name,query]) as (saved,save):
         state=saved or {"next":None,"events":{},"done":False,"seen":[]}
+        # Older saved rows do not distinguish a missing isCancel from false.
+        # A newer revision read during rollback must also be verified again.
+        known_cancellations = state.setdefault('observed_cancellations', {}) if name == 'wb_orders' else {}
         status="pending"
         delay=None
         for _ in range(12):
@@ -266,6 +269,10 @@ def _wb_daily_totals(name,args,wire):
                 if prior and prior!=value and (not value[-1] or not prior[-1] or value[-1]<=prior[-1]):
                     return market_specs.result([],complete=False,status="conflicting_event_revision")
                 state["events"][key]=value
+                if name == 'wb_orders' and type(row.get('cancelled')) is bool:
+                    known_cancellations[key] = [value[-1], value[4]]
+                else:
+                    known_cancellations.pop(key, None)
             marker=page["next_cursor"]
             if page.get("issues") or (marker is not None and marker in state["seen"]):
                 status="nonadvancing_source"
@@ -274,14 +281,20 @@ def _wb_daily_totals(name,args,wire):
             state.update(next=marker,done=page["complete"])
             if marker is not None: state["seen"].append(marker)
             save(state,1800 if state["done"] else 86400)
+        def observed_events():
+            for key, (article, day, warehouse, region, event, units, revision) in state['events'].items():
+                if name == 'wb_orders' and known_cancellations.get(key) != [revision, event]:
+                    event = 'cancellation_unknown'
+                yield article, day, warehouse, region, event, units
+
         if "group_by" in args:
-            events = ((a,d,e,q) for a,d,_,_,e,q,_ in state["events"].values())
+            events = ((a,d,e,q) for a,d,_,_,e,q in observed_events())
             through = min(datetime.now(market_specs.MOSCOW).date().isoformat(), args["date_to"])
             days = market_history.days_between(args["date_from"], through) if state["done"] else []
             items = market_history.grouped_orders(args, events, days)
         else:
             groups={}
-            for article,day,warehouse,region,event,units,_ in state["events"].values():
+            for article,day,warehouse,region,event,units in observed_events():
                 key=article,day,warehouse,region,event
                 groups[key]=groups.get(key,0)+units
             items=[{"article":a,"date":d,"warehouse":w,"region":r,"event":e,"units":q} for (a,d,w,r,e),q in sorted(groups.items(),key=str)]

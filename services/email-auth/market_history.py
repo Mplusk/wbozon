@@ -176,6 +176,12 @@ def days_between(start, end):
     return [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
 
 
+def order_event(cancelled):
+    if type(cancelled) is bool:
+        return 'cancelled' if cancelled else 'order'
+    return 'cancellation_unknown'
+
+
 def grouped_orders(args, events, complete_days):
     """Group reconciled order units, inserting zeroes only for days covered by the source."""
     groups = {}
@@ -184,13 +190,16 @@ def grouped_orders(args, events, complete_days):
         if args["group_by"] == "week":
             start -= timedelta(days=start.weekday())
         key = article, start.isoformat()
-        return groups.setdefault(key, dict(article=article, date=key[1], ordered_units=0, cancelled_units=0))
+        return groups.setdefault(key, dict(article=article, date=key[1], ordered_units=0,
+                                           confirmed_cancelled_units=0, unknown_cancellation_units=0))
 
     for article, day, event, units in events:
         row = bucket(article, day)
         row["ordered_units"] += units
         if event == "cancelled":
-            row["cancelled_units"] += units
+            row["confirmed_cancelled_units"] += units
+        elif event != "order":
+            row["unknown_cancellation_units"] += units
     article = args.get("article")
     if article is None:
         articles = {a for a, _ in groups}
@@ -199,6 +208,8 @@ def grouped_orders(args, events, complete_days):
     if article is not None:
         for day in complete_days:
             bucket(article, day)
+    for row in groups.values():
+        row["cancelled_units"] = None if row['unknown_cancellation_units'] else row['confirmed_cancelled_units']
     return [groups[k] for k in sorted(groups, key=lambda k: (k[1], str(k[0])))]
 
 
@@ -211,7 +222,7 @@ def historical_read(history, owner, name, args):
     offset, limit = args.get("offset", 0), args.get("limit", 100)
     selected = [r for stamp, records in pages.values() for r in records if matches(r, args)]
     if name == "wb_orders" and "group_by" in args:
-        events = ((r.get("article"), r["date"][:10], "cancelled" if r.get("cancelled") else "order", r["quantity"])
+        events = ((r.get("article"), r["date"][:10], order_event(r.get("cancelled")), r["quantity"])
                   for r in selected)
         selected = grouped_orders(args, events, pages)
     elif name in ("wb_orders", "wb_sales") and args.get("mode") == "summary":
@@ -221,7 +232,7 @@ def historical_read(history, owner, name, args):
                 r.get("article"),
                 r["date"][:10],
                 r.get("warehouse"),
-                r.get("event_type", "cancelled" if r.get("cancelled") else "order"),
+                r.get("event_type", order_event(r.get("cancelled"))),
             )
             groups[key] = groups.get(key, 0) + r["quantity"]
         selected = [

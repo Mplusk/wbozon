@@ -2,6 +2,7 @@
 
 import unittest
 from contextlib import contextmanager
+from types import SimpleNamespace
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -36,6 +37,8 @@ class Reports(unittest.TestCase):
         self.assertEqual(result['status'], 'retry_time_unknown')
         self.assertIsNone(result['retry_after_seconds'])
         self.assertEqual([(r['date'], r['ordered_units']) for r in result['items']], [(self_day, 2)])
+        self.assertIsNone(result['items'][0]['cancelled_units'])
+        self.assertEqual(result['items'][0]['unknown_cancellation_units'], 2)
 
     def test_locality_dates_and_unknown_duration(self):
         def provider(method, url, **kwargs):
@@ -83,6 +86,17 @@ class Reports(unittest.TestCase):
         self.assertEqual([(r["ordered_units"], r["cancelled_units"]) for r in partial], [(4, 1)])
         full = market_history.grouped_orders(args, events, ["2026-11-01", "2026-11-02"])
         self.assertEqual([(r["date"], r["ordered_units"]) for r in full], [("2026-11-01", 4), ("2026-11-02", 0)])
+
+    def test_archive_unknown_cancellations_remain_unknown_in_daily_and_weekly_totals(self):
+        day = self.today
+        rows = [dict(article='A', date=day, quantity=1, cancelled=True),
+                dict(article='A', date=day, quantity=2), dict(article='A', date=day, quantity=3, cancelled=False)]
+        history = SimpleNamespace(read_days=lambda *_: {day: (day+'T12:00:00+03:00',rows)})
+        for group in ('day', 'week'):
+            report = market_history.historical_read(history, 'owner', 'wb_orders', dict(self.dates, article='A', group_by=group))
+            row, = report['items']
+            self.assertEqual((row['ordered_units'], row['confirmed_cancelled_units'], row['unknown_cancellation_units']), (6, 1, 2))
+            self.assertIsNone(row['cancelled_units'])
 
     def test_retention_both_fields_and_unallocated_account_row(self):
         raw = [
@@ -150,7 +164,7 @@ class Reports(unittest.TestCase):
 
     def test_rating_accepts_single_localization_snapshot_and_history(self):
         index = {"calculation_date": "2026-10-01T00:00:00Z", "localization_percentage": 0}
-        for source, expected in ((index, [index]), ([index], [index]), (None, [])):
+        for source, expected in ((index, [index]), ([index], [index]), (None, []), ({}, [])):
             with self.subTest(source=source):
                 result = ozon_expansion.read("ozon_rating", {}, lambda *a, **kw: {
                     "groups": [{"group_name": "service", "items": []}], "localization_index": source})

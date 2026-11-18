@@ -779,9 +779,9 @@ def read(name, args, request):
         raw = request("POST", BASE + "/v1/rating/summary", body={})
         localization = raw.get("localization_index")
         if isinstance(localization, dict):
-            if not {"calculation_date", "localization_percentage"}.intersection(localization):
+            if localization and not {"calculation_date", "localization_percentage"}.intersection(localization):
                 raise ValueError("Unexpected Ozon localization index")
-            localization = [localization]
+            localization = [localization] if localization else []
         elif localization is None:
             localization = []
         data = [

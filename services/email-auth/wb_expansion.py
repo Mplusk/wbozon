@@ -6,6 +6,7 @@ from decimal import Decimal
 import re
 import urllib.error
 
+from market_history import order_event
 from market_specs import MOSCOW, direct_attribution, iso, matches, money, result, rows, select, validate
 
 SUPPLIES = "https://supplies-api.wildberries.ru/api/v1/supplies"
@@ -231,10 +232,11 @@ def _stats(name, args, request, *, exact_day=False):
                 for_pay=r.get("forPay"),
             )
         else:
+            cancelled = r.get('isCancel')
             row.update(
-                cancelled=r.get("isCancel"),
+                cancelled=cancelled if type(cancelled) is bool else None,
                 cancel_date=iso(r["cancelDate"], MOSCOW)
-                if r.get("isCancel") and r.get("cancelDate")
+                if cancelled is True and r.get("cancelDate")
                 else None,
             )
         if row["date"] is None:
@@ -255,7 +257,7 @@ def _stats(name, args, request, *, exact_day=False):
             (
                 r["date"][:10],
                 r["warehouse"],
-                r.get("event_type", "cancelled" if r.get("cancelled") else "order"),
+                r.get("event_type", order_event(r.get("cancelled"))),
             )
         ] += 1
     return result(
