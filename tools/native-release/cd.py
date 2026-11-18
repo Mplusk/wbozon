@@ -147,7 +147,8 @@ class Transaction:
     def ready(self, j, name, guard):
         # systemd reports the Gunicorn master started before its sync workers
         # have imported the application. Keep ingress fenced during cold start.
-        deadline = time.monotonic() + 90
+        # Recovery has its own four-minute systemd limit and may try both releases.
+        deadline = time.monotonic() + (90 if j['phase'] == 'starting' else 18)
         while True:
             try:
                 checking = 'running process'
@@ -164,7 +165,7 @@ class Transaction:
                 checking = 'finance lock and cooldown state'
                 guard.uid = process_uid(pid)
                 guard.verify('/proc/' + str(pid) + '/root', '/proc/' + str(pid) + '/ns/time')
-                checking = 'worker generation'
+                checking = 'service invocation'
                 if self.host.process(name) == (pid, generation, cgroup):
                     return
             except (OSError, ValueError, ReleaseError):
@@ -175,7 +176,7 @@ class Transaction:
 
     def drain(self, name, mark, *, require_healthy=False):
         # A timed-out marked loopback probe is safe to repeat. Keep the same
-        # worker generation and require Host.drain to prove both workers idle.
+        # Gunicorn master invocation and require Host.drain to prove both workers idle.
         identity = self.host.process(name)
         deadline = time.monotonic() + (60 if require_healthy else 35)
         while True:

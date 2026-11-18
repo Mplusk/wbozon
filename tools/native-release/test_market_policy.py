@@ -30,7 +30,7 @@ class CutoverRecovery(unittest.TestCase):
         host.workers_idle.side_effect = [False, True, True]
         host.health.side_effect = [TimeoutError(), None]
         with patch('cd.time.monotonic', side_effect=[0, 20, 47]), patch('cd.time.sleep'), patch('cd.process_uid', return_value=400):
-            txn.ready({'mark': 7}, 'new', guard)
+            txn.ready({'phase':'starting', 'mark':7}, 'new', guard)
         self.assertEqual(host.health.call_count, 2)
         host.sockets.assert_called_once_with()
         guard.verify.assert_called_once_with('/proc/123/root', '/proc/123/ns/time')
@@ -41,12 +41,13 @@ class CutoverRecovery(unittest.TestCase):
         txn = Transaction(host)
         host.process.return_value = (123, 'generation', '/unit')
         host.health.side_effect = TimeoutError()
-        with patch('cd.time.monotonic', side_effect=[0, 90]):
-            with self.assertRaisesRegex(ReleaseError, 'marked health response'):
-                txn.ready({'mark': 7}, 'new', guard)
+        for phase, budget in (('starting', 90), ('committed', 18), ('restoring', 18)):
+            with self.subTest(phase=phase), patch('cd.time.monotonic', side_effect=[0, budget]):
+                with self.assertRaisesRegex(ReleaseError, 'marked health response'):
+                    txn.ready({'phase':phase, 'mark':7}, 'new', guard)
         guard.verify.assert_not_called()
 
-    def test_only_repeat_a_timed_out_drain_for_the_same_workers_within_budget(self):
+    def test_only_repeat_a_timed_out_drain_for_the_same_service_within_budget(self):
         host = Mock(state=Path('state'))
         txn = Transaction(host)
         identity = (123, 'generation', '/unit')
