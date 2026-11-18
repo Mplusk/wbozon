@@ -31,6 +31,7 @@ def _base(args):
         'unknown_metrics':{'buyout_units':None,'return_units':None,'return_rate':None,
                            'commission_per_unit':None,'logistics_per_unit':None,
                            'last_mile_per_unit':None,'payout_per_unit':None,'financial_total':None},
+        'unknown_metrics_basis':'complete_period_and_verified_bought_units',
         'unknown_reason':('Источник не подтверждает полный набор начислений за период, '
                           'выкупы, возвраты, распределение расходов или финансовую аддитивность.'),
         'read_only':True,'untrusted_data':True,
@@ -111,6 +112,23 @@ def accrual_args(args, identity):
     return result
 
 
+def _article_unit_rates(breakdown):
+    groups = {}
+    unknown_currency = {row['type_id'] for row in breakdown if row['currency'] is None}
+    for row in breakdown:
+        key = (row['type_id'], row['currency'], row.get('category'))
+        groups.setdefault(key, []).append(row)
+    result = []
+    for (kind, currency, category), rows in groups.items():
+        issues = {problem for row in rows for problem in row['observed_unit_rate']['issues']}
+        if kind in unknown_currency:
+            issues.add('unresolved_currency')
+        lines = [(row['observed_row_sum'], row['observed_unit_rate']['reported_quantity']) for row in rows]
+        result.append({'type_id':kind, 'category':category, 'currency':currency,
+                       'observed_unit_rate':ozon_details.observed_unit_rate(lines, issues)})
+    return result
+
+
 def finish(args, identity, accruals, observed_at):
     validate_args(args)
     if (not isinstance(identity,dict) or not isinstance(accruals,dict) or
@@ -131,7 +149,8 @@ def finish(args, identity, accruals, observed_at):
     result['selection'].update(returned_posting_numbers=accruals['returned_posting_numbers'],
                                unreturned_posting_numbers=accruals['unreturned_posting_numbers'])
     result.update(status='partial',identity=identity,observed_at=observed_at,
-        observations={'breakdown':accruals['breakdown'],
+        observations={'breakdown':accruals['breakdown'], 'unit_rate_basis':accruals.get('unit_rate_basis'),
+                      'article_unit_rates':_article_unit_rates(accruals['breakdown']),
                       'observed_category_breakdown':accruals.get('observed_category_breakdown'),
                       'by_posting':by_posting,
                       'category_completeness':accruals.get('category_completeness','not_verified'),
@@ -151,6 +170,7 @@ def finish(args, identity, accruals, observed_at):
                 ([accruals['type_source']] if accruals.get('type_source') else []),
         snapshot_consistency='not_verified',
         note=('Только переданные отправления. Дата относится к начислению, а не к заказу или реализации. '
-              'Суммы — арифметика видимых строк, не выплаты и не подтверждённый финансовый итог. '
+              'Ставка по виду услуги делит начисленную сумму на число единиц именно в строках этой услуги. '
+              'Одни и те же товары могут участвовать в нескольких услугах. Число выкупов и выплата неизвестны. '
               'Расходы без SKU не распределяются; полнота текущих и исторических SKU и периода не доказана.'))
     return result

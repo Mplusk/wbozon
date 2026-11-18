@@ -97,6 +97,74 @@ class OzonArticleSummaryTests(unittest.TestCase):
         self.assertTrue(all(0 < call[2] <= 15 for call in opener.calls))
         self.assertNotIn(CREDS['api_key'],json.dumps(result,ensure_ascii=False))
 
+    def test_rates_use_units_of_each_charge_type_currency_and_sku(self):
+        postings = {'posting_accruals': [
+            {'posting_number': 'A-1', 'accruals': [
+                {**accrual(10, '-3.00'), 'quantity': 2},
+                {**accrual(10, '-3.00', type_id=4), 'quantity': -2},
+                {**accrual(11, '0.00'), 'quantity': 1},
+                {**accrual(10, '1.00', currency='EUR'), 'quantity': 3}]},
+            {'posting_number': 'B-1', 'accruals': [accrual(10, '-2.00')]}]}
+        result = self.execute(FakeOpener(postings=postings))
+        rates = {(g['sku'],g['type_id'],g['currency']):g['observed_unit_rate']
+                 for g in result['observations']['breakdown']}
+        self.assertEqual(rates['10',1,'RUB'], {'reported_quantity':3,'amount_per_unit':{'numerator':'-5','denominator':'3'},'issues':[]})
+        self.assertEqual(rates['10',4,'RUB']['amount_per_unit'], {'numerator':'-3','denominator':'2'})
+        self.assertEqual(rates['11',1,'RUB']['amount_per_unit'], {'numerator':'0','denominator':'1'})
+        self.assertEqual(rates['10',1,'EUR']['amount_per_unit'], {'numerator':'1','denominator':'3'})
+        article = {(g['type_id'],g['currency']):g['observed_unit_rate'] for g in result['observations']['article_unit_rates']}
+        self.assertEqual(article[1,'RUB'],{'reported_quantity':4,'amount_per_unit':{'numerator':'-5','denominator':'4'},'issues':[]})
+        self.assertEqual(article[4,'RUB']['reported_quantity'],-2)
+        self.assertIsNone(result['unknown_metrics']['payout_per_unit'])
+        self.assertIsNone(result['unknown_metrics']['buyout_units'])
+        self.assertEqual(result['period']['basis'], 'accrual_date')
+
+    def test_uncertain_charge_lines_cannot_yield_unit_rates(self):
+        base = accrual(10, '-1.00')
+        for changed, reason in [
+            ([base, base.copy()], 'ambiguous_repeated_accrual'),
+            ([base, {**base, 'quantity':-2}], 'mixed_quantity_signs'),
+            ([{**base, 'quantity':None}], 'missing_or_zero_quantity'),
+            ([{**base, 'quantity':0}], 'missing_or_zero_quantity'),
+            ([accrual(10,None)], 'missing_amount'),
+            ([base,accrual(None,'-7.00')], 'unattributed_sku'),
+            ([base,accrual(10,'-8.00',currency=None)], 'unresolved_currency')]:
+            with self.subTest(reason=reason):
+                args = {**ARGS,'posting_numbers':['A-1']}
+                result = self.execute(FakeOpener(postings={'posting_accruals':[{'posting_number':'A-1','accruals':changed}]}), args)
+                rate = result['observations']['breakdown'][0]['observed_unit_rate']
+                self.assertIsNone(rate['amount_per_unit'])
+                self.assertIn(reason, rate['issues'])
+
+    def test_article_rate_detects_gaps_across_skus_in_one_charge_type(self):
+        for currency, quantity, reason in [('RUB',-2,'mixed_quantity_signs'),(None,2,'unresolved_currency')]:
+            with self.subTest(reason=reason):
+                rows = [accrual(10,'1.50'), {**accrual(11,'3.00',currency=currency),'quantity':quantity}]
+                result = self.execute(FakeOpener(postings={'posting_accruals':[{'posting_number':'A-1','accruals':rows}]}),
+                                      {**ARGS,'posting_numbers':['A-1']})
+                rate = next(r['observed_unit_rate'] for r in result['observations']['article_unit_rates'] if r['currency']=='RUB')
+                self.assertIsNone(rate['amount_per_unit'])
+                self.assertIn(reason,rate['issues'])
+
+    def test_currency_amount_formatting_cannot_hide_an_ambiguous_repeat(self):
+        rows = [{**accrual(10,amount),'seller_price':{'amount':price,'currency':'RUB'}}
+                for amount,price in [('-1.0','7'),('-1.00','7.00'),('-4','7.0')]]
+        result = self.execute(FakeOpener(postings={'posting_accruals':[{'posting_number':'A-1','accruals':rows}]}),
+                              {**ARGS,'posting_numbers':['A-1']})['observations']
+        self.assertEqual(result['same_posting_equal_projection_groups'][0]['row_indices'],[0,1])
+        self.assertEqual(result['breakdown'][0]['row_count'],3)
+        self.assertEqual(result['breakdown'][0]['observed_row_sum'],'-6.00')
+        rate = result['article_unit_rates'][0]['observed_unit_rate']
+        self.assertIsNone(rate['amount_per_unit'])
+        self.assertIn('ambiguous_repeated_accrual',rate['issues'])
+        rows[0]['seller_price'] = None
+        result = self.execute(FakeOpener(postings={'posting_accruals':[{'posting_number':'A-1','accruals':rows}]}),
+                              {**ARGS,'posting_numbers':['A-1']})['observations']
+        self.assertEqual(result['same_posting_equal_projection_groups'],[])
+        rate = result['article_unit_rates'][0]['observed_unit_rate']
+        self.assertIsNone(rate['amount_per_unit'])
+        self.assertIn('ambiguous_repeated_accrual',rate['issues'])
+
     def test_no_matches_or_missing_fields_stop_before_finance(self):
         cases=[({'items':[]},'product_not_found'),
                ({'items':[{**ITEM,'sources':None}]},'identity_incomplete'),
