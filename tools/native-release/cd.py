@@ -27,6 +27,8 @@ MARKET_V2 = 'efce8b3fceb171b0ce4025e08708389623993046cb2962d26fbee43063af4187'
 # Exact next service inventory from d5ae72734b1827894c1a26d132389005eb166e4c.
 # Change only together with the complete transition review.
 MARKET_V2_NEXT = '0f009122b40353df9f0a65c8cd8b01b3efaf39703eaa5281349bd8c8183aae81'
+# Verified regional reports, cancellation coverage and seller rating, service tree 95a19af.
+MARKET_V2_REPORT_FIX = '85d5b8a840f480678fe83fbf3bbd301a8db75d0910b8dfb39dfdce5fbe63d41f'
 
 
 def present(path):
@@ -54,6 +56,11 @@ def market_transition(old, new):
                 MARKET_V2_NEXT in protected or MARKET_V2_NEXT == MARKET_BASE or MARKET_V2_NEXT == '0' * 64):
             raise ReleaseError('invalid next marketplace service inventory')
         protected.add(MARKET_V2_NEXT)
+    if (MARKET_V2_NEXT is None or not isinstance(MARKET_V2_REPORT_FIX, str) or
+            not re.fullmatch('[0-9a-f]{64}', MARKET_V2_REPORT_FIX) or
+            MARKET_V2_REPORT_FIX in protected | {MARKET_BASE, '0' * 64}):
+        raise ReleaseError('invalid marketplace report fix inventory')
+    protected.add(MARKET_V2_REPORT_FIX)
     if (first, second) == (MARKET_BASE, MARKET_BRIDGE):
         return 'bootstrap'
     if (first, second) == (MARKET_V2, MARKET_V2) or {first, second} == {MARKET_REPORTS, MARKET_V2}:
@@ -63,6 +70,9 @@ def market_transition(old, new):
     if MARKET_V2_NEXT is not None and (
             (first, second) == (MARKET_V2_NEXT, MARKET_V2_NEXT) or
             {first, second} == {MARKET_V2, MARKET_V2_NEXT}):
+        return 'preserve_blocked_finance'
+    if ((first, second) == (MARKET_V2_REPORT_FIX, MARKET_V2_REPORT_FIX) or
+            {first, second} == {MARKET_V2_NEXT, MARKET_V2_REPORT_FIX}):
         return 'preserve_blocked_finance'
     if {first, second} == {MARKET_BRIDGE, MARKET_REPORTS}:
         return 'shared'

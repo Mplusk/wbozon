@@ -39,6 +39,7 @@ BASE_INVENTORY = 'b543e1568394095a20f14213feb3a194a456716c70d43b95c06b33c98cd32a
 BRIDGE_INVENTORY = '4fbd8858010f37f39b7676c4b34fede5526aa56623569bbc231e77524edce0cf'
 SERVER_INVENTORY = '88b7d5dde100b635d7ac881e1f6999fc9d0626fff5c1ea9e722e31ec58aa9dbc'
 V2_INVENTORY = 'efce8b3fceb171b0ce4025e08708389623993046cb2962d26fbee43063af4187'
+DEPLOYED_REPORT_INVENTORY = '0f009122b40353df9f0a65c8cd8b01b3efaf39703eaa5281349bd8c8183aae81'
 NEW_TOOLS = frozenset((
     'article_map', 'unit_economics', 'sales_drop_check', 'mcp_health',
     'ozon_stocks_analytics', 'ozon_turnover', 'ozon_delivery_time',
@@ -83,13 +84,13 @@ def assert_sources(old, new, candidate_ref, root):
     return old_hash, new_hash
 
 
-def assert_next_sources(deployed, candidate, candidate_ref, root):
+def assert_next_sources(deployed, candidate, candidate_ref, root, expected_parent=V2_INVENTORY):
     if not re.fullmatch(r'[0-9a-f]{40}', candidate_ref):
         raise ValueError('next candidate commit must be a full lowercase Git SHA')
     reference = root / 'next-reference'
     export_service(candidate_ref, reference)
     old_hash, new_hash = service_digest(deployed), service_digest(candidate)
-    if old_hash != V2_INVENTORY or new_hash == old_hash or new_hash != service_digest(reference):
+    if old_hash != expected_parent or new_hash == old_hash or new_hash != service_digest(reference):
         raise AssertionError('next candidate must be distinct and match its exact Git service tree')
     for name in ('finance_gate.py', 'market_cooldown.py'):
         if (deployed / name).read_bytes() != (candidate / name).read_bytes():
@@ -97,7 +98,7 @@ def assert_next_sources(deployed, candidate, candidate_ref, root):
     return old_hash, new_hash
 
 
-def assert_policy(old, new, root, new_hash, next_service=None, next_hash=None):
+def assert_policy(old, new, root, new_hash, next_service=None, next_hash=None, latest_service=None, latest_hash=None):
     # Import the policy which is to be shipped, not an older surrogate.
     import cd
     if (cd.MARKET_BASE, cd.MARKET_BRIDGE, cd.MARKET_REPORTS) != (
@@ -151,6 +152,25 @@ def assert_policy(old, new, root, new_hash, next_service=None, next_hash=None):
             except cd.ReleaseError:
                 continue
             raise AssertionError('unreviewed next marketplace pair admitted: %s -> %s' % (first.name, second.name))
+        if latest_service is not None:
+            if next_hash != DEPLOYED_REPORT_INVENTORY or cd.MARKET_V2_REPORT_FIX != latest_hash:
+                raise AssertionError('the deployed and latest report inventories must both be pinned')
+            latest = root / 'latest'
+            shutil.copytree(latest_service, latest / 'service')
+            for left, right in ((following, latest), (latest, following), (latest, latest)):
+                if cd.market_transition(left, right) != 'preserve_blocked_finance':
+                    raise AssertionError('reviewed report transition was not admitted')
+            changed = root / 'hybrid-latest'
+            shutil.copytree(latest, changed)
+            with (changed / 'service' / 'portal.py').open('ab') as stream:
+                stream.write(b'\n# synthetic altered report service\n')
+            for excluded in (base, bridge, previous, candidate, hybrid, altered, changed):
+                for left, right in ((excluded, latest), (latest, excluded)):
+                    try:
+                        cd.market_transition(left, right)
+                    except cd.ReleaseError:
+                        continue
+                    raise AssertionError('unreviewed latest pair admitted: %s -> %s' % (left.name, right.name))
 
 
 def network_fence():
@@ -716,13 +736,18 @@ def main():
     parser.add_argument('--candidate-commit', required=True)
     parser.add_argument('--next-service', type=Path)
     parser.add_argument('--next-commit')
+    parser.add_argument('--latest-service', type=Path)
+    parser.add_argument('--latest-commit')
     parser.add_argument('--python', required=True, type=Path)
     args = parser.parse_args()
     if bool(args.next_service) != bool(args.next_commit):
         parser.error('--next-service and --next-commit must be supplied together')
+    if bool(args.latest_service) != bool(args.latest_commit) or (args.latest_service and not args.next_service):
+        parser.error('the latest service requires its commit and a verified preceding service')
     old = args.current_service.resolve(strict=True)
     new = args.candidate_service.resolve(strict=True)
     following = args.next_service.resolve(strict=True) if args.next_service else None
+    latest = args.latest_service.resolve(strict=True) if args.latest_service else None
     python = args.python.absolute()  # preserve venv symlink
     if not python.is_file():
         parser.error('--python must be an existing interpreter')
@@ -732,13 +757,18 @@ def main():
         next_hash = None
         if following is not None:
             _, next_hash = assert_next_sources(new, following, args.next_commit, root)
-        assert_policy(old, new, root, new_hash, following, next_hash)
+        latest_hash = None
+        if latest is not None:
+            _, latest_hash = assert_next_sources(following, latest, args.latest_commit, root / 'latest-source', DEPLOYED_REPORT_INVENTORY)
+        assert_policy(old, new, root, new_hash, following, next_hash, latest, latest_hash)
         print('PASS pinned service inventories and exact allowed release pairs', flush=True)
         pairs = [('historic C to D', old, new, False)]
         if following is not None:
             pairs.append(('deployed D to next E', new, following, True))
-        for label, source, target, previous_is_v2 in pairs:
-            pair_root = root / ('next-checks' if previous_is_v2 else 'historic-checks')
+        if latest is not None:
+            pairs.append(('deployed E to report fix F', following, latest, True))
+        for index, (label, source, target, previous_is_v2) in enumerate(pairs):
+            pair_root = root / ('pair-' + str(index))
             pair_root.mkdir(mode=0o700)
             print('Checking', label, flush=True)
             check_state(python, source, target, pair_root, previous_is_v2=previous_is_v2)
@@ -750,6 +780,8 @@ def main():
             raise AssertionError('a tested service changed during the check')
         if following is not None and service_digest(following) != next_hash:
             raise AssertionError('the next tested service changed during the check')
+        if latest is not None and service_digest(latest) != latest_hash:
+            raise AssertionError('the latest tested service changed during the check')
     print('PASS v2 rollback offline acceptance', flush=True)
 
 
