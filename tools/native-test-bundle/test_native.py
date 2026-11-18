@@ -1,5 +1,5 @@
 """Local synthetic Gunicorn test. No email or marketplace network requests."""
-import hashlib,json,os,pathlib,secrets,socket,sqlite3,subprocess,sys,tempfile,time,urllib.request,urllib.error,urllib.parse
+import hashlib,json,os,pathlib,secrets,signal,socket,sqlite3,subprocess,sys,tempfile,time,urllib.request,urllib.error,urllib.parse
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 base=pathlib.Path(__file__).resolve().parent
@@ -11,7 +11,7 @@ with tempfile.TemporaryDirectory() as tmp:
     for name,value in values.items():
         path=root/name;path.write_bytes(value);path.chmod(0o600);env[name]=str(path)
     with socket.socket() as s:s.bind(('127.0.0.1',0));port=s.getsockname()[1]
-    process=subprocess.Popen([str(pathlib.Path(sys.executable).parent/'gunicorn'),'--config','gunicorn.conf.py','--bind',f'127.0.0.1:{port}','portal:create_portal()'],cwd=base/'service',env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    process=subprocess.Popen([str(pathlib.Path(sys.executable).parent/'gunicorn'),'--config','gunicorn.conf.py','--bind',f'127.0.0.1:{port}','portal:create_portal()'],cwd=base/'service',env=env,start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     def request(path,method='GET',data=None,headers=None):
         h={'Host':'3dprinta.shop',**(headers or {})}
         req=urllib.request.Request(f'http://127.0.0.1:{port}'+path,data=data,headers=h,method=method)
@@ -41,6 +41,20 @@ with tempfile.TemporaryDirectory() as tmp:
         # Ozon has no saved key, so authenticated API must stop before network.
         payload=json.dumps({'operation':'ozon_products','arguments':{}}).encode()
         assert request('/api/read','POST',payload,{'Authorization':'Bearer '+token,'Content-Type':'application/json'})[0]==409
-        print('PASS: real native Gunicorn + file secrets + sessions + CSRF + encrypted storage + independent API auth')
     finally:
-        process.terminate();process.wait(timeout=10)
+        process.terminate()
+        try:
+            # Gunicorn gives its workers up to 30 seconds to shut down. Allow
+            # time to reap both workers under the production sandbox CPU share.
+            status = process.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            # Only this synthetic server and its children belong to this group.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=10)
+            raise RuntimeError('native smoke Gunicorn did not stop within 60 seconds') from None
+        if status != 0:
+            raise RuntimeError('native smoke Gunicorn exited with status ' + str(status))
+    print('PASS: real native Gunicorn + file secrets + sessions + CSRF + encrypted storage + independent API auth + graceful shutdown')
