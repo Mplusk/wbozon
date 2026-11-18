@@ -243,6 +243,16 @@ def _wb_daily_totals(name,args,wire):
             if cursor is not None: source["cursor"]=cursor
             try:
                 page=wb_expansion._stats(name,source,wire)
+            except finance_gate.GateError as exc:
+                if exc.reason not in ('busy', 'cooldown', 'retry_time_unknown'):
+                    raise
+                status, delay = exc.reason, exc.retry_after_seconds
+                break
+            except TimeoutError:
+                if not state['events']:
+                    raise
+                status = 'provider_timeout'
+                break
             except urllib.error.HTTPError as exc:
                 if exc.code!=429: raise
                 delay,_=finance_gate.parse_retry_after(exc.headers)

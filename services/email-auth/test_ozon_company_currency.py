@@ -23,7 +23,7 @@ class Response(io.BytesIO):
 
 
 class CurrencyTests(unittest.TestCase):
-    def run_read(self, profile):
+    def run_read(self, profile, **options):
         requests=[]
         class Opener:
             def open(self, request, timeout):
@@ -32,7 +32,7 @@ class CurrencyTests(unittest.TestCase):
                 if isinstance(profile, Exception): raise profile
                 return Response(profile)
         with patch('portal.urllib.request.build_opener', return_value=Opener()):
-            result=portal._provider_read('ozon_orders_analytics',ARGS,CREDS)
+            result=portal._provider_read('ozon_orders_analytics',ARGS,CREDS,**options)
         return result,requests
 
     def test_success_is_seller_currency_not_analytics_currency(self):
@@ -62,6 +62,13 @@ class CurrencyTests(unittest.TestCase):
 
     def test_currency_that_contains_a_secret_is_not_exposed(self):
         self.assertIsNone(ozon_mcp.project_company_currency({'company':{'currency':'RUB'}},{'api_key':'RUB'}))
+
+    def test_parent_deadline_reserves_time_to_return_the_orders(self):
+        with patch('portal.time.monotonic', return_value=100.0):
+            result, requests = self.run_read(b'{"company":{"currency":"RUB"}}', absolute_deadline=101.0)
+        self.assertEqual(result['ordered_amount'], '123.45')
+        self.assertEqual(len(requests), 1)
+        self.assertNotIn('company_currency', result)
 
     def test_hung_optional_lookup_does_not_hold_the_worker(self):
         # Exercise a real worker subprocess: a stuck resolver must not hold

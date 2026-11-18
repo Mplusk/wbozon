@@ -5,8 +5,10 @@ Wants=marketplace-egress-tunnel.service
 
 [Service]
 Type=oneshot
-DynamicUser=yes
+User=wbozon-schema
+Group=wbozon-schema
 StateDirectory=wbozon-market-updates
+StateDirectoryMode=0700
 RuntimeDirectory=wbozon-market-updates
 RuntimeDirectoryMode=0755
 RuntimeDirectoryPreserve=yes

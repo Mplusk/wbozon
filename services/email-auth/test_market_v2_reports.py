@@ -1,17 +1,41 @@
 """Contract regressions for the v2 provider projections using published response shapes."""
 
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from decimal import Decimal
 
 import market_specs, ozon_expansion, wb_reports, wb_mcp
 import market_history
+import expansion_gateway
+import finance_gate
 
 
 class Reports(unittest.TestCase):
     def setUp(self):
         self.today = datetime.now(market_specs.MOSCOW).date().isoformat()
         self.dates = dict(date_from=self.today, date_to=self.today)
+
+    def test_wb_daily_retains_observed_orders_during_unknown_cooldown(self):
+        class Wire:
+            deadline = float('inf')
+
+            @contextmanager
+            def progress(self, name, query):
+                yield {'next': None, 'done': False, 'seen': [], 'events': {
+                    'id': ['A', self_day, 'warehouse', 'region', 'order', 2, None]}}, lambda *_: None
+
+            def __call__(self, *args, **kwargs):
+                raise finance_gate.GateError('retry_time_unknown')
+
+        self_day = self.today
+        start = (datetime.now(market_specs.MOSCOW).date() - timedelta(days=1)).isoformat()
+        query = dict(date_from=start, date_to=self_day, article='A', group_by='day')
+        result = expansion_gateway._wb_daily_totals('wb_orders', query, Wire())
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['status'], 'retry_time_unknown')
+        self.assertIsNone(result['retry_after_seconds'])
+        self.assertEqual([(r['date'], r['ordered_units']) for r in result['items']], [(self_day, 2)])
 
     def test_locality_dates_and_unknown_duration(self):
         def provider(method, url, **kwargs):
@@ -95,6 +119,11 @@ class Reports(unittest.TestCase):
 
         def feed(method, url, **kwargs):
             self.assertEqual(kwargs["body"]["pagination"]["snapshotTime"], stamp)
+            self.assertEqual(kwargs["body"]["selectedPeriod"], {
+                "start": self.dates["date_from"] + "T00:00:00+03:00",
+                "end": self.dates["date_to"] + "T23:59:59.999999+03:00",
+            })
+            self.assertEqual((kwargs["interval"], kwargs["basic_interval"]), (60, 10800))
             return {
                 "data": {
                     "orders": [
@@ -118,6 +147,15 @@ class Reports(unittest.TestCase):
             "items"
         ]
         self.assertEqual((row["region"], row["units"], row["status"]), ("destination", 1, "return"))
+
+    def test_rating_accepts_single_localization_snapshot_and_history(self):
+        index = {"calculation_date": "2026-10-01T00:00:00Z", "localization_percentage": 0}
+        for source, expected in ((index, [index]), ([index], [index]), (None, [])):
+            with self.subTest(source=source):
+                result = ozon_expansion.read("ozon_rating", {}, lambda *a, **kw: {
+                    "groups": [{"group_name": "service", "items": []}], "localization_index": source})
+                self.assertEqual(result["localization_index"], expected)
+                self.assertEqual(len(result["items"]), 1)
 
     def test_return_to_seller_does_not_invent_sale_price_or_quantity(self):
         page = wb_reports.returns(

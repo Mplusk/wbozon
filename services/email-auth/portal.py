@@ -269,7 +269,10 @@ def _provider_read(operation, args, creds, *, request_timeout=15, absolute_deadl
         # Seller info is optional. Use a daemon thread with a hard wait bound:
         # DNS resolution may ignore urllib's socket timeout. Never let an
         # unavailable profile discard an otherwise valid analytics response.
-        remaining=min(3.0, PROVIDER_DEADLINE_SECONDS-(time.monotonic()-started)-1.5)
+        deadline = started + PROVIDER_DEADLINE_SECONDS
+        if absolute_deadline is not None:
+            deadline = min(deadline, absolute_deadline)
+        remaining = min(3.0, deadline - time.monotonic() - 1.5)
         if remaining>0:
             found=[]
             def read_company_currency():
@@ -463,6 +466,9 @@ def _provider_worker():
                         lambda name,args:_provider_read(name,args,request['creds'],absolute_deadline=deadline))
                 if is_finance:
                     return _provider_read(request['operation'],request['args'],request['creds'],absolute_deadline=deadline)
+                if request['operation'] == 'ozon_orders_analytics':
+                    return _provider_read(request['operation'], request['args'], request['creds'],
+                                          absolute_deadline=request.get('deadline_monotonic'))
                 return _provider_read(request['operation'],request['args'],request['creds'])
         value = (_finance_read_with_retry(request.get('finance_gate_dir'),request['creds'],read,deadline,
                   allow_retry=(request['operation'] != ozon_article_summary.OPERATION and

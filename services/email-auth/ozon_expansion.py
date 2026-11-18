@@ -777,6 +777,13 @@ def read(name, args, request):
         )
     if name == "ozon_rating":
         raw = request("POST", BASE + "/v1/rating/summary", body={})
+        localization = raw.get("localization_index")
+        if isinstance(localization, dict):
+            if not {"calculation_date", "localization_percentage"}.intersection(localization):
+                raise ValueError("Unexpected Ozon localization index")
+            localization = [localization]
+        elif localization is None:
+            localization = []
         data = [
             {
                 "group_name": g.get("group_name"),
@@ -791,7 +798,7 @@ def read(name, args, request):
             data,
             localization_index=[
                 select(r, "calculation_date localization_percentage")
-                for r in rows(raw.get("localization_index", []))
+                for r in rows(localization)
             ],
         )
     raise ValueError("Unknown Ozon report")

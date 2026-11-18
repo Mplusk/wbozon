@@ -119,11 +119,12 @@ def region(args, request):
         if not stamp or not iso(stamp):
             raise ValueError("Continuation requires the initial snapshot time")
         pagination["snapshotTime"] = stamp
-    body = {"selectedPeriod": _period(args), "pagination": pagination}
+    period = {"start": args["date_from"] + "T00:00:00+03:00", "end": args["date_to"] + "T23:59:59.999999+03:00"}
+    body = {"selectedPeriod": period, "pagination": pagination}
     ids = _ids(args)
     if ids:
         body["nmIds"] = ids
-    data = request("POST", wb.ANALYTICS + path, body=body, interval=20, basic_interval=1800, ttl=1800)[
+    data = request("POST", wb.ANALYTICS + path, body=body, interval=60, basic_interval=10800, ttl=1800)[
         "data"
     ]
     page = rows(data["orders"])
