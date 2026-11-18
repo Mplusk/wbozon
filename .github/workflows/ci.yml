@@ -445,18 +445,36 @@ jobs:
           set -euo pipefail
           umask 077
           keys="$(mktemp -d "$RUNNER_TEMP/wbozon-deploy.XXXXXX")"
-          trap 'rm -f "$keys/id" "$keys/known_hosts"; rmdir "$keys"' EXIT
+          trap 'rm -f "$keys/id" "$keys/known_hosts" "$keys/ssh-error"; rmdir "$keys"' EXIT
           printf '%s\n' "$DEPLOY_KEY" > "$keys/id"
           printf '%s\n' "$HOST_KEY" > "$keys/known_hosts"
           unset DEPLOY_KEY HOST_KEY
-          python3 -c 'import json,os,sys; e=os.environ; json.dump(dict(commit=e["GITHUB_SHA"],run_id=e["GITHUB_RUN_ID"],attempt=e["GITHUB_RUN_ATTEMPT"],artifact_id=e["ARTIFACT"],build_attempt=e["BUILD_ATTEMPT"],tar_sha256=e["TAR_SHA256"],token=e["GH_TOKEN"]),sys.stdout)' |
-            env -u GH_TOKEN ssh -T -i "$keys/id" -o IdentitiesOnly=yes -o BatchMode=yes \
-              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$keys/known_hosts" \
-              -o GlobalKnownHostsFile=/dev/null -o ClearAllForwardings=yes \
-              -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=4 \
-              deploy-user@portal.example.invalid deploy
+          for attempt in 1 2 3; do
+            if python3 -c 'import json,os,sys; e=os.environ; json.dump(dict(commit=e["GITHUB_SHA"],run_id=e["GITHUB_RUN_ID"],attempt=e["GITHUB_RUN_ATTEMPT"],artifact_id=e["ARTIFACT"],build_attempt=e["BUILD_ATTEMPT"],tar_sha256=e["TAR_SHA256"],token=e["GH_TOKEN"]),sys.stdout)' |
+              env -u GH_TOKEN LC_ALL=C ssh -T -i "$keys/id" -o IdentitiesOnly=yes -o BatchMode=yes \
+                -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$keys/known_hosts" \
+                -o GlobalKnownHostsFile=/dev/null -o ClearAllForwardings=yes \
+                -o ConnectTimeout=30 -o ServerAliveInterval=10 -o ServerAliveCountMax=4 \
+                deploy-user@portal.example.invalid deploy 2>"$keys/ssh-error"; then
+              exit 0
+            else
+              status=$?
+            fi
+            cat "$keys/ssh-error" >&2
+            # These messages precede authentication and the remote deployment command.
+            # A later disconnect has an uncertain outcome and requires reconciliation.
+            if [[ $status != 255 || $attempt == 3 ]] || ! grep -Eq \
+              -e '^kex_exchange_identification: (read: Connection reset by peer|Connection closed by remote host)' \
+              -e '^Connection timed out during banner exchange' \
+              -e '^ssh: connect to host portal\.example\.invalid port 22: (Connection timed out|Connection refused)' \
+              "$keys/ssh-error"; then
+              exit "$status"
+            fi
+            echo "::warning::SSH disconnected before authentication. Retrying the deployment connection."
+            sleep "$((attempt * 10))"
+          done
       - name: Verify public health over HTTPS
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error --retry 2 --max-time 12 https://3dprinta.shop/healthz |
+          curl --fail --silent --show-error --retry 2 --max-time 20 https://3dprinta.shop/healthz |
             python3 -c 'import json,sys; assert json.load(sys.stdin) == {"status":"ok"}'
