@@ -32,6 +32,10 @@ def driver(cfg, name, sha, fault):
         def seal_market_decision(self, j, name):
             super().seal_market_decision(j, name)
             if fault == 'bootstrap-after-unhold':
+                client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                with client.open('http://127.0.0.1:' + str(host.port) + '/market-cutover', timeout=8) as r:
+                    if r.read() != b'sent':
+                        raise RuntimeError('final bridge did not admit its first synthetic provider request')
                 os.kill(os.getpid(), signal.SIGKILL)
         def phase(self, journal, phase):
             super().phase(journal, phase)
@@ -174,6 +178,7 @@ def suite(python, gate_source, baseline_service=None, candidate_service=None, ma
             (data / ('fail-' + new)).unlink()
             assert launch(new, 'bootstrap-after-unhold').wait(timeout=150) != 0
             until(lambda: checked(new), 140)
+            assert (data / '.market-method-gates').is_dir()
             assert request('/market-cutover') == b'sent'
             assert launch(old, 'none').wait(timeout=150) != 0 and checked(new)
             print('PASS bootstrap fences vendor requests through post-open failure, recovers, then forbids downgrade',

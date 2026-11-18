@@ -91,6 +91,11 @@ service is refused. Existing cache keys and private report bindings retain
 their credential scope. Rotating credentials leaves an unresolved creation
 blocked until its outcome is reconciled under the original binding.
 
+The original release persisted Ozon finance retries. Its other legacy HTTP
+methods did not record provider deadlines. Historical deadlines from those
+methods cannot be reconstructed. The shared guarantee starts with the bridge's
+first admitted request and survives every subsequent reports rollback.
+
 The independently installed controller change for this migration is `cd.py`.
 Verify the candidate on the non-production branch first. Install its reviewed
 Git bytes atomically under `deploy.lock` while no transaction is pending. The
