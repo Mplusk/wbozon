@@ -102,10 +102,10 @@ def request(directory, provider, credentials, req, send, *, before_send=None):
         raise finance_gate.GateError('storage_unavailable')
     url = req.full_url
     def prepare():
-        if provider == 'ozon' and urlsplit(url).path == '/v1/analytics/data':
-            _analytics_slot(directory, credentials)
         if before_send is not None:
             before_send()
+        if provider == 'ozon' and urlsplit(url).path == '/v1/analytics/data':
+            _analytics_slot(directory, credentials)
 
     def open_http():
         try:
