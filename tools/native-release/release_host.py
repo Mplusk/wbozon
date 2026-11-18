@@ -35,6 +35,9 @@ ADOPTION_TRANSITION = frozenset((
 FBO_TRANSITION = frozenset((
     PRE_FBO_SERVICE, 'b50b91762e6e9d4cf59952e10e4f06e15983cc784eb5ab967680036918139481',
 ))
+FBO_UNIT_RATES_TRANSITION = frozenset((
+    PRE_FBO_SERVICE, '3faf38c6c79720529de96cdcd6c868cf501c012c7ddd6a675d6f97b8e4117152',
+))
 
 
 def command(args, *, data=None, timeout=15):
@@ -149,7 +152,7 @@ def compatible(old, new):
         return result
     if gate_changed or runtime_owners(old) != runtime_owners(new):
         pair = {service_digest(old), service_digest(new)}
-        if pair != FBO_TRANSITION and (gate_changed or pair != ADOPTION_TRANSITION):
+        if pair not in (FBO_TRANSITION, FBO_UNIT_RATES_TRANSITION) and (gate_changed or pair != ADOPTION_TRANSITION):
             raise ReleaseError('unreviewed storage, provider dispatch or finance gate transition')
 
 

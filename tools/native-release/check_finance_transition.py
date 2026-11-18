@@ -12,21 +12,26 @@ import time
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from finance_guard import FinanceGuard, GuardError
-from release_host import ReleaseError, compatible
+from release_host import FBO_UNIT_RATES_TRANSITION, PRE_FBO_SERVICE, ReleaseError, compatible, service_digest
 
 PROBE = HERE / 'fixtures/transition_probe.py'
 
 
+def must_refuse(first, second, reason):
+    for a, b in ((first, second), (second, first)):
+        try:
+            compatible(a, b)
+        except ReleaseError:
+            continue
+        raise AssertionError('unreviewed release admitted: ' + reason)
+
+
 def verify_sources(old, new):
+    baseline, candidate = service_digest(old), service_digest(new)
+    assert baseline == PRE_FBO_SERVICE and {baseline, candidate} == FBO_UNIT_RATES_TRANSITION
     compatible(old,new)
     compatible(new,old)
-    def must_refuse(first, second, reason):
-        for a,b in ((first,second),(second,first)):
-            try:
-                compatible(a,b)
-            except ReleaseError:
-                continue
-            raise AssertionError('unreviewed release admitted: ' + reason)
+    print('Verified service inventories:', baseline, '<->', candidate, flush=True)
 
     # The unreviewed combination must fail even when every blob came from an approved release.
     for name in ('finance_gate.py','portal.py','external_mcp.py','app.py','gunicorn.conf.py','ozon_fbo.py','new-helper.py'):
@@ -148,6 +153,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--baseline-service',type=Path,required=True)
     parser.add_argument('--adoption-service',type=Path)
+    parser.add_argument('--previous-fbo-service',type=Path,required=True)
     parser.add_argument('--candidate-service',type=Path,required=True)
     parser.add_argument('--python',type=Path,required=True)
     args = parser.parse_args()
@@ -163,6 +169,11 @@ def main():
             compatible(old, original)
             print('PASS original adoption pair remains compatible in both directions',flush=True)
         verify_sources(old,new)
+        previous = tmp / 'previous-fbo'
+        shutil.copytree(args.previous_fbo_service, previous / 'service')
+        compatible(old, previous)
+        compatible(previous, old)
+        must_refuse(previous, new, 'no reviewed transition between FBO candidates')
         print('PASS exact source trees in both directions; partial upgrades and altered sources rejected',flush=True)
         python = args.python.absolute()
         exercise(python, old, new, tmp)

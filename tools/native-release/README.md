@@ -47,8 +47,12 @@ external schema changes retain the journal and backups for reconciliation.
 
 ## FBO finance release and rollback
 
-The controller admits the change to the finance gate for the exact service trees
-from `c8b2257` and `11bca6b`, in either direction. The new read operations share
+The controller admits the exact baseline service from `c8b2257` paired with
+either the first FBO service from `11bca6b` or the revised unit rates from
+`023c4c1`, in either direction. Each pair has its own SHA-256 inventory.
+CI verifies the packaged service byte for byte when its Git subtree matches
+`023c4c1`. Commit and Actions run provenance belong to the enclosing archive
+and may change while the service inventory stays identical. The read operations share
 the existing client locks, epochs and retry deadlines. The portal saves the time,
 source and outcome of each new bridge operation under the original activity code
 `unknown`, which both versions can display after rollback.
