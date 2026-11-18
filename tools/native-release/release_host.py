@@ -27,12 +27,14 @@ class ReleaseError(Exception):
 
 
 WORKER_CONFIG = 'b9c000b89ec0921a9d07d678cd9b1b44a458d959414a579eb753a4942c792fa2'
-# Reviewed portal sources for initial adoption: storage remains compatible across this pair.
-ADOPTION_SOURCES = (
-    ('e0b80bfca4c06201f16ea7e4c6d2e8b89c034408770580e7ef5de6fa99de0b82',
-     'cf4ffc3a4d7172803836c37e8f26d42ff0dc606244729af94fd254eb0ffa90a4'),
-    ('1015ddabbed83b61e9c77ea66130de5a4a71a15d2a332924a1cba36d0d0dd32e',
-     '5c4d2e6cc80a2d49454256d95c1691478ee7cb1a0e565b459ac5914a0d2679c9'))
+# Exact source inventories. The initial adoption did not change the finance gate.
+PRE_FBO_SERVICE = 'b543e1568394095a20f14213feb3a194a456716c70d43b95c06b33c98cd32aed'
+ADOPTION_TRANSITION = frozenset((
+    '5a433d778b834a2e375fc8eed84d4fa5f14803997e9cd496698f9d21839cec84', PRE_FBO_SERVICE,
+))
+FBO_TRANSITION = frozenset((
+    PRE_FBO_SERVICE, 'b50b91762e6e9d4cf59952e10e4f06e15983cc784eb5ab967680036918139481',
+))
 
 
 def command(args, *, data=None, timeout=15):
@@ -87,12 +89,21 @@ def unit_properties(unit, names):
     return dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
 
 
+def service_digest(release):
+    # Host.verify has already authenticated the complete release including the venv.
+    root = release / 'service'
+    inventory = {p.relative_to(root).as_posix(): digest(p.read_bytes())
+                 for p in root.rglob('*') if p.is_file()}
+    return digest(json.dumps(inventory, sort_keys=True, separators=(',', ':')).encode('ascii'))
+
+
 def compatible(old, new):
     """An automatic rollback must be able to read the new DBs and finance state."""
     def source(directory, file):
         return (directory / 'service' / file).read_text(encoding='utf-8')
 
-    for file in ('finance_gate.py', 'app.py', 'external_keys.py', 'oauth_mcp.py', 'gunicorn.conf.py'):
+    gate_changed = source(old, 'finance_gate.py') != source(new, 'finance_gate.py')
+    for file in ('app.py', 'external_keys.py', 'oauth_mcp.py', 'gunicorn.conf.py'):
         if source(old, file) != source(new, file):
             raise ReleaseError('storage, gate or worker contract changed: ' + file)
 
@@ -112,16 +123,15 @@ def compatible(old, new):
         raise ReleaseError('startup, storage or finance gate contract changed')
     if database_access(old) != database_access(new):
         raise ReleaseError('SQL or schema access changed; a migration rollout is required')
-    def storage_owners(directory):
+    def runtime_owners(directory):
         result = {}
         root = directory / 'service'
         modules = {p.relative_to(root).as_posix().removesuffix('.py').replace('/', '.'): p
                    for p in root.rglob('*.py') if not p.name.startswith('test_')}
         pending = {n for n, p in modules.items() if p.name == 'portal.py' or
                    re.search(rb'\b(?:import|from)\s+[^\n#]*\bsqlite3\b', p.read_bytes())}
-        # These named APIs receive provider payloads or presentation data. The audited
-        # portal does not pass them SQLite connections. Pin all other local helpers.
-        isolated = {'ui', 'ozon_mcp', 'ozon_details', 'ozon_article_summary', 'wb_mcp'}
+        # The operation registries, dispatchers and their helpers must agree with the
+        # gate even when the gate itself is unchanged.
         while pending:
             name = pending.pop()
             p = modules[name]
@@ -135,15 +145,12 @@ def compatible(old, new):
                     names = {alias.name for alias in node.names}
                     if isinstance(node, ast.ImportFrom) and node.module:
                         names |= {node.module, *(node.module + '.' + a.name for a in node.names)}
-                    pending.update((names & modules.keys()) - isolated)
+                    pending.update(names & modules.keys())
         return result
-    before, after = storage_owners(old), storage_owners(new)
-    core = ('portal.py', 'external_mcp.py')
-    if {tuple(s.get(k) for k in core) for s in (before, after)} == set(ADOPTION_SOURCES):
-        for k in core:
-            before[k] = after[k]
-    if before != after:
-        raise ReleaseError('storage-owning source changed outside the approved rollback contract')
+    if gate_changed or runtime_owners(old) != runtime_owners(new):
+        pair = {service_digest(old), service_digest(new)}
+        if pair != FBO_TRANSITION and (gate_changed or pair != ADOPTION_TRANSITION):
+            raise ReleaseError('unreviewed storage, provider dispatch or finance gate transition')
 
 
 def database_access(release):

@@ -36,6 +36,15 @@ def driver(cfg, name, sha, fault):
         def complete(self, journal, release, manifest):
             if fault == 'unhealthy-after-open':
                 host.barrier(journal['txn'], journal['mark'], False)
+                if host.cfg.get('qa_release_pair'):
+                    # Discard the client only after the candidate's real finance worker reached the provider.
+                    with socket.create_connection(('127.0.0.1', host.port), timeout=3) as client:
+                        client.sendall(b'GET /rollback-hold HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')
+                        end = time.monotonic()+8
+                        while not (host.gate.parent / 'provider-active-rollback-hold').exists():
+                            if time.monotonic()>end:
+                                raise RuntimeError('candidate finance read did not start')
+                            time.sleep(.025)
                 (host.gate.parent / ('fail-' + release)).touch()
                 os.kill(os.getpid(), signal.SIGKILL)
             super().complete(journal, release, manifest)
@@ -43,7 +52,7 @@ def driver(cfg, name, sha, fault):
         Inject(host).activate(name, sha, lambda: None)
 
 
-def suite(python, gate_source):
+def suite(python, gate_source, baseline_service=None, candidate_service=None):
     tag = 'wbozon-qa-' + secrets.token_hex(3)
     unit, recover, holder = (tag + suffix + '.service' for suffix in ('', '-recover', '-holder'))
     run = str(secrets.randbelow(10**10) + 10**12)
@@ -75,23 +84,30 @@ def suite(python, gate_source):
         raise RuntimeError('test condition did not complete')
     try:
         (root / 'releases').mkdir(mode=0o755)
+        fixtures = root / 'fixtures'
+        shutil.copytree(HERE / 'fixtures', fixtures, ignore=shutil.ignore_patterns('__pycache__'))
         (state / 'backups').mkdir(mode=0o700)
         (state / 'baselines').mkdir(mode=0o700)
         shas = {}
         for name in (old, new):
             directory = root / 'releases' / name
             service = directory / 'service'
-            service.mkdir(parents=True)
+            if baseline_service:
+                shutil.copytree(baseline_service if name == old else candidate_service, service)
+            else:
+                service.mkdir(parents=True)
+                (service / 'finance_gate.py').write_bytes(gate_source.read_bytes())
+                for f in ('app.py', 'oauth_mcp.py', 'external_keys.py', 'gunicorn.conf.py'):
+                    (service / f).write_text('# synthetic\n')
+                (service / 'portal.py').write_text('class Vault: pass\nclass Portal:\n def __init__(self): pass\n'
+                    ' def read_gateway(self): pass\ndef create_portal(): pass\ndef provider_read(): pass\n')
             service.chmod(0o755)
             directory.chmod(0o755)
-            (service / 'portal_fixture.py').write_bytes((HERE / 'fixtures/portal_fixture.py').read_bytes())
-            (service / 'finance_gate.py').write_bytes(gate_source.read_bytes())
-            for f in ('app.py', 'oauth_mcp.py', 'external_keys.py', 'gunicorn.conf.py'):
-                (service / f).write_text('# synthetic\n')
-            (service / 'portal.py').write_text('class Vault: pass\nclass Portal:\n def __init__(self): pass\n'
-                ' def read_gateway(self): pass\ndef create_portal(): pass\ndef provider_read(): pass\n')
             filemap = {}
-            for f in service.iterdir():
+            for f in service.rglob('*'):
+                if f.is_dir():
+                    f.chmod(0o755)
+                    continue
                 f.chmod(0o644)
                 filemap[f.relative_to(directory).as_posix()] = digest(f.read_bytes())
             raw = json.dumps(filemap).encode()
@@ -103,10 +119,12 @@ def suite(python, gate_source):
                       release_group='wbozon-release', baseline=old, baseline_sha256=shas[old],
                       addresses=['127.0.0.1'], port=port, host='localhost', gate=str(data / '.ozon-finance-gates'),
                       databases=[str(data / n) for n in ('auth.sqlite', 'vault.sqlite')], dependencies=[],
-                      recovery_unit=recover, worker_config_sha256=digest(b'# synthetic\n'))
+                      recovery_unit=recover, qa_release_pair=bool(baseline_service),
+                      worker_config_sha256=digest((root / 'current/service/gunicorn.conf.py').read_bytes()))
         unit_data = ('[Service]\nType=exec\nDynamicUser=yes\nUser=' + tag + '\nSupplementaryGroups=wbozon-release\n'
             'WorkingDirectory=' + str(root / 'current/service') + '\nStateDirectory=' + tag + '\nStateDirectoryMode=0700\n'
-            'Environment=PYTHONDONTWRITEBYTECODE=1 DATABASE_PATH=' + config['databases'][0] +
+            'Environment=PYTHONPATH=' + str(fixtures) + ' WBOZON_QA_RELEASE_PAIR=' + str(int(bool(baseline_service))) +
+            ' PYTHONDONTWRITEBYTECODE=1 DATABASE_PATH=' + config['databases'][0] +
             ' VAULT_PATH=' + config['databases'][1] + '\nKillMode=mixed\nExecCondition=+/usr/bin/python3 -I ' +
             str(HERE / 'cd.py') + ' --config ' + str(cfg) + ' start-check\nExecStart=' + str(python) +
             ' -m gunicorn -w 2 --bind 127.0.0.1:' + str(port) + ' portal_fixture:application\n')
@@ -153,6 +171,10 @@ def suite(python, gate_source):
             assert response.result() == b'finished' and proc.wait(timeout=150) == 0
         assert checked(new) and (data / 'completed').read_text().splitlines() == ['finished'] * 3
         print('PASS live and disconnected handlers completed their finance reads once; new connections fenced', flush=True)
+        if baseline_service:
+            assert request('/activity-candidate') == b'checked'
+            paths = (data / 'provider-attempts').read_text().splitlines()
+            assert len(paths) == 3 and all(p.endswith('/v1/finance/accrual/types') for p in paths)
         for phase in ('draining', 'stopping', 'switching', 'starting', 'committed'):
             target = old
             auto = phase != 'starting'
@@ -178,6 +200,11 @@ def suite(python, gate_source):
         until(lambda: checked(old), 140)
         assert not (state / 'permit.json').exists()
         print('PASS failure after ingress reopened restored prior release', flush=True)
+        if baseline_service:
+            assert (data / 'provider-attempts').read_text().splitlines().count('rollback-hold /v1/finance/accrual/by-day') == 1
+            assert (data / 'completed').read_text().splitlines() == ['finished'] * 4
+            assert request('/activity-restored') == b'checked'
+            print('PASS restored original portal reads candidate activity, session, vault and MCP key', flush=True)
     finally:
         for u in (unit, holder, recover):
             subprocess.run(['/usr/bin/systemctl', 'stop', u], capture_output=True, timeout=100)
@@ -201,6 +228,10 @@ if __name__ == '__main__':
     else:
         parser = argparse.ArgumentParser(description=__doc__)
         parser.add_argument('--python', type=Path, required=True)
-        parser.add_argument('--gate-source', type=Path, required=True)
+        parser.add_argument('--gate-source', type=Path)
+        parser.add_argument('--baseline-service', type=Path)
+        parser.add_argument('--candidate-service', type=Path)
         args = parser.parse_args()
-        suite(args.python, args.gate_source)
+        if bool(args.baseline_service) != bool(args.candidate_service) or bool(args.gate_source) == bool(args.baseline_service):
+            parser.error('provide both service trees or a single synthetic gate source')
+        suite(args.python, args.gate_source, args.baseline_service, args.candidate_service)

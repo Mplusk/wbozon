@@ -45,6 +45,27 @@ finance gate contract require a compatible rollout plan. The running DB schema
 must match the quiescent snapshots on every path that reopens ingress. Unexpected
 external schema changes retain the journal and backups for reconciliation.
 
+## FBO finance release and rollback
+
+The controller admits the change to the finance gate for the exact service trees
+from `c8b2257` and `11bca6b`, in either direction. The new read operations share
+the existing client locks, epochs and retry deadlines. The portal saves the time,
+source and outcome of each new bridge operation under the original activity code
+`unknown`, which both versions can display after rollback.
+
+CI exercises the two immutable service trees with separate provider processes and
+an isolated systemd portal. It checks concurrent reads, interruption, known and
+unknown retry times, rollback after admission reopens, and continued access with
+the original session and MCP key. The provider transport uses synthetic replies.
+
+To put this release on the production path, update the existing root-owned
+`/usr/local/libexec/wbozon-cd/release_host.py` atomically from the reviewed commit
+under the controller's `deploy.lock`, with no pending transaction. Verify the
+installed file digest against Git and both service tree digests against the
+approved pair before promoting the tested changes to `main`. The production job
+verifies its own main-branch artifact and public readiness. The one-time adoption
+installer applies to new hosts.
+
 ## Historical manual controller
 
 The remaining notes describe the earlier manual prototype and staging design.

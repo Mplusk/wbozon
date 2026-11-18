@@ -5,12 +5,21 @@ import sqlite3
 import subprocess
 import sys
 import time
+sys.path.insert(0, os.getcwd())
 import finance_gate
 
 data = Path(os.environ['VAULT_PATH']).parent
+release_pair = os.environ.get('WBOZON_QA_RELEASE_PAIR') == '1'
 
 
 def provider():
+    if release_pair:
+        from transition_probe import worker
+        result = worker(data, 'ok', sys.argv[3], hold=float(sys.argv[2]))
+        assert result['kind'] == 'ok', result['kind']
+        with (data / 'completed').open('a') as f:
+            f.write('finished\n')
+        return
     gate = str(data / '.ozon-finance-gates')
     def read():
         (data / 'started').touch()
@@ -31,11 +40,21 @@ def application(env, start):
     if route == '/detached':
         (data / 'detached-handler').touch()
         time.sleep(7)
-    for name, tables in (('auth.sqlite', ['tokens', 'sessions']), ('vault.sqlite', ['vault', 'connection_checks'])):
-        with sqlite3.connect(data / name) as db:
-            for table in tables:
-                db.execute('CREATE TABLE IF NOT EXISTS ' + table + ' (id INTEGER PRIMARY KEY)')
-    subprocess.run([sys.executable, __file__, '--provider-worker', '3' if route == '/hold' else '0'], check=True)
+    if release_pair:
+        from transition_probe import activity
+        if route in ('/activity-candidate','/activity-restored'):
+            activity(data,route.removeprefix('/activity-'))
+            start('200 OK', [])
+            return [b'checked']
+        if route == '/seed':
+            activity(data,'seed')
+    else:
+        for name, tables in (('auth.sqlite', ['tokens', 'sessions']), ('vault.sqlite', ['vault', 'connection_checks'])):
+            with sqlite3.connect(data / name) as db:
+                for table in tables:
+                    db.execute('CREATE TABLE IF NOT EXISTS ' + table + ' (id INTEGER PRIMARY KEY)')
+    duration = {'/hold':'3','/rollback-hold':'6'}.get(route,'0')
+    subprocess.run([sys.executable, __file__, '--provider-worker', duration, route.lstrip('/')], check=True)
     start('200 OK', [])
     return [b'finished']
 

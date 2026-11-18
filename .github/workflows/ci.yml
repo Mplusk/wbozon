@@ -159,6 +159,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+          fetch-depth: 0
       - name: Reconstruct source and hash-locked wheelhouse
         shell: bash
         run: |
@@ -167,7 +168,7 @@ jobs:
           python3 -c 'import platform,sys; assert sys.version_info[:2] == (3,12); assert platform.machine() == "x86_64"'
           bundle="$RUNNER_TEMP/native-candidate"
           mkdir -p "$bundle/service" "$bundle/wheelhouse" "$bundle/bootstrap" "$RUNNER_TEMP/native-artifact"
-          git archive "$GITHUB_SHA" services/email-auth | tar -x -C "$bundle/service" --strip-components=2
+          git -c core.autocrlf=false archive "$GITHUB_SHA" services/email-auth | tar -x -C "$bundle/service" --strip-components=2
           cp tools/native-test-bundle/requirements-offline.lock "$bundle/requirements-offline.lock"
           cp tools/native-test-bundle/requirements-bootstrap.lock "$bundle/requirements-bootstrap.lock"
           cp tools/native-test-bundle/test_native.py "$bundle/test_native.py"
@@ -194,13 +195,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          baseline="$RUNNER_TEMP/rollback-baseline"
+          candidate="$RUNNER_TEMP/reviewed-fbo"
+          adoption="$RUNNER_TEMP/first-adoption"
+          reviewed=11bca6b902810fd6b86c1e6f0ed352db40a142c8
+          packaged="$RUNNER_TEMP/native-candidate/service"
+          mkdir "$baseline" "$candidate" "$adoption"
+          git -c core.autocrlf=false archive c8b2257cdd11bb539d3705d269fda6b23c0bde99 services/email-auth | tar -x -C "$baseline" --strip-components=2
+          git -c core.autocrlf=false archive "$reviewed" services/email-auth | tar -x -C "$candidate" --strip-components=2
+          git -c core.autocrlf=false archive ebd651e963c95f7c796ff1439bb7498160adfd43 services/email-auth | tar -x -C "$adoption" --strip-components=2
+          # Exercise the packaged service for this transition and retain the reviewed pair as a regression thereafter.
+          if [[ "$(git rev-parse "$GITHUB_SHA:services/email-auth")" == "$(git rev-parse "$reviewed:services/email-auth")" ]]; then
+            diff -qr "$candidate" "$packaged"
+            candidate="$packaged"
+          fi
+          python3 -B -I tools/native-release/check_finance_transition.py \
+            --python "$RUNNER_TEMP/native-candidate-venv/bin/python" \
+            --baseline-service "$baseline" --candidate-service "$candidate" --adoption-service "$adoption"
           sudo groupadd --system wbozon-release
           sudo install -d -m 0755 /opt/staging-account-acceptance
           sudo cp -a "$RUNNER_TEMP/native-candidate-venv" /opt/staging-account-acceptance/venv
           sudo chmod -R a+rX /opt/staging-account-acceptance/venv
           sudo python3 -u -I tools/native-release/host_acceptance.py \
             --python /opt/staging-account-acceptance/venv/bin/python \
-            --gate-source services/email-auth/finance_gate.py
+            --baseline-service "$baseline" --candidate-service "$candidate"
+          if [[ "$candidate" != "$packaged" ]]; then
+            sudo python3 -u -I tools/native-release/host_acceptance.py \
+              --python /opt/staging-account-acceptance/venv/bin/python --gate-source "$packaged/finance_gate.py"
+          fi
       - name: Package candidate with source provenance and hashes
         shell: bash
         run: |
