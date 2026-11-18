@@ -185,6 +185,7 @@ def order_event(cancelled):
 def grouped_orders(args, events, complete_days):
     """Group reconciled order units, inserting zeroes only for days covered by the source."""
     groups = {}
+    covered = set(complete_days)
     def bucket(article, day):
         start = date.fromisoformat(day)
         if args["group_by"] == "week":
@@ -206,10 +207,21 @@ def grouped_orders(args, events, complete_days):
         if len(articles) == 1:
             article = articles.pop()
     if article is not None:
-        for day in complete_days:
+        for day in covered:
             bucket(article, day)
     for row in groups.values():
         row["cancelled_units"] = None if row['unknown_cancellation_units'] else row['confirmed_cancelled_units']
+        if args['group_by'] == 'week':
+            monday = date.fromisoformat(row['date'])
+            start = max(row['date'], args.get('date_from', row['date']))
+            sunday = (monday + timedelta(days=6)).isoformat()
+            end = min(sunday, args.get('date_to', sunday))
+            requested = days_between(start, end)
+            count = sum(day in covered for day in requested)
+            row.update(period_start=start, period_end=end, covered_days=count, requested_days=len(requested),
+                       complete=count == len(requested), observed_ordered_units=row['ordered_units'])
+            if not row['complete']:
+                row['ordered_units'] = row['cancelled_units'] = None
     return [groups[k] for k in sorted(groups, key=lambda k: (k[1], str(k[0])))]
 
 

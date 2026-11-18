@@ -98,6 +98,15 @@ class Reports(unittest.TestCase):
             self.assertEqual((row['ordered_units'], row['confirmed_cancelled_units'], row['unknown_cancellation_units']), (6, 1, 2))
             self.assertIsNone(row['cancelled_units'])
 
+    def test_only_complete_requested_weeks_have_confirmed_totals(self):
+        args = dict(article='A', group_by='week', date_from='2026-11-16', date_to='2026-11-18')
+        for covered, expected in ((['2026-11-16'], None), (['2026-11-16', '2026-11-17', '2026-11-18'], 0)):
+            row, = market_history.grouped_orders(args, [], covered)
+            self.assertEqual((row['ordered_units'], row['cancelled_units']), (expected, expected))
+            self.assertEqual((row['period_start'], row['period_end'], row['covered_days'], row['requested_days']),
+                             ('2026-11-16', '2026-11-18', len(covered), 3))
+            self.assertEqual(row['observed_ordered_units'], 0)
+
     def test_retention_both_fields_and_unallocated_account_row(self):
         raw = [
             {
