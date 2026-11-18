@@ -1,0 +1,336 @@
+"""Public argument contracts for the read-only warehouse, analytics and advertising tools."""
+
+import re
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
+
+
+def integer(low, high):
+    return {"type": "integer", "minimum": low, "maximum": high}
+
+
+def choices(*values):
+    return {"type": "string", "enum": list(values)}
+
+
+def array(items, limit):
+    return {"type": "array", "items": items, "minItems": 1, "maxItems": limit, "uniqueItems": True}
+
+
+ID = {
+    "type": ["integer", "string"],
+    "pattern": "^[1-9][0-9]{0,18}$",
+    "minimum": 1,
+    "maximum": 9223372036854775807,
+}
+TEXT = {"type": "string", "minLength": 1, "maxLength": 256}
+DATE = {"type": "string", "format": "date"}
+OFFSET = integer(0, 10000000)
+FIELDS = {
+    "article": TEXT,
+    "nm_id": ID,
+    "sku": ID,
+    "skus": array(ID, 100),
+    "offer_ids": array(TEXT, 100),
+    "date_from": DATE,
+    "date_to": DATE,
+    "warehouse_id": ID,
+    "cluster_id": ID,
+    "supply_id": ID,
+    "order_id": ID,
+    "bundle_id": TEXT,
+    "offset": OFFSET,
+    "limit": integer(1, 100),
+    "page": integer(1, 1000000),
+    "cursor": {"type": ["string", "integer"], "minLength": 1, "maxLength": 2048, "minimum": 0},
+    "mode": choices("summary", "details"),
+    "status_ids": array(integer(1, 6), 6),
+    "is_preorder": {"type": "boolean"},
+    "states": array(TEXT, 12),
+    "report_scope": choices("unanswered", "answered", "archive"),
+    "task_id": TEXT,
+    "campaign_ids": array(ID, 50),
+    "include_funnel": {"type": "boolean"},
+    "include_order_share": {"type": "boolean"},
+    "include_warehouses": {"type": "boolean"},
+    "report": choices("auto", "campaigns", "statistics", "spend_ledger"),
+    "cluster_type": choices("CLUSTER_TYPE_OZON", "CLUSTER_TYPE_CIS"),
+    "horizon_days": integer(1, 365),
+    "mapping": {
+        "type": "object",
+        "properties": {"ozon_offer_id": TEXT, "wb_vendor_code": TEXT, "wb_nm_id": ID},
+        "required": ["ozon_offer_id", "wb_vendor_code"],
+        "additionalProperties": False,
+    },
+}
+
+# Parameters in the third column are mandatory; modes are available on every tool.
+TOOLS = {
+    "wb_supplies": (
+        "Поставки FBW за период по дате создания. Склады, даты, статус и коэффициент из деталей.",
+        "date_from date_to status_ids warehouse_id limit offset",
+        "date_from date_to",
+    ),
+    "wb_supply_goods": (
+        "Состав одной поставки WB, поступление в продажу, фактическая приёмка и короба.",
+        "supply_id is_preorder article nm_id limit offset",
+        "supply_id",
+    ),
+    "wb_stocks": (
+        "Остатки WB по складам. Транзит к покупателю и возвраты выделены отдельно. Незавершённый отчёт можно продолжить.",
+        "article nm_id task_id limit offset",
+        "",
+    ),
+    "wb_orders": (
+        "Заказы по дате, складу и региону. Статистика WB за последние 90 дней, с курсором по изменениям.",
+        "date_from date_to article nm_id cursor limit offset",
+        "date_from date_to",
+    ),
+    "wb_sales": (
+        "События продаж и возвратов WB за период, по дням и складам.",
+        "date_from date_to article nm_id cursor limit offset",
+        "date_from date_to",
+    ),
+    "wb_acceptance_slots": (
+        "Доступность опубликованных WB коэффициентов приёмки на 14 дней. include_warehouses добавляет справочник складов FBW.",
+        "warehouse_id include_warehouses",
+        "",
+    ),
+    "ozon_supply_orders": (
+        "Заявки FBO с деталями, складами и интервалами. Период относится к началу таймслота.",
+        "date_from date_to states limit cursor",
+        "",
+    ),
+    "ozon_supply_items": (
+        "Заявленный состав FBO. Для фактической приёмки укажите также order_id и supply_id: данные из актов возвращаются отдельно.",
+        "bundle_id order_id supply_id article sku limit cursor",
+        "bundle_id",
+    ),
+    "ozon_stocks": (
+        "Остаток и резерв Ozon по SKU и схеме отгрузки. Список складов относится ко всей строке.",
+        "article offer_ids sku cursor limit",
+        "",
+    ),
+    "ozon_stocks_by_cluster": (
+        "Текущие остатки и транзит по складам и кластерам Ozon. С датами возвращает сохранённые снимки и пропуски по дням UTC.",
+        "sku skus cluster_id warehouse_id article date_from date_to offset limit",
+        "",
+    ),
+    "ozon_sku_daily": (
+        "Ежедневные заказанные единицы и сумма по SKU. include_funnel добавляет просмотры и корзину при наличии доступа.",
+        "date_from date_to sku article offset limit include_funnel",
+        "date_from date_to",
+    ),
+    "wb_finance_report": (
+        "Детализация реализации WB с расходами и показателями на проданную единицу по артикулу и валюте. Категория Финансы.",
+        "date_from date_to article nm_id cursor limit",
+        "date_from date_to",
+    ),
+    "wb_paid_storage": (
+        "Фактические расходы на хранение WB, отчёт за период до 8 дней.",
+        "date_from date_to article nm_id task_id limit offset",
+        "date_from date_to",
+    ),
+    "wb_acceptance_report": (
+        "Платная приёмка WB по товару и поставке за период до 31 дня.",
+        "date_from date_to article nm_id task_id limit offset",
+        "date_from date_to",
+    ),
+    "ozon_cash_flow": (
+        "Финансовый отчёт Ozon по расчётным периодам. Фактические выплаты выделены по валютам.",
+        "date_from date_to page limit",
+        "date_from date_to",
+    ),
+    "ozon_fbo_postings_geo": (
+        "Отправления FBO по дате, складу и кластерам, с количествами отдельных SKU.",
+        "date_from date_to sku article cursor limit",
+        "date_from date_to",
+    ),
+    "ozon_clusters": ("Кластеры и входящие в них склады Ozon.", "cluster_type cluster_id", ""),
+    "wb_funnel": (
+        "Переходы, корзины, заказы и конверсии по выбранному периоду WB, до 365 дней.",
+        "date_from date_to article nm_id limit offset",
+        "date_from date_to",
+    ),
+    "wb_ads": (
+        "Кампании WB, списания и статистика по товару. include_order_share сопоставляет прямые рекламные единицы с заказанными единицами воронки WB.",
+        "date_from date_to campaign_ids article nm_id report limit offset include_order_share",
+        "date_from date_to",
+    ),
+    "ozon_ads": (
+        "Кампании и отчёты CPC по SKU и периоду через Ozon Performance. include_order_share сверяет прямые заказы с уникальными order_id FBO и FBS по SKU через Seller API.",
+        "date_from date_to campaign_ids article sku task_id limit offset include_order_share",
+        "date_from date_to",
+    ),
+    "wb_feedbacks": (
+        "Отзывы и оценки в выбранном разделе WB. Средний рейтинг рассчитывается по показанной выборке.",
+        "date_from date_to article nm_id report_scope limit offset",
+        "date_from date_to",
+    ),
+    "ozon_reviews": (
+        "Отзывы и оценки Ozon по периоду и SKU. Требуется доступ к управлению отзывами.",
+        "date_from date_to sku article limit cursor",
+        "date_from date_to",
+    ),
+    "ozon_rating": ("Текущие группы рейтингов продавца Ozon и индекс локализации по датам.", "", ""),
+    "supply_plan": (
+        "План поставки по паре точных артикулов: остатки, входящий товар, темп заказов за 7/30/90 дней, покрытие и рекомендация на горизонт. Передайте mapping для разных артикулов или используйте настроенный псевдоним.",
+        "article horizon_days mapping",
+        "article horizon_days",
+    ),
+}
+
+
+def schema(name):
+    _, keys, required = TOOLS[name]
+    props = {k: FIELDS[k] for k in (*keys.split(), "mode")}
+    return props, required.split()
+
+
+def _valid(value, spec):
+    types = spec["type"]
+    if types == "object":
+        return (
+            isinstance(value, dict)
+            and set(spec["required"]) <= value.keys() <= spec["properties"].keys()
+            and all(_valid(v, spec["properties"][k]) for k, v in value.items())
+        )
+    if types == "array":
+        return (
+            isinstance(value, list)
+            and 1 <= len(value) <= spec["maxItems"]
+            and all(_valid(v, spec["items"]) for v in value)
+            and len(set(map(str, value))) == len(value)
+        )
+    if types == "boolean":
+        return type(value) is bool
+    if type(value) is int:
+        return "integer" in types and spec.get("minimum", 0) <= value <= spec.get("maximum", 2**63 - 1)
+    if (
+        not isinstance(value, str)
+        or "string" not in types
+        or not 1 <= len(value) <= spec.get("maxLength", 256)
+    ):
+        return False
+    if any(ord(x) < 32 or ord(x) == 127 for x in value):
+        return False
+    if spec.get("format") == "date":
+        return date.fromisoformat(value).isoformat() == value
+    if "pattern" in spec:
+        return bool(re.fullmatch(spec["pattern"], value)) and int(value) <= spec["maximum"]
+    return "enum" not in spec or value in spec["enum"]
+
+
+def validate(name, args):
+    props, required = schema(name)
+    if not isinstance(args, dict) or not set(required) <= args.keys() <= props.keys():
+        raise ValueError("Invalid tool arguments")
+    if not all(_valid(value, props[k]) for k, value in args.items()):
+        raise ValueError("Invalid parameter value")
+    if "sku" in args and "skus" in args and {str(args["sku"])} != set(map(str, args["skus"])):
+        raise ValueError("Conflicting SKU selectors")
+    if ("date_from" in args) != ("date_to" in args):
+        raise ValueError("Both dates required")
+    if "date_from" in args:
+        days = (date.fromisoformat(args["date_to"]) - date.fromisoformat(args["date_from"])).days + 1
+        limit = {
+            "wb_orders": 90,
+            "wb_sales": 90,
+            "wb_paid_storage": 8,
+            "wb_acceptance_report": 31,
+            "wb_ads": 31,
+            "ozon_ads": 62,
+        }.get(name, 365)
+        if not 1 <= days <= limit:
+            raise ValueError("Period out of range")
+    if name == "ozon_supply_items" and ("supply_id" in args) != ("order_id" in args):
+        raise ValueError("Both supply and order required for acceptance")
+    if name == "ozon_reviews" and args.get("limit", 20) < 20:
+        raise ValueError("Ozon returns a minimum of 20 reviews per page")
+    if name == "ozon_ads" and len(args.get("campaign_ids", [])) > 10:
+        raise ValueError("At most ten campaigns per report")
+    if args.get("include_order_share") and (
+        not args.get("campaign_ids")
+        or not any(k in args for k in ("sku", "article", "nm_id"))
+        or args.get("report", "statistics") in ("campaigns", "spend_ledger")
+    ):
+        raise ValueError("Order share requires a product and campaign statistics")
+
+
+def direct_attribution(items, product_key, metric):
+    """Aggregate the entire export before paging. Do not attribute multicard/model transactions."""
+    totals = {}
+    seen = set()
+    for row in items:
+        campaign, product = row.get("campaign_id"), row.get(product_key)
+        if campaign is None or product is None:
+            raise ValueError("Advertising row without identity")
+        key = str(campaign), str(product)
+        total = totals.setdefault(key, 0)
+        if product_key == "nm_id":
+            kind = row.get("conversion_type")
+            if kind in ("associated", "multicard"):
+                continue
+            if kind != "direct":
+                totals[key] = None
+                continue
+        identity = (*key, row.get("date"), row.get("placement"))
+        count = money(row.get(metric))
+        if identity in seen or count is None or count < 0 or count != count.to_integral_value():
+            totals[key] = None
+        elif total is not None:
+            totals[key] += int(count)
+        seen.add(identity)
+    return [{"campaign_id": c, product_key: p, "direct_attributed": v} for (c, p), v in totals.items()]
+
+
+def rows(value):
+    if not isinstance(value, list) or any(not isinstance(r, dict) for r in value):
+        raise ValueError("Invalid rows in marketplace response")
+    return value
+
+
+def select(row, names):
+    return {k: row.get(k) for k in names.split()}
+
+
+def result(items, cursor=None, *, complete=None, **extra):
+    return {
+        "items": items,
+        "complete": cursor is None if complete is None else complete,
+        "next_cursor": cursor,
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        **extra,
+    }
+
+
+def matches(row, args):
+    return all(str(row.get(k)) == str(args[k]) for k in ("article", "sku", "nm_id") if k in args)
+
+
+def money(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("Invalid amount")
+    try:
+        n = Decimal(str(value))
+    except InvalidOperation:
+        raise ValueError("Invalid amount") from None
+    if not n.is_finite() or abs(n.adjusted()) > 30 or len(n.as_tuple().digits) > 32:
+        raise ValueError("Invalid amount")
+    return n
+
+
+def iso(value, default_zone=None):
+    if value is None:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        if default_zone is None:
+            raise ValueError("Missing timestamp offset")
+        parsed = parsed.replace(tzinfo=default_zone)
+    return parsed.isoformat()
+
+
+MOSCOW = timezone(timedelta(hours=3))
