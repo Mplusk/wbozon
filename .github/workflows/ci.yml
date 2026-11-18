@@ -281,7 +281,7 @@ jobs:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/ozon-finance-partial-20261117')
     needs: [native-candidate]
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 9
     concurrency:
       group: wbozon-native-staging
       cancel-in-progress: false
@@ -328,14 +328,39 @@ jobs:
           private_dir="$RUNNER_TEMP/wbozon-stage-ssh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           umask 077
           mkdir -m 700 "$private_dir"
-          trap 'rm -f "$private_dir/key" "$private_dir/known_hosts"; rmdir "$private_dir"' EXIT
+          trap 'rm -f "$private_dir/key" "$private_dir/known_hosts" "$private_dir/ssh-error"; rmdir "$private_dir"' EXIT
           printf '%s\n' "$STAGE_SSH_KEY" > "$private_dir/key"
           printf '%s\n' "$STAGE_KNOWN_HOSTS" > "$private_dir/known_hosts"
-          ssh -T -i "$private_dir/key" -o IdentitiesOnly=yes -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$private_dir/known_hosts" \
-            -o GlobalKnownHostsFile=/dev/null -o ClearAllForwardings=yes \
-            -o ConnectTimeout=15 -o ServerAliveInterval=10 -o ServerAliveCountMax=2 \
-            staging-account@portal.example.invalid "stage $GITHUB_SHA $GITHUB_RUN_ID $BUILD_ATTEMPT $digest $bytes" < "$artifact"
+          # Retrying the same identity lets the receiver verify an existing copy or recover a partial file.
+          for attempt in 1 2 3; do
+            if LC_ALL=C timeout --kill-after=5s 150s ssh -T -i "$private_dir/key" -o IdentitiesOnly=yes -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$private_dir/known_hosts" \
+              -o GlobalKnownHostsFile=/dev/null -o ClearAllForwardings=yes \
+              -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=6 \
+              staging-account@portal.example.invalid "stage $GITHUB_SHA $GITHUB_RUN_ID $BUILD_ATTEMPT $digest $bytes" \
+              < "$artifact" 2>"$private_dir/ssh-error"; then
+              exit 0
+            else
+              status=$?
+            fi
+            cat "$private_dir/ssh-error" >&2
+            if grep -Eiq \
+              -e 'Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED|Permission denied' \
+              -e 'Authentication failed|Failed to authenticate|Too many authentication failures|Bad owner or permissions|Load key ' \
+              -e 'Rejected staging request|Staging outcome not confirmed' "$private_dir/ssh-error"; then
+              exit "$status"
+            fi
+            if [[ $status == 255 ]]; then
+              grep -Eiq -e 'Timeout, server .* not responding|Connection timed out|Operation timed out' \
+                -e 'Connection reset by peer|Broken pipe|Connection refused|Network is unreachable' \
+                "$private_dir/ssh-error" || exit "$status"
+            elif [[ $status != 124 ]]; then
+              exit "$status"
+            fi
+            if [[ $attempt == 3 ]]; then exit "$status"; fi
+            echo "::warning::Staging transport interrupted on attempt $attempt. Retrying the verified archive."
+            sleep "$((attempt * 10))"
+          done
 
   native-deploy:
     name: Deploy and verify production portal

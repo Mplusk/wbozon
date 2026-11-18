@@ -279,6 +279,10 @@ release branch. A separate, fresh GitHub runner downloads the exact artifact ID
 and compares its tarball digest with the builder's job output; the build and tests
 do not run in the job containing the staging key. Uploads use
 pinned SSH host keys and encrypted GitHub secrets.
+The transfer retries a network interruption up to twice with the same build
+attempt, archive and digest. Each upload has a 150-second deadline. The receiver
+checks an existing file under the same identity before acknowledging delivery.
+Host-key, authentication and receiver validation errors end the job immediately.
 Staging is bounded to 40 artifacts or 300 MB. After a new upload is durable, it
 keeps the twelve newest versioned cache entries and preserves legacy names.
 Upload rate limits use the host wall clock. The free-space precheck
