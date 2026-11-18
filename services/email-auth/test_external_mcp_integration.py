@@ -127,10 +127,9 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
         self.assertEqual(result['headers'].get('Cache-Control'),'no-store')
         names={tool['name'] for tool in json.loads(result['body'])['result']['tools']}
         self.assertEqual(names, {'ozon_products','ozon_product_info','ozon_accrual_types','ozon_accrual_day','ozon_article_summary','ozon_realization_article_month','ozon_return_events',
-                                 'ozon_unallocated_accruals','ozon_fbo_supply_orders','ozon_fbo_supply_details','ozon_fbo_supply_items','ozon_fbo_volume_allocation',
                                  'ozon_posting_accruals','ozon_prices','ozon_orders_analytics',
                                  'ozon_posting_status','ozon_posting_candidates','wb_products','wb_prices','wb_commissions',
-                                 'wb_box_tariffs','wb_sales_summary'} | set(portal.market_specs.TOOLS))
+                                 'wb_box_tariffs','wb_sales_summary'})
 
     def test_finance_429_propagates_delay_and_prevents_early_mcp_or_api_retry(self):
         token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',self.create()['body']).group(1)
@@ -299,7 +298,6 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
             raise urllib.error.HTTPError('',429,'',{'Retry-After':'45'},io.BytesIO())
         self.app.gateway=gateway
         for index,(name,args) in enumerate([('ozon_accrual_day',test_ozon_finance_reports.DAY_ARGS),
-                                           ('ozon_unallocated_accruals',{'date':'2026-11-15'}),
                                            ('ozon_realization_article_month',test_ozon_finance_reports.MONTH_ARGS)]):
             self.vault.save('ozon',{'client_id':str(700+index),'api_key':'synthetic-private'})
             message={'jsonrpc':'2.0','id':7,'method':'tools/call','params':{'name':name,'arguments':args}}
@@ -315,8 +313,6 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
     def test_new_finance_methods_reject_duplicate_json_and_oversized_response(self):
         creds={'client_id':'777','api_key':'synthetic-private'}
         for name,args in [('ozon_accrual_day',test_ozon_finance_reports.DAY_ARGS),
-                          ('ozon_unallocated_accruals',{'date':'2026-11-15'}),
-                          ('ozon_fbo_supply_items',{'bundle_id':'abc'}),
                           ('ozon_realization_article_month',test_ozon_finance_reports.MONTH_ARGS)]:
             for raw,exception in [(b'{"x":1,"x":2}',finance_gate.ProviderResponseInvalid),
                                   (b' ' * 512001,finance_gate.ProviderResponseTooLarge)]:

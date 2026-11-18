@@ -1,5 +1,6 @@
 """Verified native deployment, durable start interlock and crash recovery."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,31 @@ from native_release import secure
 from release_host import Host, ReleaseError, atomic_json, boot_id, command, compatible, discard, process_identity, process_uid
 
 CONFIG = '/etc/wbozon-cd.json'
+
+MARKET_BASE = 'b543e1568394095a20f14213feb3a194a456716c70d43b95c06b33c98cd32aed'
+MARKET_BRIDGE = 'c37446a5e91c2d827c5a41cf581f1325b079e6922aecdf94417306c6315febd8'
+MARKET_REPORTS = 'e231e0b8868069a89f2c410f028c17b32c61fc417ddbbb6cdfe7837e6a3d7da7'
+
+
+def market_inventory(release):
+    # Called only on complete releases already authenticated by Host.verify.
+    # The original installed release_host predates service inventory support.
+    service = release / 'service'
+    files = {p.relative_to(service).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+             for p in service.rglob('*') if p.is_file()}
+    return hashlib.sha256(json.dumps(files, sort_keys=True, separators=(',', ':')).encode('ascii')).hexdigest()
+
+
+def market_transition(old, new):
+    first, second = market_inventory(old), market_inventory(new)
+    if (first, second) == (MARKET_BASE, MARKET_BRIDGE):
+        return 'bootstrap'
+    if {first, second} == {MARKET_BRIDGE, MARKET_REPORTS}:
+        return 'shared'
+    if first != second and {first, second} & {MARKET_BRIDGE, MARKET_REPORTS}:
+        raise ReleaseError('unreviewed marketplace cooldown transition')
+    compatible(old, new)
+    return None
 
 
 class Transaction:
@@ -43,6 +69,27 @@ class Transaction:
             raise ReleaseError('missing release receipt')
         return name, self.host.cfg['baseline_sha256']
 
+    @property
+    def market_hold(self):
+        return self.host.root / '.market-cutover-pending'
+
+    def check_market_hold(self, j):
+        record = json.loads(secure(self.market_hold).read_bytes())
+        if record != {field: j[field] for field in ('txn', 'old', 'new')}:
+            raise ReleaseError('marketplace bootstrap hold differs from the transaction')
+
+    def seal_market_decision(self, j, name):
+        # Recovery has a ConditionPathExists=pending.json. Keep that journal until
+        # the hold is gone; persist the rollback floor before any seller can call.
+        if 'market_final' not in j:
+            j['market_final'] = name
+            self.phase(j, 'market-final')
+        if j['market_final'] != name:
+            raise ReleaseError('marketplace bootstrap decision differs from serving release')
+        if os.path.lexists(self.market_hold):
+            self.check_market_hold(j)
+            discard(self.market_hold)
+
     def start_allowed(self):
         if not self.pending.exists():
             return True
@@ -53,7 +100,7 @@ class Transaction:
         pid, fd = permit['pid'], permit['fd']
         if (permit['boot'] != boot_id() or permit['txn'] != j['txn'] or
                 permit['release'] != self.host.current() or permit['release'] not in (j['old'], j['new']) or
-                j['phase'] not in ('starting', 'restoring', 'committed') or
+                j['phase'] not in ('starting', 'restoring', 'committed', 'market-final') or
                 type(pid) is not int or pid <= 1 or type(fd) is not int or fd < 0):
             return False
         try:
@@ -70,6 +117,8 @@ class Transaction:
             return False
 
     def start(self, j, name, guard):
+        if j.get('market_bootstrap') and name == j['new'] and 'market_final' not in j:
+            self.check_market_hold(j)
         pid = os.getpid()
         ticks, _ = process_identity(pid)
         atomic_json(self.permit, {'txn': j['txn'], 'release': name, 'pid': pid, 'ticks': ticks,
@@ -107,6 +156,8 @@ class Transaction:
             time.sleep(.3)
 
     def complete(self, j, name, sha):
+        if 'market_final' in j and j['market_final'] != name:
+            raise ReleaseError('cannot reopen an older marketplace bootstrap target')
         if 'schemas' in j:
             try:
                 self.host.check_schema(j['schemas'])
@@ -118,6 +169,8 @@ class Transaction:
         self.host.barrier(j['txn'], j['mark'], False)
         self.host.health()
         discard(self.permit)
+        if j.get('market_bootstrap'):
+            self.seal_market_decision(j, name)
         discard(self.pending)
         print('Serving verified release', name, flush=True)
 
@@ -128,10 +181,16 @@ class Transaction:
         h = self.host
         if self.pending.exists():
             raise ReleaseError('previous recovery is pending')
+        if os.path.lexists(self.market_hold):
+            raise ReleaseError('orphaned marketplace bootstrap hold')
         old, old_sha = self.receipt()
         old_dir = h.verify(old, old_sha)
         candidate = h.verify(name, sha)
-        compatible(old_dir, candidate)
+        transition = market_transition(old_dir, candidate)
+        if transition == 'bootstrap':
+            parent = h.gate.parent
+            if os.path.lexists(parent / '.market-reports') or any(parent.glob('.market-method-gates*')):
+                raise ReleaseError('legacy service already has marketplace report or cooldown state')
         h.check_unit()
         h.settled()
         old_pid, _, _ = h.process(old)
@@ -143,7 +202,11 @@ class Transaction:
         j = {'txn': secrets.token_hex(8), 'mark': secrets.randbelow(2**30) + 1,
              'old': old, 'old_sha': old_sha, 'new': name, 'new_sha': sha,
              'previous': json.loads(secure(self.active).read_bytes()).get('previous', old) if self.active.exists() else old}
+        if transition == 'bootstrap':
+            j['market_bootstrap'] = True
         self.phase(j, 'draining')
+        if j.get('market_bootstrap'):
+            atomic_json(self.market_hold, {field: j[field] for field in ('txn', 'old', 'new')})
         h.barrier(j['txn'], j['mark'], True)
         pid, generation, cg = h.drain(old, j['mark'], require_healthy=True)
         with self.gate_lock() as guard:
@@ -172,6 +235,17 @@ class Transaction:
             return
         j = json.loads(secure(self.pending).read_bytes())
         self.host.reserve(False)
+        if 'market_final' in j:
+            name = j['market_final']
+            if not j.get('market_bootstrap') or name not in (j['old'], j['new']):
+                raise ReleaseError('invalid final marketplace bootstrap release')
+            sha = j['new_sha'] if name == j['new'] else j['old_sha']
+            receipt = json.loads(secure(self.active).read_bytes())
+            if (self.host.current() != name or receipt['txn'] != j['txn'] or
+                    receipt['release'] != name or receipt['manifest'] != sha):
+                raise ReleaseError('final marketplace receipt differs from journal')
+            self.reconcile(j, name == j['new'])
+            return
         committed = j['phase'] == 'committed'
         if committed:
             try:
@@ -189,6 +263,8 @@ class Transaction:
     def reconcile(self, j, committed):
         h = self.host
         name, sha = (j['new'], j['new_sha']) if committed else (j['old'], j['old_sha'])
+        if j.get('market_bootstrap') and 'market_final' not in j and h.current() == j['new']:
+            self.check_market_hold(j)
         if h.current() not in (j['old'], j['new']):
             raise ReleaseError('unexpected release during recovery')
         release = h.verify(name, sha)

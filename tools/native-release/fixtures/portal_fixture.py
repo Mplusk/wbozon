@@ -31,6 +31,19 @@ def provider():
 
 def application(env, start):
     route = env['PATH_INFO']
+    if route == '/market-cutover':
+        import market_cooldown
+        import urllib.request
+        request = urllib.request.Request('https://content-api.wildberries.ru/content/v2/get/cards/list')
+        try:
+            result = market_cooldown.request(str(data / '.ozon-finance-gates'), 'wb', {'api_token':'fixture'},
+                                             request, lambda: b'sent')
+        except finance_gate.GateError as exc:
+            if exc.reason != 'busy':
+                raise
+            result = b'held'
+        start('200 OK', [])
+        return [result]
     if route == '/healthz':
         if (data / ('fail-' + Path.cwd().parent.name)).exists():
             start('503 Service Unavailable', [])

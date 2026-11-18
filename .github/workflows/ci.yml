@@ -148,7 +148,7 @@ jobs:
     if: github.event_name == 'push'
     needs: [email-auth, marketplace-egress]
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     outputs:
       artifact_id: ${{ steps.native_artifact.outputs.artifact-id }}
       artifact_attempt: ${{ github.run_attempt }}
@@ -241,6 +241,32 @@ jobs:
           else
             echo "This pinned rollback measurement applies only to the reports service from $reports."
           fi
+      - name: Require a safe marketplace bootstrap and bidirectional report rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          cutover="$RUNNER_TEMP/market-cutover"
+          baseline=c8b2257cdd11bb539d3705d269fda6b23c0bde99
+          bridge=824a4645e9d756322f2af8668ada1678dc2b54f5
+          reports=6c4b21bc5d70a98e305af063bbce734b0e0d99af
+          for ref in "$baseline" "$bridge" "$reports"; do
+            mkdir -p "$cutover/$ref/service"
+            git -c core.autocrlf=false archive "$ref:services/email-auth" | tar -x -C "$cutover/$ref/service"
+          done
+          base_dir="$cutover/$baseline"
+          bridge_dir="$cutover/$bridge"
+          full_dir="$cutover/$reports"
+          packaged="$RUNNER_TEMP/native-candidate"
+          subtree="$(git rev-parse "$GITHUB_SHA:services/email-auth")"
+          if [[ "$subtree" == "$(git rev-parse "$bridge:services/email-auth")" ]]; then bridge_dir="$packaged"; fi
+          if [[ "$subtree" == "$(git rev-parse "$reports:services/email-auth")" ]]; then full_dir="$packaged"; fi
+          python3 -B tools/native-release/test_market_policy.py "$base_dir" "$bridge_dir" "$full_dir"
+          python3 -B -I tools/native-release/check_market_cutover.py \
+            --python "$RUNNER_TEMP/native-candidate-venv/bin/python" --baseline-service "$base_dir/service" \
+            --bridge-service "$bridge_dir/service" --full-service "$full_dir/service"
+          sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-bootstrap \
+            --python /opt/staging-account-acceptance/venv/bin/python \
+            --baseline-service "$base_dir/service" --candidate-service "$bridge_dir/service"
       - name: Package candidate with source provenance and hashes
         shell: bash
         run: |

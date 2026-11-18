@@ -180,35 +180,10 @@ def _commission(value):
     if value is None: return None
     if not isinstance(value, dict): raise ValueError('Invalid report commission')
     quantity = value.get('quantity')
-    if quantity is not None and (type(quantity) is not int or not -1000000 <= quantity <= 1000000):
+    if type(quantity) is not int or not -1000000 <= quantity <= 1000000:
         raise ValueError('Invalid report quantity')
     return {'quantity': quantity, **{field: _decimal(value[field]) if value.get(field) is not None else None
                                       for field in COMMISSION_FIELDS}}
-
-
-def _reported_quantity(parts):
-    if not parts or any(part['quantity'] is None for part in parts):
-        return None
-    return sum(part['quantity'] for part in parts)
-
-
-def _realization_summary(rows, currency):
-    result = {'observed_unit_rates': {}}
-    for leg, quantity_key in (('delivery', 'observed_delivery_units'), ('return', 'observed_return_units_signed')):
-        field = leg + '_commission'
-        identities = [(row['sku'],row['posting_number']) for row in rows if row[field] is not None]
-        parts = [row[field] for row in rows if row[field] is not None]
-        issues = []
-        if currency is None:
-            issues.append('missing_report_currency')
-        if any(posting is None for _,posting in identities) or len(identities) != len(set(identities)):
-            issues.append('missing_or_repeated_posting_for_sku')
-        result[leg + '_rows'] = len(parts)
-        result[quantity_key] = _reported_quantity(parts)
-        result['observed_unit_rates'][leg] = {
-            name: ozon_details.observed_unit_rate([(part[name], part['quantity']) for part in parts], issues)
-            for name in ('total', 'standard_fee')}
-    return result
 
 
 def project_response(args, data, creds):
@@ -288,8 +263,8 @@ def project_response(args, data, creds):
                          'return_commission': _commission(row.get('return_commission'))})
     delivery_rows = [row['delivery_commission'] for row in selected if row['delivery_commission'] is not None]
     return_rows = [row['return_commission'] for row in selected if row['return_commission'] is not None]
-    delivered = _reported_quantity(delivery_rows)
-    returned = _reported_quantity(return_rows)
+    delivered = sum(row['quantity'] for row in delivery_rows) if delivery_rows else None
+    returned = sum(row['quantity'] for row in return_rows) if return_rows else None
     result = {'status':'partial','source': 'Ozon Seller API /v1/finance/realization/posting',
             'offer_id': args['offer_id'], 'year': args['year'], 'month': args['month'],
             'period_basis': 'realization_report_month', 'order_date_filter_used': False,
@@ -311,16 +286,23 @@ def project_response(args, data, creds):
     else:
         groups = {}
         for row in selected:
-            groups.setdefault(row['sku'], []).append(row)
+            group = groups.setdefault(row['sku'], {'sku': row['sku'], 'names': set(),
+                'matched_rows': 0, 'delivery_rows': 0, 'return_rows': 0,
+                'observed_delivery_units': None, 'observed_return_units_signed': None})
+            if row['name'] is not None: group['names'].add(row['name'])
+            group['matched_rows'] += 1
+            for field, count, total in (('delivery_commission', 'delivery_rows', 'observed_delivery_units'),
+                                        ('return_commission', 'return_rows', 'observed_return_units_signed')):
+                value = row[field]
+                if value is not None:
+                    group[count] += 1
+                    group[total] = (group[total] or 0) + value['quantity']
         result['by_sku'] = []
-        for sku in sorted(groups, key=int):
-            rows = groups[sku]
-            names = sorted({row['name'] for row in rows if row['name'] is not None})
-            result['by_sku'].append({'sku':sku,'names':names,'matched_rows':len(rows),
-                                     **_realization_summary(rows, currency)})
-        result['observed_article_unit_rates'] = _realization_summary(selected, currency)['observed_unit_rates']
-        result['summary_note'] = ('Ставки относятся к видимым строкам месячного отчёта и его валюте. '
-            'Для доставок и для возвратов отдельно показаны начисление (total) и базовое вознаграждение '
-            'Ozon (standard_fee) на единицу соответствующих строк. Делитель — сумма модулей количеств. '
-            'Знак суммы сохранён. Банковская выплата неизвестна. Исходные строки доступны в details.')
+        for sku in sorted(groups, key=lambda item: (item is None, int(item) if item else 0)):
+            group = groups[sku]
+            group['names'] = sorted(group['names'])
+            result['by_sku'].append(group)
+        result['summary_note'] = ('Группировка отражает только наблюдаемые количества; строки, '
+                                  'цены и суммы доступны в details. Финансовые показатели на единицу '
+                                  'не рассчитаны: полнота и правила сложения не подтверждены.')
     return result

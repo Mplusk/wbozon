@@ -29,11 +29,24 @@ from release_host import Host, atomic_json, command, digest
 def driver(cfg, name, sha, fault):
     host = Host(cfg)
     class Inject(Transaction):
+        def seal_market_decision(self, j, name):
+            super().seal_market_decision(j, name)
+            if fault == 'bootstrap-after-unhold':
+                os.kill(os.getpid(), signal.SIGKILL)
         def phase(self, journal, phase):
             super().phase(journal, phase)
             if phase == fault:
                 os.kill(os.getpid(), signal.SIGKILL)
         def complete(self, journal, release, manifest):
+            if fault == 'bootstrap-after-open':
+                host.barrier(journal['txn'], journal['mark'], False)
+                client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                with client.open('http://127.0.0.1:' + str(host.port) + '/market-cutover', timeout=8) as r:
+                    if r.read() != b'held':
+                        raise RuntimeError('bootstrap allowed an outbound request before commit')
+                (host.state / 'bootstrap-observed').touch()
+                (host.gate.parent / ('fail-' + release)).touch()
+                os.kill(os.getpid(), signal.SIGKILL)
             if fault == 'unhealthy-after-open':
                 host.barrier(journal['txn'], journal['mark'], False)
                 if host.cfg.get('qa_release_pair'):
@@ -52,7 +65,7 @@ def driver(cfg, name, sha, fault):
         Inject(host).activate(name, sha, lambda: None)
 
 
-def suite(python, gate_source, baseline_service=None, candidate_service=None):
+def suite(python, gate_source, baseline_service=None, candidate_service=None, market_bootstrap=False):
     tag = 'wbozon-qa-' + secrets.token_hex(3)
     unit, recover, holder = (tag + suffix + '.service' for suffix in ('', '-recover', '-holder'))
     run = str(secrets.randbelow(10**10) + 10**12)
@@ -119,17 +132,18 @@ def suite(python, gate_source, baseline_service=None, candidate_service=None):
                       release_group='wbozon-release', baseline=old, baseline_sha256=shas[old],
                       addresses=['127.0.0.1'], port=port, host='localhost', gate=str(data / '.ozon-finance-gates'),
                       databases=[str(data / n) for n in ('auth.sqlite', 'vault.sqlite')], dependencies=[],
-                      recovery_unit=recover, qa_release_pair=bool(baseline_service),
+                      recovery_unit=recover, qa_release_pair=bool(baseline_service) and not market_bootstrap,
                       worker_config_sha256=digest((root / 'current/service/gunicorn.conf.py').read_bytes()))
         unit_data = ('[Service]\nType=exec\nDynamicUser=yes\nUser=' + tag + '\nSupplementaryGroups=wbozon-release\n'
             'WorkingDirectory=' + str(root / 'current/service') + '\nStateDirectory=' + tag + '\nStateDirectoryMode=0700\n'
-            'Environment=PYTHONPATH=' + str(fixtures) + ' WBOZON_QA_RELEASE_PAIR=' + str(int(bool(baseline_service))) +
+            'Environment=PYTHONPATH=' + str(fixtures) + ' WBOZON_QA_RELEASE_PAIR=' + str(int(config['qa_release_pair'])) +
             ' PYTHONDONTWRITEBYTECODE=1 DATABASE_PATH=' + config['databases'][0] +
             ' VAULT_PATH=' + config['databases'][1] + '\nKillMode=mixed\nExecCondition=+/usr/bin/python3 -I ' +
             str(HERE / 'cd.py') + ' --config ' + str(cfg) + ' start-check\nExecStart=' + str(python) +
             ' -m gunicorn -w 2 --bind 127.0.0.1:' + str(port) + ' portal_fixture:application\n')
         files[0].write_text(unit_data)
-        files[1].write_text('[Service]\nType=oneshot\nExecStart=/usr/bin/python3 -I ' + str(HERE / 'cd.py') +
+        files[1].write_text('[Unit]\nConditionPathExists=' + str(state / 'pending.json') +
+                            '\n[Service]\nType=oneshot\nExecStart=/usr/bin/python3 -I ' + str(HERE / 'cd.py') +
                             ' --config ' + str(cfg) + ' recover\n')
         command(['/usr/bin/systemctl', 'daemon-reload'])
         config['unit_sha256'] = digest(command(['/usr/bin/systemctl', 'cat', '--no-pager', unit]).encode())
@@ -151,6 +165,20 @@ def suite(python, gate_source, baseline_service=None, candidate_service=None):
         def checked(name):
             return (not (state / 'pending.json').exists() and host.current() == name and
                     host.process(name) and request('/healthz') == b'{"status":"ok"}')
+        if market_bootstrap:
+            assert launch(new, 'bootstrap-after-open').wait(timeout=150) != 0
+            until(lambda: checked(old) and not (root / '.market-cutover-pending').exists(), 140)
+            assert (state / 'bootstrap-observed').exists()
+            assert not (root / '.market-cutover-pending').exists()
+            assert not (data / '.market-method-gates').exists()
+            (data / ('fail-' + new)).unlink()
+            assert launch(new, 'bootstrap-after-unhold').wait(timeout=150) != 0
+            until(lambda: checked(new), 140)
+            assert request('/market-cutover') == b'sent'
+            assert launch(old, 'none').wait(timeout=150) != 0 and checked(new)
+            print('PASS bootstrap fences vendor requests through post-open failure, recovers, then forbids downgrade',
+                  flush=True)
+            return
         (data / 'started').unlink()
         with concurrent.futures.ThreadPoolExecutor() as pool:
             response = pool.submit(request, '/hold')
@@ -231,7 +259,8 @@ if __name__ == '__main__':
         parser.add_argument('--gate-source', type=Path)
         parser.add_argument('--baseline-service', type=Path)
         parser.add_argument('--candidate-service', type=Path)
+        parser.add_argument('--market-bootstrap', action='store_true')
         args = parser.parse_args()
         if bool(args.baseline_service) != bool(args.candidate_service) or bool(args.gate_source) == bool(args.baseline_service):
             parser.error('provide both service trees or a single synthetic gate source')
-        suite(args.python, args.gate_source, args.baseline_service, args.candidate_service)
+        suite(args.python, args.gate_source, args.baseline_service, args.candidate_service, args.market_bootstrap)

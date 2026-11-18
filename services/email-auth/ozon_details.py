@@ -8,7 +8,6 @@ import re
 import urllib.request
 from datetime import date
 from decimal import Decimal, localcontext
-from fractions import Fraction
 
 
 OPERATIONS = frozenset(('ozon_product_info', 'ozon_accrual_types', 'ozon_posting_accruals'))
@@ -244,33 +243,6 @@ def _money(value, secret):
     return {'amount': amount, 'currency': currency}
 
 
-def observed_unit_rate(lines, issues=()):
-    """Signed amounts per reported unit within one monetary field and currency."""
-    problems = set(issues)
-    total, units, signs = Fraction(0), 0, set()
-    if not lines:
-        problems.add('no_reported_rows')
-    if not problems:
-        for amount, quantity in lines:
-            if amount is None:
-                problems.add('missing_amount')
-            else:
-                total += Fraction(amount)
-            if not quantity:
-                problems.add('missing_or_zero_quantity')
-            else:
-                signs.add(quantity > 0)
-                units += abs(quantity)
-    if len(signs) > 1:
-        problems.add('mixed_quantity_signs')
-    if problems:
-        return {'reported_quantity': None, 'amount_per_unit': None, 'issues': sorted(problems)}
-    ratio = total / units
-    signed_units = units if True in signs else -units
-    return {'reported_quantity': signed_units, 'amount_per_unit': {'numerator': str(ratio.numerator),
-            'denominator': str(ratio.denominator)}, 'issues': []}
-
-
 def label_posting_accruals(result, type_response):
     """Label provider rows and sum observed classified rows without claiming completeness."""
     if not isinstance(result,dict) or not isinstance(type_response,dict) or not isinstance(type_response.get('types'),list):
@@ -370,29 +342,15 @@ def _postings(args, data, secret, *, include_by_posting=True):
         if 'date_from' in args:
             projected = [item for item in projected if args['date_from'] <= item['accrual_date'] <= args['date_to']]
         out.append({'posting_number': number, 'accruals': projected})
-    def money_key(value):
-        if value is None:
-            return None
-        amount = value['amount']
-        return value['currency'], Decimal(amount) if amount is not None else None
-
     identical = []
-    repeated_types = set()
     for posting in out:
         signatures = {}
-        seen_rate_inputs = set()
         for index, accrual in enumerate(posting['accruals']):
-            rate_inputs = (accrual['accrual_date'], accrual['type_id'], accrual['sku'], accrual['quantity'],
-                           money_key(accrual['accrued']))
-            if rate_inputs in seen_rate_inputs:
-                repeated_types.add((accrual['sku'], accrual['type_id'], (accrual['accrued'] or {}).get('currency')))
-            seen_rate_inputs.add(rate_inputs)
-            signature = (rate_inputs, money_key(accrual['seller_price']))
+            signature = json.dumps(accrual, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
             signatures.setdefault(signature, []).append(index)
-        for indices in signatures.values():
-            if len(indices) > 1:
-                first = posting['accruals'][indices[0]]
-                identical.append({'posting_number': posting['posting_number'], 'row_indices': indices, 'sku': first['sku']})
+        identical.extend({'posting_number':posting['posting_number'], 'row_indices':indices,
+                          'sku':posting['accruals'][indices[0]]['sku']}
+                         for indices in signatures.values() if len(indices) > 1)
     result = {'requested_posting_numbers': sorted(requested), 'returned_posting_numbers': sorted(seen),
             'unreturned_posting_numbers': sorted(requested - seen),
             'period_basis': 'accrual_date', 'date_from': args.get('date_from'), 'date_to': args.get('date_to'),
@@ -409,7 +367,7 @@ def _postings(args, data, secret, *, include_by_posting=True):
     if args.get('view', 'details') == 'details':
         result['posting_accruals'] = out
     else:
-        groups, unit_lines = {}, {}
+        groups = {}
         selected_skus = {_id(value) for value in args['skus']} if 'skus' in args else None
         unattributed, other_sku = 0, 0
         unattributed_types = {accrual['type_id'] for row in out for accrual in row['accruals']
@@ -422,8 +380,6 @@ def _postings(args, data, secret, *, include_by_posting=True):
                     continue
                 money = accrual['accrued']
                 key = (accrual['sku'], accrual['type_id'], money['currency'] if money else None)
-                if include_by_posting:
-                    unit_lines.setdefault(key, []).append((money['amount'] if money else None, accrual['quantity']))
                 group = groups.setdefault(key, {'sku': key[0], 'type_id': key[1], 'currency': key[2],
                                                   'row_count': 0, 'amount': Decimal(0),
                                                   'known_amounts': 0, 'missing_amounts': 0,
@@ -440,7 +396,7 @@ def _postings(args, data, secret, *, include_by_posting=True):
                         group['amount'] += Decimal(money['amount'])
         breakdown = []
         uncertain_pairs = {(sku, type_id) for (sku, type_id, currency) in groups if currency is None}
-        for key, group in groups.items():
+        for group in groups.values():
             partial = format(group.pop('amount'), 'f')
             unknown_currency = (group['sku'], group['type_id']) in uncertain_pairs
             unknown_sku = group['sku'] is not None and group['type_id'] in unattributed_types
@@ -451,24 +407,11 @@ def _postings(args, data, secret, *, include_by_posting=True):
             group['unreturned_postings'] = missing_posting
             group['observed_row_sum'] = partial if group['known_amounts'] else None
             group['observed_sum_has_missing_or_unattributed_data'] = bool(incomplete)
-            if include_by_posting:
-                issues = []
-                if key[0] is None or unknown_sku:
-                    issues.append('unattributed_sku')
-                if unknown_currency:
-                    issues.append('unresolved_currency')
-                if missing_posting:
-                    issues.append('missing_requested_posting')
-                if key in repeated_types:
-                    issues.append('ambiguous_repeated_accrual')
-                group['observed_unit_rate'] = observed_unit_rate(unit_lines[key], issues)
             # No claim is made that the visible lines are unique or additive.
             group['financial_total'] = None
             breakdown.append(group)
         result['breakdown'] = breakdown
         result['summary_scope'] = 'requested_postings_only'
-        if include_by_posting:
-            result['unit_rate_basis'] = 'signed_accrued_over_absolute_units_of_same_sku_type_currency'
         if selected_skus is not None:
             result['same_posting_equal_projection_groups']=[group for group in identical
                                                            if group.get('sku') in selected_skus]

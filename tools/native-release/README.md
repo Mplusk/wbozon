@@ -70,6 +70,32 @@ approved pair before promoting the tested changes to `main`. The production job
 verifies its own main-branch artifact and public readiness. The one-time adoption
 installer applies to new hosts.
 
+## Marketplace cooldown migration
+
+The first push uses the legacy catalogue and the shared HTTP guard from
+`824a464`. The controller accepts only the pinned inventory of the running
+`c8b2257` service as its starting point. It requires an empty reports/cooldown
+store for this one-time adoption. Before starting the bridge it creates a
+root-owned `.market-cutover-pending` file. All its seller HTTP routes check this
+file, including browser checks and the secondary currency lookup. After public
+readiness the controller journals its final release choice, removes the hold,
+then clears the transaction. The recovery timer always sees a pending journal
+until outbound reads are enabled. After the final choice it can recover only
+the recorded release, including if the controller dies just after removing the hold.
+
+The second push activates the reports inventory from `6c4b21b`. Its automatic
+rollback target is the verified bridge. The two releases share per-method locks,
+boot identity, elapsed-time deadlines and unresolved outcomes. Both directions
+are tested with separate provider workers. A direct downgrade to the pre-guard
+service is refused. Existing cache keys and private report bindings retain
+their credential scope. Rotating credentials leaves an unresolved creation
+blocked until its outcome is reconciled under the original binding.
+
+The independently installed controller change for this migration is `cd.py`.
+Verify the candidate on the non-production branch first. Install its reviewed
+Git bytes atomically under `deploy.lock` while no transaction is pending. The
+two main pushes then use the normal artifact verification and systemd workflow.
+
 ## Historical manual controller
 
 The remaining notes describe the earlier manual prototype and staging design.

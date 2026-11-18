@@ -29,9 +29,7 @@ class SettingsUXTests(unittest.TestCase):
         page=self.request()['body']
         for text in ('lang="ru"','name="viewport"','Client ID','API-ключ Ozon','API-токен Wildberries','for="ozon-client_id"','id="ozon-client_id"'):
             self.assertIn(text,page)
-        self.assertEqual(page.count('type="password"'),5)
-        for field in ('client_id','client_secret'):
-            self.assertIn('for="performance-'+field+'"',page)
+        self.assertEqual(page.count('type="password"'),3)
 
     def test_recent_and_stale_help(self):
         self.assertIn('первых 5 минут',self.request()['body'])
