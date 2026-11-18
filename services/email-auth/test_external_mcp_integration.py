@@ -130,7 +130,7 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
                                  'ozon_unallocated_accruals','ozon_fbo_supply_orders','ozon_fbo_supply_details','ozon_fbo_supply_items','ozon_fbo_volume_allocation',
                                  'ozon_posting_accruals','ozon_prices','ozon_orders_analytics',
                                  'ozon_posting_status','ozon_posting_candidates','wb_products','wb_prices','wb_commissions',
-                                 'wb_box_tariffs','wb_sales_summary'})
+                                 'wb_box_tariffs','wb_sales_summary'} | set(portal.market_specs.TOOLS))
 
     def test_finance_429_propagates_delay_and_prevents_early_mcp_or_api_retry(self):
         token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',self.create()['body']).group(1)

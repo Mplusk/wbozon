@@ -208,7 +208,8 @@ class PortalRuntimeContractTests(unittest.TestCase):
         self.assertIn('portal.py smoke.py candidate.py',dockerfile)
         ignore=(root/'.dockerignore').read_text()
         for name in ('portal.py','smoke.py','candidate.py','ozon_mcp.py','ozon_details.py','ozon_article_summary.py','ozon_realization.py','ozon_accrual_day.py','ozon_return_events.py','ozon_posting_status.py','finance_gate.py','wb_mcp.py','external_keys.py','external_mcp.py','oauth_mcp.py',
-                     'ozon_unallocated.py','ozon_fbo.py','ozon_supply_allocation.py'):
+                     'ozon_unallocated.py','ozon_fbo.py','ozon_supply_allocation.py','market_specs.py','market_transport.py',
+                     'expansion_gateway.py','ozon_expansion.py','ozon_performance.py','wb_expansion.py','supply_plan.py'):
             self.assertIn('!'+name,ignore)
             self.assertIn(name,dockerfile)
         source=(root/'deploy/release.py').read_text()

@@ -11,6 +11,7 @@ import re
 
 import ozon_mcp
 import wb_mcp
+import market_specs
 
 SUPPORTED = ('2025-03-26', '2025-06-18', '2025-11-25')
 LATEST = SUPPORTED[-1]
@@ -116,6 +117,7 @@ TOOLS = [
           {'date_from':{'type':'string','format':'date'}, 'date_to':{'type':'string','format':'date'},
            'limit':_integer(1,100), 'offset':_integer(0,1000000)}, ('date_from','date_to')),
 ]
+TOOLS.extend(_tool(name, contract[0], *market_specs.schema(name)) for name, contract in market_specs.TOOLS.items())
 TOOL_NAMES = frozenset(tool['name'] for tool in TOOLS)
 
 _ERRORS = {
@@ -271,7 +273,8 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
         if not isinstance(name,str) or name not in TOOL_NAMES:
             return rpc_error(-32602,'Unknown tool',ident)
         try:
-            if name in ozon_mcp.OPERATIONS: ozon_mcp.validate_args(name,args)
+            if name in market_specs.TOOLS: market_specs.validate(name,args)
+            elif name in ozon_mcp.OPERATIONS: ozon_mcp.validate_args(name,args)
             else:
                 wb_mcp.validate_args(name,args)
                 if name == 'wb_prices' and 'nm_id' in args: raise ValueError()
@@ -284,6 +287,8 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
                 text = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(',',':'))
                 result = (_tool_error('response_too_large') if len(text.encode('utf-8')) > MAX_OUTPUT
                           else {'content':[{'type':'text','text':text}]})
+                if name in market_specs.TOOLS and data.get('status')=='provider_access_denied':
+                    result['isError']=True
             except MCPToolError as exc:
                 result = _tool_error(exc.code,exc.retry_after_seconds,exc.reason)
             except Exception:
