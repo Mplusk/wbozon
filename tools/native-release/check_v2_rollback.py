@@ -40,6 +40,7 @@ BRIDGE_INVENTORY = '4fbd8858010f37f39b7676c4b34fede5526aa56623569bbc231e77524edc
 SERVER_INVENTORY = '88b7d5dde100b635d7ac881e1f6999fc9d0626fff5c1ea9e722e31ec58aa9dbc'
 V2_INVENTORY = 'efce8b3fceb171b0ce4025e08708389623993046cb2962d26fbee43063af4187'
 DEPLOYED_REPORT_INVENTORY = '0f009122b40353df9f0a65c8cd8b01b3efaf39703eaa5281349bd8c8183aae81'
+DEPLOYED_REPORT_FIX_INVENTORY = '85d5b8a840f480678fe83fbf3bbd301a8db75d0910b8dfb39dfdce5fbe63d41f'
 NEW_TOOLS = frozenset((
     'article_map', 'unit_economics', 'sales_drop_check', 'mcp_health',
     'ozon_stocks_analytics', 'ozon_turnover', 'ozon_delivery_time',
@@ -98,7 +99,8 @@ def assert_next_sources(deployed, candidate, candidate_ref, root, expected_paren
     return old_hash, new_hash
 
 
-def assert_policy(old, new, root, new_hash, next_service=None, next_hash=None, latest_service=None, latest_hash=None):
+def assert_policy(old, new, root, new_hash, next_service=None, next_hash=None, latest_service=None, latest_hash=None,
+                  successors=()):
     # Import the policy which is to be shipped, not an older surrogate.
     import cd
     if (cd.MARKET_BASE, cd.MARKET_BRIDGE, cd.MARKET_REPORTS) != (
@@ -171,6 +173,30 @@ def assert_policy(old, new, root, new_hash, next_service=None, next_hash=None, l
                     except cd.ReleaseError:
                         continue
                     raise AssertionError('unreviewed latest pair admitted: %s -> %s' % (left.name, right.name))
+    if successors:
+        if tuple(digest for _, digest in successors) != cd.MARKET_REPORT_SUCCESSORS:
+            raise AssertionError('the packaged successors must match the complete reviewed inventory chain')
+        prior = latest
+        excluded = [base, bridge, previous, candidate, following, hybrid, altered, changed]
+        for index, (path, _) in enumerate(successors):
+            release = root / ('successor-' + str(index))
+            shutil.copytree(path, release / 'service')
+            mutated = root / ('hybrid-successor-' + str(index))
+            shutil.copytree(release, mutated)
+            with (mutated / 'service' / 'portal.py').open('ab') as stream:
+                stream.write(b'\n# synthetic altered successor\n')
+            for left, right in ((prior, release), (release, prior), (release, release)):
+                if cd.market_transition(left, right) != 'preserve_blocked_finance':
+                    raise AssertionError('reviewed successor pair was rejected')
+            for other in [*excluded, mutated]:
+                for left, right in ((other, release), (release, other)):
+                    try:
+                        cd.market_transition(left, right)
+                    except cd.ReleaseError:
+                        continue
+                    raise AssertionError('unreviewed successor pair admitted: %s -> %s' % (left.name, right.name))
+            excluded.extend((prior, mutated))
+            prior = release
 
 
 def network_fence():
@@ -738,12 +764,15 @@ def main():
     parser.add_argument('--next-commit')
     parser.add_argument('--latest-service', type=Path)
     parser.add_argument('--latest-commit')
+    parser.add_argument('--successor', nargs=2, action='append', default=[], metavar=('COMMIT', 'SERVICE'))
     parser.add_argument('--python', required=True, type=Path)
     args = parser.parse_args()
     if bool(args.next_service) != bool(args.next_commit):
         parser.error('--next-service and --next-commit must be supplied together')
     if bool(args.latest_service) != bool(args.latest_commit) or (args.latest_service and not args.next_service):
         parser.error('the latest service requires its commit and a verified preceding service')
+    if args.successor and not args.latest_service:
+        parser.error('successor services require the reviewed predecessor')
     old = args.current_service.resolve(strict=True)
     new = args.candidate_service.resolve(strict=True)
     following = args.next_service.resolve(strict=True) if args.next_service else None
@@ -760,13 +789,24 @@ def main():
         latest_hash = None
         if latest is not None:
             _, latest_hash = assert_next_sources(following, latest, args.latest_commit, root / 'latest-source', DEPLOYED_REPORT_INVENTORY)
-        assert_policy(old, new, root, new_hash, following, next_hash, latest, latest_hash)
+        successors = []
+        prior, prior_hash = latest, DEPLOYED_REPORT_FIX_INVENTORY
+        for index, (ref, service) in enumerate(args.successor):
+            path = Path(service).resolve(strict=True)
+            _, digest = assert_next_sources(prior, path, ref, root / ('successor-source-' + str(index)), prior_hash)
+            successors.append((path, digest))
+            prior, prior_hash = path, digest
+        assert_policy(old, new, root, new_hash, following, next_hash, latest, latest_hash, successors)
         print('PASS pinned service inventories and exact allowed release pairs', flush=True)
         pairs = [('historic C to D', old, new, False)]
         if following is not None:
             pairs.append(('deployed D to next E', new, following, True))
         if latest is not None:
             pairs.append(('deployed E to report fix F', following, latest, True))
+        prior = latest
+        for path, digest in successors:
+            pairs.append(('reviewed successor ' + digest[:12], prior, path, True))
+            prior = path
         for index, (label, source, target, previous_is_v2) in enumerate(pairs):
             pair_root = root / ('pair-' + str(index))
             pair_root.mkdir(mode=0o700)
@@ -782,6 +822,8 @@ def main():
             raise AssertionError('the next tested service changed during the check')
         if latest is not None and service_digest(latest) != latest_hash:
             raise AssertionError('the latest tested service changed during the check')
+        if any(service_digest(path) != digest for path, digest in successors):
+            raise AssertionError('a tested successor changed during the check')
     print('PASS v2 rollback offline acceptance', flush=True)
 
 

@@ -149,7 +149,7 @@ jobs:
     needs: [email-auth, marketplace-egress]
     runs-on: ubuntu-24.04
     # Retain historical systemd acceptance and add separate D/E and E/E checks.
-    timeout-minutes: 35
+    timeout-minutes: 65
     outputs:
       artifact_id: ${{ steps.native_artifact.outputs.artifact-id }}
       artifact_attempt: ${{ github.run_attempt }}
@@ -281,15 +281,18 @@ jobs:
           previous="$RUNNER_TEMP/market-v2-parent/service"
           deployed="$RUNNER_TEMP/market-v2-deployed/service"
           reports="$RUNNER_TEMP/market-v2-reports/service"
-          mkdir -p "$previous" "$deployed" "$reports"
+          regional="$RUNNER_TEMP/market-v2-regional/service"
+          mkdir -p "$previous" "$deployed" "$reports" "$regional"
           git archive 08c6f9b3778a4ea039d8a0093623c815cc95ecc4:services/email-auth | tar -x -C "$previous"
           git archive 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09:services/email-auth | tar -x -C "$deployed"
           git archive e3c2823a8f6b4714eb53ac67f4f5d1dbb04dea21:services/email-auth | tar -x -C "$reports"
+          git archive a51e1411d9b60bbdaa792e7d095e95d41ae8f2e1:services/email-auth | tar -x -C "$regional"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09 \
             --next-service "$reports" --next-commit e3c2823a8f6b4714eb53ac67f4f5d1dbb04dea21 \
-            --latest-service "$packaged" --latest-commit "$GITHUB_SHA" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
+            --latest-service "$regional" --latest-commit a51e1411d9b60bbdaa792e7d095e95d41ae8f2e1 \
+            --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports --interrupted-finance \
             --python /opt/staging-account-acceptance/venv/bin/python --baseline-service "$previous" --candidate-service "$deployed"
       - name: Verify next release rollback and same-release recovery under systemd
@@ -298,15 +301,18 @@ jobs:
           set -euo pipefail
           deployed="$RUNNER_TEMP/market-v2-deployed/service"
           reports="$RUNNER_TEMP/market-v2-reports/service"
+          regional="$RUNNER_TEMP/market-v2-regional/service"
           packaged="$RUNNER_TEMP/native-candidate/service"
-          sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports --interrupted-finance \
-            --python /opt/staging-account-acceptance/venv/bin/python --baseline-service "$deployed" --candidate-service "$reports"
-          sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports --interrupted-finance \
-            --python /opt/staging-account-acceptance/venv/bin/python --baseline-service "$reports" --candidate-service "$reports"
-          sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports --interrupted-finance \
-            --python /opt/staging-account-acceptance/venv/bin/python --baseline-service "$reports" --candidate-service "$packaged"
-          sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports --interrupted-finance \
-            --python /opt/staging-account-acceptance/venv/bin/python --baseline-service "$packaged" --candidate-service "$packaged"
+          check_pair() {
+            sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports --interrupted-finance \
+              --python /opt/staging-account-acceptance/venv/bin/python --baseline-service "$1" --candidate-service "$2"
+          }
+          check_pair "$deployed" "$reports"
+          check_pair "$reports" "$reports"
+          check_pair "$reports" "$regional"
+          check_pair "$regional" "$regional"
+          check_pair "$regional" "$packaged"
+          check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash
         run: |
