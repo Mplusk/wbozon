@@ -30,7 +30,7 @@ MARKET_V2_NEXT = '0f009122b40353df9f0a65c8cd8b01b3efaf39703eaa5281349bd8c8183aae
 # Verified regional reports, cancellation coverage and seller rating, service tree 95a19af.
 MARKET_V2_REPORT_FIX = '85d5b8a840f480678fe83fbf3bbd301a8db75d0910b8dfb39dfdce5fbe63d41f'
 # SHA-256 inventories of subsequent reviewed services, in deployment order.
-MARKET_REPORT_SUCCESSORS = ('a265a3ceb85864e4053de255695bcc5656e14e0712c2b87c445e256d3b5e7c25',)
+MARKET_REPORT_SUCCESSORS = ('ea75c8c64e6a3295f2c3e4c8e483b15e7194e89bb300587ff9b936bf04e18dba',)
 
 
 def present(path):
