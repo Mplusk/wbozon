@@ -1,6 +1,7 @@
 """Track public API schemas, retaining a fingerprint and last successful fetch."""
 
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -50,6 +51,11 @@ def main():
                 urllib.request.Request(url, headers=headers), timeout=18
             ) as response:
                 raw = response.read(20 * 1024 * 1024 + 1)
+                length = response.headers.get("Content-Length")
+                if length is None and not getattr(response, "chunked", False):
+                    raise ValueError("Cannot confirm completeness of the public schema")
+                if length is not None and (not length.isdecimal() or len(raw) != int(length)):
+                    raise ValueError("Truncated public schema")
                 if len(raw) > 20 * 1024 * 1024 or not (
                     b'"openapi"' in raw[:100000] or b"openapi:" in raw[:1000]
                 ):
@@ -64,7 +70,7 @@ def main():
         except urllib.error.HTTPError as exc:
             status = "unchanged" if exc.code == 304 and prev.get("digest") else "http_" + str(exc.code)
             exc.close()
-        except (OSError, ValueError):
+        except (OSError, ValueError, http.client.HTTPException):
             status = "unavailable"
         prev.update(source=url, checked_at=stamp, status=status)
         if status in ("available", "unchanged"):
