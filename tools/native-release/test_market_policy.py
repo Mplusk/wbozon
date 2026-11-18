@@ -61,7 +61,7 @@ class CutoverRecovery(unittest.TestCase):
         with (patch.object(txn, 'gate_lock', return_value=nullcontext(guard)) as lock,
               patch.object(txn, 'ready') as ready, patch.object(txn, 'complete') as complete):
             txn.reconcile(journal, False)
-        lock.assert_called_once_with(recovery=True)
+        lock.assert_called_once_with(allow_uncertain=True)
         ready.assert_called_once_with(journal, 'old', guard)
         complete.assert_called_once_with(journal, 'old', 'old-sha')
         host.stop.assert_not_called()

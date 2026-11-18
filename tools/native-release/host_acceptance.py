@@ -79,7 +79,8 @@ def driver(cfg, name, sha, fault):
         Inject(host).activate(name, sha, lambda: None)
 
 
-def suite(python, gate_source, baseline_service=None, candidate_service=None, market_bootstrap=False, market_reports=False):
+def suite(python, gate_source, baseline_service=None, candidate_service=None, market_bootstrap=False,
+          market_reports=False, interrupted_finance=False):
     tag = 'wbozon-qa-' + secrets.token_hex(3)
     unit, recover, holder = (tag + suffix + '.service' for suffix in ('', '-recover', '-holder'))
     run = str(secrets.randbelow(10**10) + 10**12)
@@ -195,13 +196,29 @@ def suite(python, gate_source, baseline_service=None, candidate_service=None, ma
                   flush=True)
             return
         if market_reports:
+            def finance_snapshot():
+                key = hashlib.sha256(b'7654321').hexdigest()
+                state = (host.gate / (key + '.json')).read_bytes()
+                epoch = (data / (host.gate.name + '.epoch-' + key + '.json')).read_bytes()
+                assert json.loads(state)['status'] == 'in_flight'
+                assert json.loads(state)['generation'] == json.loads(epoch)['generation']
+                return state, epoch
+            if interrupted_finance:
+                assert request('/interrupt-finance') == b'held'
+                snapshot = finance_snapshot()
             assert launch(new, 'reports-after-open').wait(timeout=150) != 0
             until(lambda: checked(old), 140)
+            if interrupted_finance:
+                assert request('/check-interrupted-finance') == b'held' and finance_snapshot() == snapshot
             for provider in ('ozon', 'wb'):
                 assert request('/market-limit-' + provider) == b'held'
                 assert (data / ('attempts-' + provider)).read_text().splitlines() == ['attempt']
             (data / ('fail-' + new)).unlink()
             assert launch(new, 'none').wait(timeout=150) == 0 and checked(new)
+            if interrupted_finance:
+                assert request('/check-interrupted-finance') == b'held' and finance_snapshot() == snapshot
+                print('PASS interrupted Ozon finance read stays blocked with identical state and epoch through '
+                      'activation, rollback and redeployment', flush=True)
             for provider in ('ozon', 'wb'):
                 assert request('/market-limit-' + provider) == b'held'
                 assert (data / ('attempts-' + provider)).read_text().splitlines() == ['attempt']
@@ -289,8 +306,11 @@ if __name__ == '__main__':
         parser.add_argument('--candidate-service', type=Path)
         parser.add_argument('--market-bootstrap', action='store_true')
         parser.add_argument('--market-reports', action='store_true')
+        parser.add_argument('--interrupted-finance', action='store_true')
         args = parser.parse_args()
         if bool(args.baseline_service) != bool(args.candidate_service) or bool(args.gate_source) == bool(args.baseline_service):
             parser.error('provide both service trees or a single synthetic gate source')
+        if args.interrupted_finance and not args.market_reports:
+            parser.error('--interrupted-finance requires --market-reports')
         suite(args.python, args.gate_source, args.baseline_service, args.candidate_service,
-              args.market_bootstrap, args.market_reports)
+              args.market_bootstrap, args.market_reports, args.interrupted_finance)

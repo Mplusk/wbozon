@@ -94,8 +94,9 @@ def assert_policy(old, new, root, new_hash):
     if service_digest(base / 'service') != BASE_INVENTORY or service_digest(bridge / 'service') != BRIDGE_INVENTORY:
         raise AssertionError('historical source archive inventory mismatch')
     for first, second, expected in ((base, bridge, 'bootstrap'), (bridge, previous, 'shared'),
-                                    (previous, bridge, 'shared'), (previous, candidate, 'shared'),
-                                    (candidate, previous, 'shared')):
+                                    (previous, bridge, 'shared'), (previous, candidate, 'preserve_blocked_finance'),
+                                    (candidate, previous, 'preserve_blocked_finance'),
+                                    (candidate, candidate, 'preserve_blocked_finance')):
         if cd.market_transition(first, second) != expected:
             raise AssertionError('reviewed transition was not admitted')
 

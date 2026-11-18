@@ -47,7 +47,11 @@ def market_transition(old, new):
     first, second = market_inventory(old), market_inventory(new)
     if (first, second) == (MARKET_BASE, MARKET_BRIDGE):
         return 'bootstrap'
-    if {first, second} in ({MARKET_BRIDGE, MARKET_REPORTS},{MARKET_REPORTS, MARKET_V2}):
+    if (first, second) == (MARKET_V2, MARKET_V2) or {first, second} == {MARKET_REPORTS, MARKET_V2}:
+        # These exact service trees enforce the same on-disk cooldowns even
+        # when a previous provider request ended without a known result.
+        return 'preserve_blocked_finance'
+    if {first, second} == {MARKET_BRIDGE, MARKET_REPORTS}:
         return 'shared'
     if first != second and {first, second} & {MARKET_BRIDGE, MARKET_REPORTS, MARKET_V2}:
         raise ReleaseError('unreviewed marketplace cooldown transition')
@@ -215,8 +219,8 @@ class Transaction:
         discard(self.pending)
         print('Serving verified release', name, flush=True)
 
-    def gate_lock(self, recovery=False):
-        return FinanceGuard(self.host.gate, self.host.gate.parent.stat().st_uid, 4, allow_uncertain=recovery)
+    def gate_lock(self, *, allow_uncertain=False):
+        return FinanceGuard(self.host.gate, self.host.gate.parent.stat().st_uid, 4, allow_uncertain=allow_uncertain)
 
     def activate(self, name, sha, check_main):
         h = self.host
@@ -250,7 +254,7 @@ class Transaction:
             atomic_json(self.market_hold, {field: j[field] for field in ('txn', 'old', 'new')})
         h.barrier(j['txn'], j['mark'], True)
         pid, generation, cg = self.drain(old, j['mark'], require_healthy=True)
-        with self.gate_lock() as guard:
+        with self.gate_lock(allow_uncertain=transition == 'preserve_blocked_finance') as guard:
             guard.verify('/proc/' + str(pid) + '/root', '/proc/' + str(pid) + '/ns/time')
             if h.sockets() or not h.workers_idle(pid, cg) or h.process(old) != (pid, generation, cg):
                 raise ReleaseError('portal changed during drain')
@@ -324,7 +328,7 @@ class Transaction:
                     # Recovery itself may have been interrupted while the old
                     # workers were booting. Verify the existing process before
                     # considering another stop/start of the very same release.
-                    with self.gate_lock(recovery=True) as guard:
+                    with self.gate_lock(allow_uncertain=True) as guard:
                         self.ready(j, name, guard)
                 else:
                     h.health(j['mark'])
@@ -337,7 +341,7 @@ class Transaction:
         h.holder()
         if props['ActiveState'] == 'active':
             self.drain(h.current(), j['mark'])
-        with self.gate_lock(recovery=True) as guard:
+        with self.gate_lock(allow_uncertain=True) as guard:
             if props['ActiveState'] == 'active':
                 p, _, _ = self.drain(h.current(), j['mark'])
                 guard.verify('/proc/' + str(p) + '/root', '/proc/' + str(p) + '/ns/time')

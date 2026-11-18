@@ -283,7 +283,7 @@ jobs:
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$packaged" --candidate-commit "$GITHUB_SHA" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
-          sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports \
+          sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports --interrupted-finance \
             --python /opt/staging-account-acceptance/venv/bin/python --baseline-service "$previous" --candidate-service "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

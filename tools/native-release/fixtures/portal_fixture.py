@@ -31,6 +31,21 @@ def provider():
 
 def application(env, start):
     route = env['PATH_INFO']
+    if route in ('/interrupt-finance', '/check-interrupted-finance'):
+        if route == '/interrupt-finance':
+            child = subprocess.run([sys.executable, __file__, '--interrupt-finance'])
+            assert child.returncode == 73
+        def unexpected_request():
+            raise AssertionError('replayed an interrupted finance request')
+        try:
+            finance_gate.run(str(data / '.ozon-finance-gates'), '7654321', unexpected_request)
+        except finance_gate.GateError as exc:
+            if exc.reason != 'retry_time_unknown':
+                raise
+        else:
+            raise AssertionError('missing interrupted finance gate')
+        start('200 OK', [])
+        return [b'held']
     if route in ('/market-limit-wb', '/market-limit-ozon'):
         import importlib.util
         import market_cooldown
@@ -111,3 +126,7 @@ def application(env, start):
 
 if __name__ == '__main__' and sys.argv[1] == '--provider-worker':
     provider()
+elif __name__ == '__main__' and sys.argv[1] == '--interrupt-finance':
+    def interrupted_request():
+        os._exit(73)
+    finance_gate.run(str(data / '.ozon-finance-gates'), '7654321', interrupted_request)
