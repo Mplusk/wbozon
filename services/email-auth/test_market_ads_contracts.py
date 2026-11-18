@@ -91,6 +91,7 @@ class PerformanceFixture:
 class OzonPerformanceContracts(unittest.TestCase):
     def wire_fixture(self):
         wire = market_transport.Wire.__new__(market_transport.Wire)
+        wire.fetch_times = []
         wire.gate_dir = Path(self.enterContext(TemporaryDirectory())) / 'gate'
         return wire
 
@@ -269,8 +270,9 @@ class OzonPerformanceContracts(unittest.TestCase):
         wire.provider, wire.creds, wire.scope = 'performance', CREDS, 'synthetic-scope'
         wire.deadline, wire.token, wire.opener = time.monotonic() + 30, None, Opener()
         wire.db = lambda: db
+        wire._http_cache = lambda _key, _binary: None
         wire.cached = lambda _key: None
-        wire.store = lambda *_args: None
+        wire.store = lambda *_args, **_kwargs: None
         wire._admit = lambda *_args: None
         with self.assertRaises(ValueError):
             ozon_performance.read(ARGS, wire, CREDS)
@@ -299,8 +301,9 @@ class OzonPerformanceContracts(unittest.TestCase):
         wire.provider, wire.creds, wire.scope = 'performance', CREDS, 'synthetic-scope'
         wire.deadline, wire.token, wire.opener = time.monotonic() + 30, TOKEN, Opener()
         wire.db = lambda: db
+        wire._http_cache = lambda _key, _binary: None
         wire.cached = lambda _key: None
-        wire.store = lambda *_args: None
+        wire.store = lambda *_args, **_kwargs: None
         wire._admit = lambda *_args: None
         body = {'campaigns': ['12'], 'dateFrom': '2026-10-01',
                 'dateTo': '2026-10-03', 'groupBy': 'DATE'}
@@ -338,8 +341,9 @@ class OzonPerformanceContracts(unittest.TestCase):
         wire.provider, wire.creds, wire.scope = 'performance', CREDS, 'synthetic-scope'
         wire.deadline, wire.token, wire.opener = time.monotonic() + 30, TOKEN, Opener()
         wire.db = lambda: db
+        wire._http_cache = lambda _key, _binary: None
         wire.cached = lambda _key: None
-        wire.store = lambda *_args: None
+        wire.store = lambda *_args, **_kwargs: None
         wire._admit = lambda *_args: None
         body = {'campaigns': ['12'], 'dateFrom': '2026-10-01',
                 'dateTo': '2026-10-03', 'groupBy': 'DATE'}
@@ -373,8 +377,9 @@ class OzonPerformanceContracts(unittest.TestCase):
                 wire.provider, wire.creds, wire.scope = 'performance', CREDS, 'synthetic-scope'
                 wire.deadline, wire.token, wire.opener = time.monotonic() + 30, TOKEN, Opener(code)
                 wire.db = lambda: db
+                wire._http_cache = lambda _key, _binary: None
                 wire.cached = lambda _key: None
-                wire.store = lambda *_args: None
+                wire.store = lambda *_args, **_kwargs: None
                 wire._admit = lambda *_args: None
                 with self.assertRaises(urllib.error.HTTPError):
                     wire('POST', BASE + '/statistics', body=body, ttl=3600, job=True)
@@ -402,6 +407,7 @@ class OzonPerformanceContracts(unittest.TestCase):
         self.addCleanup(db.close)
         db.execute('CREATE TABLE jobs(k TEXT PRIMARY KEY, binding TEXT NOT NULL, expiry REAL NOT NULL)')
         db.execute('CREATE TABLE cache(k TEXT PRIMARY KEY, expiry REAL NOT NULL, blob BLOB NOT NULL)')
+        db.execute('CREATE TABLE cache_observations(k TEXT PRIMARY KEY, expiry REAL, fetched REAL, digest BLOB)')
         wire = self.wire_fixture()
         wire.provider, wire.creds, wire.scope = 'performance', CREDS, 'synthetic-scope'
         wire.deadline, wire.token, wire.opener = time.monotonic() + 30, None, Opener()
@@ -425,6 +431,7 @@ class OzonPerformanceContracts(unittest.TestCase):
         self.addCleanup(db.close)
         db.execute('CREATE TABLE jobs(k TEXT PRIMARY KEY, binding TEXT NOT NULL, expiry REAL NOT NULL)')
         db.execute('CREATE TABLE cache(k TEXT PRIMARY KEY, expiry REAL NOT NULL, blob BLOB NOT NULL)')
+        db.execute('CREATE TABLE cache_observations(k TEXT PRIMARY KEY, expiry REAL, fetched REAL, digest BLOB)')
         wire = self.wire_fixture()
         wire.scope, wire.db = 'synthetic-scope', lambda: db
         endpoint = BASE + '/statistics'

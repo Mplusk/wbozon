@@ -56,6 +56,23 @@ FIELDS = {
     "report": choices("auto", "campaigns", "statistics", "spend_ledger"),
     "cluster_type": choices("CLUSTER_TYPE_OZON", "CLUSTER_TYPE_CIS"),
     "horizon_days": integer(1, 365),
+    "lead_time_days": integer(0, 365),
+    "safety_stock_percent": integer(0, 500),
+    "bulk_order_min_units": integer(2, 100000),
+    "month": {"type":"string", "pattern":r"^[0-9]{4}-(?:0[1-9]|1[0-2])$", "maxLength":7},
+    "cost_per_unit": {"type":"string", "pattern":r"^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,6})?$", "maxLength":19},
+    "currency": {"type":"string", "pattern":r"^[A-Z]{3}$", "maxLength":3},
+    "previous_from": DATE, "previous_to": DATE,
+    "query": TEXT, "nm_ids": array(ID, 50), "vendor_codes": array(TEXT, 50),
+    "group_by": choices("day", "week"),
+    "retention_type": choices("all", "penalty", "deduction"),
+    "return_status": choices("archive", "active"),
+    "snapshot_time": TEXT,
+    "document": choices("spend", "payments", "documents"),
+    "search_limit": choices("openCard", "addToCart", "openToCart", "orders", "cartToOrder"),
+    "tool_name": {"type":"string", "maxLength":80},
+    "probe_arguments":{"type":"object","additionalProperties":True},
+    "archive": {"type":"boolean"},
     "mapping": {
         "type": "object",
         "properties": {"ozon_offer_id": TEXT, "wb_vendor_code": TEXT, "wb_nm_id": ID},
@@ -68,7 +85,7 @@ FIELDS = {
 TOOLS = {
     "wb_supplies": (
         "Поставки FBW за период по дате создания. Склады, даты, статус и коэффициент из деталей.",
-        "date_from date_to status_ids warehouse_id limit offset",
+        "date_from date_to status_ids warehouse_id limit offset article",
         "date_from date_to",
     ),
     "wb_supply_goods": (
@@ -83,12 +100,12 @@ TOOLS = {
     ),
     "wb_orders": (
         "Заказы по дате, складу и региону. Статистика WB за последние 90 дней, с курсором по изменениям.",
-        "date_from date_to article nm_id cursor limit offset",
+        "date_from date_to article nm_id cursor limit offset archive",
         "date_from date_to",
     ),
     "wb_sales": (
         "События продаж и возвратов WB за период, по дням и складам.",
-        "date_from date_to article nm_id cursor limit offset",
+        "date_from date_to article nm_id cursor limit offset archive",
         "date_from date_to",
     ),
     "wb_acceptance_slots": (
@@ -98,7 +115,7 @@ TOOLS = {
     ),
     "ozon_supply_orders": (
         "Заявки FBO с деталями, складами и интервалами. Период относится к началу таймслота.",
-        "date_from date_to states limit cursor",
+        "date_from date_to states limit cursor offset article",
         "",
     ),
     "ozon_supply_items": (
@@ -118,12 +135,12 @@ TOOLS = {
     ),
     "ozon_sku_daily": (
         "Ежедневные заказанные единицы и сумма по SKU. include_funnel добавляет просмотры и корзину при наличии доступа.",
-        "date_from date_to sku article offset limit include_funnel",
+        "date_from date_to sku article offset limit include_funnel archive",
         "date_from date_to",
     ),
     "wb_finance_report": (
         "Детализация реализации WB с расходами и показателями на проданную единицу по артикулу и валюте. Категория Финансы.",
-        "date_from date_to article nm_id cursor limit",
+        "date_from date_to article nm_id cursor limit offset archive",
         "date_from date_to",
     ),
     "wb_paid_storage": (
@@ -149,12 +166,12 @@ TOOLS = {
     "ozon_clusters": ("Кластеры и входящие в них склады Ozon.", "cluster_type cluster_id", ""),
     "wb_funnel": (
         "Переходы, корзины, заказы и конверсии по выбранному периоду WB, до 365 дней.",
-        "date_from date_to article nm_id limit offset",
+        "date_from date_to article nm_id nm_ids group_by limit offset",
         "date_from date_to",
     ),
     "wb_ads": (
         "Кампании WB, списания и статистика по товару. include_order_share сопоставляет прямые рекламные единицы с заказанными единицами воронки WB.",
-        "date_from date_to campaign_ids article nm_id report limit offset include_order_share",
+        "date_from date_to campaign_ids article nm_id report limit offset cursor include_order_share",
         "date_from date_to",
     ),
     "ozon_ads": (
@@ -174,10 +191,22 @@ TOOLS = {
     ),
     "ozon_rating": ("Текущие группы рейтингов продавца Ozon и индекс локализации по датам.", "", ""),
     "supply_plan": (
-        "План поставки по паре точных артикулов: остатки, входящий товар, темп заказов за 7/30/90 дней, покрытие и рекомендация на горизонт. Передайте mapping для разных артикулов или используйте настроенный псевдоним.",
-        "article horizon_days mapping",
+        "План по складам и кластерам на интервал между поставками horizon_days, срок доставки lead_time_days и страховой запас safety_stock_percent. Отдельно показаны исключённые разовые заказы, покрытие истории остатков и условия расчёта.",
+        "article horizon_days mapping lead_time_days safety_stock_percent bulk_order_min_units",
         "article horizon_days",
     ),
+    "article_map": ("Точные артикулы и все найденные SKU Ozon и nmID WB по артикулу, названию или настроенной паре. Неоднозначные совпадения показаны отдельно.", "article mapping", "article"),
+    "unit_economics": ("Компоненты расчёта на проданную или возвращённую единицу по отчётам за месяц. Себестоимость вводится с валютой. Неподтверждённые статьи и выплаты показаны отдельно.", "article month cost_per_unit currency mapping", "article month"),
+    "sales_drop_check": ("Сопоставить заказы, воронку, наличие, рекламу и отзывы товара за два периода. Различает наблюдения, пробелы и возможные объяснения.", "article date_from date_to previous_from previous_to mapping", "article date_from date_to previous_from previous_to"),
+    "mcp_health": ("Каталог и результаты последних проверок с текущими токенами. Для активной проверки передайте tool_name и probe_arguments с обычными аргументами инструмента.", "tool_name probe_arguments", ""),
+    "ozon_stocks_analytics": ("Остатки FBO, транзит, среднесуточные продажи и запас в днях по кластерам и складам. С датами показывает историю снимков.", "sku skus cluster_id warehouse_id article date_from date_to offset limit", ""),
+    "ozon_turnover": ("Оборачиваемость, среднесуточные продажи и текущий запас товара из отчёта Ozon.", "sku skus article offset limit", ""),
+    "ozon_delivery_time": ("Доля локальных продаж по кластерам назначения. Ozon не публикует фактическую длительность доставки покупателю в этом отчёте.", "date_from date_to article sku cluster_id limit offset", "date_from date_to"),
+    "wb_retentions": ("Отчёты WB об удержаниях, причины и суммы по указанному виду; при доступности источника возвращает артикул.", "date_from date_to article nm_id retention_type limit offset cursor", "date_from date_to"),
+    "wb_region_sales": ("Заказы по регионам назначения и текущим статусам из ленты WB за последние 31 день.", "date_from date_to article nm_id limit offset snapshot_time", "date_from date_to"),
+    "wb_returns_report": ("Возвраты товаров продавцу, даты и состояние по артикулу.", "date_from date_to article nm_id return_status limit offset", "date_from date_to"),
+    "wb_ads_finance": ("Списания, пополнения и документы рекламы WB. Кампании и документы не распределяются автоматически между артикулами.", "date_from date_to campaign_ids document limit offset", "date_from date_to"),
+    "wb_search_queries": ("Поисковые запросы и позиции товара. Нужны категория Аналитика и подписка Джем.", "date_from date_to nm_id nm_ids article search_limit limit", "date_from date_to"),
 }
 
 
@@ -190,6 +219,8 @@ def schema(name):
 def _valid(value, spec):
     types = spec["type"]
     if types == "object":
+        if spec.get("additionalProperties") is True:
+            return isinstance(value,dict) and len(value)<=20
         return (
             isinstance(value, dict)
             and set(spec["required"]) <= value.keys() <= spec["properties"].keys()
@@ -217,7 +248,7 @@ def _valid(value, spec):
     if spec.get("format") == "date":
         return date.fromisoformat(value).isoformat() == value
     if "pattern" in spec:
-        return bool(re.fullmatch(spec["pattern"], value)) and int(value) <= spec["maximum"]
+        return bool(re.fullmatch(spec["pattern"], value)) and ("maximum" not in spec or int(value) <= spec["maximum"])
     return "enum" not in spec or value in spec["enum"]
 
 
@@ -229,18 +260,27 @@ def validate(name, args):
         raise ValueError("Invalid parameter value")
     if "sku" in args and "skus" in args and {str(args["sku"])} != set(map(str, args["skus"])):
         raise ValueError("Conflicting SKU selectors")
+    if "nm_id" in args and "nm_ids" in args and {str(args["nm_id"])} != set(map(str,args["nm_ids"])):
+        raise ValueError("Conflicting WB selectors")
+    if ("cost_per_unit" in args) != ("currency" in args):
+        raise ValueError("Unit cost requires its currency")
+    if "probe_arguments" in args and (not args.get("tool_name") or args["tool_name"]=="mcp_health"):
+        raise ValueError("Select another tool to probe")
+    if name == "sales_drop_check" and not 0 <= (date.fromisoformat(args["previous_to"]) - date.fromisoformat(args["previous_from"])).days < 365:
+        raise ValueError("Invalid comparison period")
     if ("date_from" in args) != ("date_to" in args):
         raise ValueError("Both dates required")
     if "date_from" in args:
         days = (date.fromisoformat(args["date_to"]) - date.fromisoformat(args["date_from"])).days + 1
         limit = {
-            "wb_orders": 90,
-            "wb_sales": 90,
             "wb_paid_storage": 8,
             "wb_acceptance_report": 31,
             "wb_ads": 31,
+            "wb_ads_finance": 31,
             "ozon_ads": 62,
         }.get(name, 365)
+        if name in ("wb_orders","wb_sales","ozon_sku_daily","wb_finance_report"):
+            limit=1827
         if not 1 <= days <= limit:
             raise ValueError("Period out of range")
     if name == "ozon_supply_items" and ("supply_id" in args) != ("order_id" in args):

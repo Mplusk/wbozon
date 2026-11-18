@@ -23,6 +23,7 @@ CONFIG = '/etc/wbozon-cd.json'
 MARKET_BASE = 'b543e1568394095a20f14213feb3a194a456716c70d43b95c06b33c98cd32aed'
 MARKET_BRIDGE = '4fbd8858010f37f39b7676c4b34fede5526aa56623569bbc231e77524edce0cf'
 MARKET_REPORTS = '88b7d5dde100b635d7ac881e1f6999fc9d0626fff5c1ea9e722e31ec58aa9dbc'
+MARKET_V2 = '899b8f0e857f6a7ac6897b87602c768d134222a68daa623cfe145591ff259ab1'
 
 
 def present(path):
@@ -46,9 +47,9 @@ def market_transition(old, new):
     first, second = market_inventory(old), market_inventory(new)
     if (first, second) == (MARKET_BASE, MARKET_BRIDGE):
         return 'bootstrap'
-    if {first, second} == {MARKET_BRIDGE, MARKET_REPORTS}:
+    if {first, second} in ({MARKET_BRIDGE, MARKET_REPORTS},{MARKET_REPORTS, MARKET_V2}):
         return 'shared'
-    if first != second and {first, second} & {MARKET_BRIDGE, MARKET_REPORTS}:
+    if first != second and {first, second} & {MARKET_BRIDGE, MARKET_REPORTS, MARKET_V2}:
         raise ReleaseError('unreviewed marketplace cooldown transition')
     compatible(old, new)
     return None

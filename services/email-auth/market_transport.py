@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 import uuid
 from decimal import Decimal
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode, urlsplit
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -34,6 +34,8 @@ WB_HOSTS = frozenset(
         "feedbacks-api",
         "advert-api",
         "content-api",
+        "documents-api",
+        "discounts-prices-api",
     )
 )
 SELLER = "api-seller.ozon.ru"
@@ -51,6 +53,8 @@ SELLER_READS = frozenset(
         "/v3/product/info/list",
         "/v4/product/info/stocks",
         "/v1/analytics/stocks",
+        "/v1/analytics/turnover/stocks",
+        "/v1/analytics/local-sale/clusters-items/info",
         "/v1/analytics/data",
         "/v3/posting/fbo/list",
         "/v3/posting/fbs/list",
@@ -67,14 +71,16 @@ WB_READS = {
         "GET": r"/api/v1/(?:warehouses|supplies/[1-9]\d{0,18}(?:/(?:goods|package))?)",
     },
     "seller-analytics-api": {
-        "POST": r"/api/analytics/v3/sales-funnel/products",
-        "GET": r"/api/v1/(?:warehouse_remains|paid_storage|acceptance_report)(?:/tasks/[A-Za-z0-9_-]{1,256}/(?:status|download))?",
+        "POST": r"/api/(?:analytics/v3/sales-funnel/products(?:/history)?|analytics/v1/order-feed|v2/search-report/product/search-texts)",
+        "GET": r"/api/(?:v1/(?:warehouse_remains|paid_storage|acceptance_report)(?:/tasks/[A-Za-z0-9_-]{1,256}/(?:status|download))?|analytics/v1/item-returns)",
     },
     "statistics-api": {"GET": r"/api/v1/supplier/(?:orders|sales)"},
     "finance-api": {"POST": r"/api/finance/v1/sales-reports/detailed"},
     "feedbacks-api": {"GET": r"/api/v1/feedbacks(?:/archive)?"},
-    "advert-api": {"GET": r"/(?:adv/v1/(?:promotion/count|upd)|api/advert/v4/fullstats)"},
+    "advert-api": {"GET": r"/(?:adv/v1/(?:promotion/count|upd|payments|balance)|api/advert/v4/fullstats|api/advert/v3/adverts)"},
+    "documents-api": {"GET": r"/api/v1/documents/(?:list|categories)"},
     "content-api": {"POST": r"/content/v2/get/cards/list"},
+    "discounts-prices-api":{"GET":r"/api/v2/list/goods/filter"},
     "common-api": {"GET": r"/api/tariffs/v1/acceptance/coefficients"},
 }
 
@@ -145,6 +151,7 @@ class Wire:
         self.provider, self.creds, self.deadline = provider, creds, deadline
         self.gate_dir = directory
         self.token = None
+        self.fetch_times = []
         self.scope = _id([provider, creds])
         self.aead = AESGCM(hashlib.sha256(("market-cache-v1:" + self.scope).encode()).digest())
         self.root = Path(directory).parent / ".market-reports"
@@ -157,6 +164,8 @@ class Wire:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS cache(k TEXT PRIMARY KEY, expiry REAL NOT NULL, blob BLOB NOT NULL)"
             )
+            # Kept apart from cache: previous releases insert exactly three columns.
+            db.execute("CREATE TABLE IF NOT EXISTS cache_observations(k TEXT PRIMARY KEY, expiry REAL NOT NULL, fetched REAL NOT NULL, digest BLOB NOT NULL)")
             db.execute(
                 "CREATE TABLE IF NOT EXISTS quota(k TEXT PRIMARY KEY, until_at REAL, unknown INTEGER NOT NULL)"
             )
@@ -280,7 +289,17 @@ class Wire:
         return self._http_cache(self._key("GET", url, None, None), binary=False)
 
     def _http_cache(self, key, binary):
-        raw = self.cached(key)
+        with self.db() as db:
+            row = db.execute("SELECT c.blob,o.fetched,o.digest FROM cache c LEFT JOIN cache_observations o "
+                             "ON o.k=c.k AND o.expiry=c.expiry WHERE c.k=? AND c.expiry>?",
+                             (key,time.time())).fetchone()
+        if row is None:
+            return None
+        blob, fetched, digest = row
+        if digest != hashlib.sha256(blob).digest():
+            fetched = None
+        raw = self.aead.decrypt(blob[:12], blob[12:], key.encode())
+        self.fetch_times.append(fetched)
         # Older entries stored both HTTP 204 and a JSON null as b"null".
         return raw if binary or raw is None else json.loads(raw, parse_float=Decimal)
 
@@ -299,12 +318,17 @@ class Wire:
         task = row[0].partition(":")[2]
         return {"UUID": task} if self.provider == "performance" else {"data": {"taskId": task}}
 
-    def store(self, key, data, ttl):
+    def store(self, key, data, ttl, *, fetched=None):
         nonce = os.urandom(12)
         blob = nonce + self.aead.encrypt(nonce, data, key.encode())
         with self.db() as db:
-            db.execute("DELETE FROM cache WHERE expiry<=?", (time.time(),))
-            db.execute("INSERT OR REPLACE INTO cache VALUES(?,?,?)", (key, time.time() + ttl, blob))
+            now = time.time()
+            expiry = now + ttl
+            db.execute("DELETE FROM cache WHERE expiry<=?", (now,))
+            db.execute("DELETE FROM cache_observations WHERE expiry<=?", (now,))
+            db.execute("INSERT OR REPLACE INTO cache VALUES(?,?,?)", (key, expiry, blob))
+            if fetched is not None:
+                db.execute("INSERT OR REPLACE INTO cache_observations VALUES(?,?,?,?)",(key,expiry,fetched,hashlib.sha256(blob).digest()))
             total = db.execute("SELECT COALESCE(SUM(length(blob)),0) FROM cache").fetchone()[0]
             while total > MAX_CACHE_BYTES:
                 old, size = db.execute(
@@ -610,8 +634,10 @@ class Wire:
                         raise ValueError("Provider did not confirm report identity")
                     with self.db() as db:
                         db.execute("UPDATE jobs SET binding=? WHERE k=?", ("id:" + task, key))
+                fetched = time.time()
+                self.fetch_times.append(fetched)
                 if ttl and not job and value is not None:
-                    self.store(key, raw, ttl)
+                    self.store(key, raw, ttl, fetched=fetched)
                 return value
             except _AvailableResult as existing:
                 return existing.result

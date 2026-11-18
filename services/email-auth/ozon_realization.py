@@ -146,10 +146,12 @@ def _snapshot_row(row):
 
 def validate_args(args):
     if (not isinstance(args, dict) or
-            set(args) - {'offer_id', 'year', 'month', 'view'} or
-            not {'offer_id', 'year', 'month'} <= set(args)):
+            set(args) - {'offer_id','all_articles','year','month','view'} or
+            not {'year','month'} <= set(args) or
+            ('offer_id' in args) == (args.get('all_articles') is True) or
+            ('all_articles' in args and type(args['all_articles']) is not bool)):
         raise ValueError('Invalid realization arguments')
-    ozon_details._text(args['offer_id'], 256)
+    if 'offer_id' in args: ozon_details._text(args['offer_id'], 256)
     if type(args['year']) is not int or not 2023 <= args['year'] <= 9999:
         raise ValueError('Invalid year')
     if type(args['month']) is not int or not 1 <= args['month'] <= 12:
@@ -245,7 +247,7 @@ def project_response(args, data, creds):
         return {'status':'blocked',
             'reason':'sku_offer_id_conflict' if identity['conflict_count'] else 'identity_incomplete',
             'source':'Ozon Seller API /v1/finance/realization/posting',
-            'offer_id':args['offer_id'],'year':args['year'],'month':args['month'],
+            'offer_id':args.get('offer_id'),'year':args['year'],'month':args['month'],
             'period_basis':'realization_report_month','order_date_filter_used':False,
             'identity_scan':identity,'identity_conflicts':identity['identity_conflicts'],
             'observed_delivery_units':None,'observed_return_units_signed':None,
@@ -272,7 +274,7 @@ def project_response(args, data, creds):
                 type(item.get('sku')) is not type(observed.sku) or item.get('sku') != observed.sku):
             raise ValueError('Identity changed during projection')
         offer_id = ozon_details._text(observed.offer_id, 256, secret=secret)
-        if offer_id != args['offer_id']: continue
+        if not args.get('all_articles') and offer_id != args['offer_id']: continue
         sku = ozon_details._optional_sku(observed.sku, secret)
         name = item.get('name')
         if name is not None: name = ozon_details._text(name, 1024, empty=True, secret=secret)
@@ -286,6 +288,16 @@ def project_response(args, data, creds):
                          'posting_number': posting, 'order_created_date': created,
                          'delivery_commission': _commission(row.get('delivery_commission')),
                          'return_commission': _commission(row.get('return_commission'))})
+    if args.get('all_articles'):
+        groups={}
+        for row in selected:
+            groups.setdefault(row['offer_id'],[]).append(row)
+        return {'items':[dict(article=offer,offer_id=offer,skus=sorted({r['sku'] for r in group},key=int),
+                              matched_rows=len(group),currency=currency,**_realization_summary(group,currency))
+                         for offer,group in sorted(groups.items())],
+                'selected_rows':selected if args.get('view')=='details' else None,
+                'source':ENDPOINT,'date_from':start,'date_to':stop,'period_basis':'realization_report_month',
+                'financial_completeness':'not_verified','identity_scan':identity,'read_only':True,'untrusted_data':True}
     delivery_rows = [row['delivery_commission'] for row in selected if row['delivery_commission'] is not None]
     return_rows = [row['return_commission'] for row in selected if row['return_commission'] is not None]
     delivered = _reported_quantity(delivery_rows)

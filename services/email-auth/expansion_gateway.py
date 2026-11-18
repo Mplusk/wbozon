@@ -5,9 +5,15 @@ import json
 import hashlib
 from pathlib import Path
 import urllib.error
+import time
+from datetime import date,datetime,timedelta,timezone
+from urllib.parse import urlsplit
 
 import finance_gate
 import market_specs
+import market_health
+import market_history
+import market_composites
 from market_transport import Wire
 import ozon_details
 import ozon_expansion
@@ -24,8 +30,19 @@ def provider(name):
 
 
 def credentials(vault, name):
-    if name == "supply_plan":
-        return {p: c for p in ("wb", "ozon") if (c := vault.read(p))}
+    if name in market_health.COMPOSITE:
+        keys={p:c for p in ("wb","ozon","performance") if (c:=vault.read(p))}
+        extras={p:c for p in market_health.WB_CATEGORIES if (c:=vault.read(p))}
+        if extras:
+            keys["wb"]=dict(keys.get("wb") or next(iter(extras.values())),category_keys=extras)
+        return keys
+    if name.startswith("wb_"):
+        preferred=market_health.WB_TOOLS.get(name)
+        creds=(vault.read(preferred) if preferred else None) or vault.read("wb")
+        extras={p:c for p in market_health.WB_CATEGORIES if (c:=vault.read(p))}
+        if extras:
+            return dict(creds or next(iter(extras.values())),category_keys=extras)
+        return creds
     creds = vault.read(provider(name))
     if name == "ozon_ads" and creds:
         seller = vault.read("ozon")
@@ -47,10 +64,49 @@ def _mapping(args, directory):
     if len(raw) > 65536:
         raise ValueError("Invalid mapping file")
     mappings = json.loads(raw)
-    mapping = mappings.get(args["article"])
+    needle=args["article"].casefold().strip()
+    candidates=[v for k,v in mappings.items() if k.casefold().strip()==needle or
+                needle in (str(v.get("ozon_offer_id","")).casefold(),str(v.get("wb_vendor_code","")).casefold())]
+    mapping=candidates[0] if candidates and all(v==candidates[0] for v in candidates) else None
     if mapping is not None:
-        market_specs.validate("supply_plan", dict(args, mapping=mapping))
+        market_specs.validate("article_map", {"article":args["article"],"mapping":mapping})
     return mapping
+
+
+class CategoryWire(Wire):
+    def __init__(self,provider,creds,directory,deadline):
+        super().__init__(provider,{k:v for k,v in creds.items() if k!="category_keys"},directory,deadline)
+        self.category_keys=creds.get("category_keys",{})
+        self.sources={}
+
+    def __call__(self,method,url,**params):
+        category=market_health.HOST_KEYS.get(urlsplit(url).hostname.split(".")[0])
+        chosen=self.category_keys.get(category)
+        if chosen and chosen!=self.creds:
+            if category not in self.sources:
+                self.sources[category]=Wire("wb",chosen,self.gate_dir,self.deadline)
+                self.sources[category].fetch_times=self.fetch_times
+            return self.sources[category](method,url,**params)
+        return super().__call__(method,url,**params)
+
+
+def make_wire(p,c,directory,deadline):
+    return CategoryWire(p,c,directory,deadline) if p=="wb" and "category_keys" in c else Wire(p,c,directory,deadline)
+
+
+def regulated_ozon(name,args,wire):
+    import portal,market_cooldown
+    if wire.deadline-time.monotonic()<2:
+        raise TimeoutError("Insufficient finance read time")
+    def read():
+        with market_cooldown.worker(wire.gate_dir,wire.creds):
+            return portal._provider_read(name,args,wire.creds,absolute_deadline=wire.deadline)
+    portal.finance_request_preflight(name,args,wire.creds)
+    with wire.progress("composite-finance-v2",[name,args]) as (cached,save):
+        if cached: return cached
+        value=portal._finance_read_with_retry(wire.gate_dir,wire.creds,read,wire.deadline,allow_retry=False)
+        save(value,1800)
+        return value
 
 
 def _wb_identity(wire, article=None, nm=None):
@@ -137,7 +193,7 @@ def _finance_period(args, wire):
             if state["done"]:
                 break
             try:
-                page = wb_expansion.read("wb_finance_report", dict(query, cursor=state["cursor"]), wire)
+                page = wb_expansion._finance(dict(query, cursor=state["cursor"],limit=5000), wire)
             except urllib.error.HTTPError as exc:
                 if exc.code != 429:
                     raise
@@ -427,17 +483,48 @@ def execute(name, args, creds, directory, deadline):
     market_specs.validate(name, args)
     with localcontext() as ctx:
         ctx.prec = 128
-        if name == "supply_plan":
-            wires = {p: Wire(p, c, directory, deadline) for p, c in creds.items()}
-            data = supply_plan.read(args, wires, _mapping(args, directory))
+        if name in market_health.COMPOSITE:
+            wires = {p: make_wire(p,c,directory,deadline) for p,c in creds.items() if p!="performance"}
+            if name in ("unit_economics","sales_drop_check") and "performance" in creds:
+                wires["performance"]=Wire("performance",creds["performance"],directory,deadline)
+            mapping=_mapping(args,directory)
+            if name=="supply_plan":
+                data=supply_plan.read(args,wires,mapping)
+            else:
+                identity=market_composites.identity(args,wires,mapping)
+                if name=="article_map" or not identity["complete"]:
+                    data=identity
+                elif name=="supply_plan":
+                    data=supply_plan.read(args,wires,identity["mapping"])
+                elif name=="unit_economics":
+                    data=market_composites.accounting(args,wires,identity["mapping"],_finance_period,regulated_ozon)
+                else:
+                    data=market_composites.comparison(args,wires,identity["mapping"])
+            used_wires=list(wires.values())
         else:
             p = provider(name)
             account = {k: v for k, v in creds.items() if k != "seller_lookup"}
-            wire = Wire(p, account, directory, deadline)
+            wire = make_wire(p, account, directory, deadline)
+            used_wires=[wire]
             seller_wire = None
+            if name in ("wb_orders","wb_sales","ozon_sku_daily","wb_finance_report"):
+                first=date.fromisoformat(args["date_from"])
+                last=date.fromisoformat(args["date_to"])
+                if (args.get("archive") or (last-first).days>=90 or
+                    (p=="wb" and name!="wb_finance_report" and first<datetime.now(market_specs.MOSCOW).date()-timedelta(days=90))):
+                    archive=market_history.History(directory)
+                    owner=market_history.scope(p,wire.creds)
+                    if not archive.authorized(wire.creds,owner):
+                        return market_specs.result([],complete=False,data_as_of=None,status="archive_access_not_yet_verified")
+                    data=market_history.historical_read(archive,owner,name,args)
+                    data.update(tool=name,read_only=True,untrusted_data=True)
+                    return data
             try:
-                if p == "wb":
-                    if name in ("wb_acceptance_report", "wb_ads") and "article" in args:
+                if name in ("wb_supplies","ozon_supply_orders") and "article" in args:
+                    import supply_history
+                    data=supply_history.report(name,args,wire)
+                elif p == "wb":
+                    if name in ("wb_acceptance_report","wb_ads","wb_region_sales","wb_returns_report","wb_search_queries","wb_funnel") and "article" in args:
                         if name == "wb_ads" and (
                             not args.get("campaign_ids")
                             or args.get("report") in ("campaigns", "spend_ledger")
@@ -499,7 +586,7 @@ def execute(name, args, creds, directory, deadline):
                 else:
                     data = ozon_expansion.read(name, args, wire)
             except urllib.error.HTTPError as exc:
-                if exc.code not in (401, 403):
+                if exc.code not in (401,402,403):
                     raise
                 exc.close()
                 category = (
@@ -537,7 +624,7 @@ def execute(name, args, creds, directory, deadline):
                 _enrich(name, args, data, seller_wire)
             if args.get("include_order_share"):
                 _order_share(name, args, data, seller_wire if p == "performance" else wire)
-            if name == "ozon_stocks_by_cluster" and "date_from" not in args:
+            if name in ("ozon_stocks_by_cluster","ozon_stocks_analytics") and "date_from" not in args:
                 start, limit = args.get("offset", 0), args.get("limit", 100)
                 items = data["items"]
                 data["items"] = items[start : start + limit]
@@ -558,6 +645,9 @@ def execute(name, args, creds, directory, deadline):
                     data["company_currency"] = None
             if args.get("mode") == "summary":
                 _summary(name, data)
+        stamps=[t for w in used_wires for t in getattr(w,"fetch_times",())]
+        fetched=datetime.fromtimestamp(min(stamps),timezone.utc).isoformat() if stamps and None not in stamps else None
+        data.setdefault("data_as_of",data.get("report_timestamp") or fetched)
         data.update(read_only=True, untrusted_data=True, tool=name)
         text = json.dumps(data, ensure_ascii=False, default=str, allow_nan=False)
 

@@ -24,8 +24,11 @@ def _cursor(value):
 
 
 def validate_args(args):
-    if not isinstance(args, dict) or set(args) - {'date_from', 'date_to', 'scheme', 'cursor', 'limit'}:
+    if not isinstance(args, dict) or set(args) - {'date_from', 'date_to', 'scheme', 'cursor', 'limit','include_geography','article'}:
         raise ValueError('Invalid arguments')
+    if type(args.get('include_geography',False)) is not bool or ('article' in args and
+            (not isinstance(args['article'],str) or not 0<len(args['article'])<=256 or not args['article'].isprintable())):
+        raise ValueError('Invalid article or geography filter')
     if not {'date_from', 'date_to', 'scheme'} <= set(args) or not isinstance(args['scheme'], str) or args['scheme'] not in ENDPOINTS:
         raise ValueError('Invalid arguments')
     values = []
@@ -50,7 +53,7 @@ def build_request(args, creds):
     body = {'cursor': args.get('cursor', ''), 'limit': args.get('limit', 100),
             'filter': {'since': args['date_from'] + 'T00:00:00Z',
                        'to': args['date_to'] + 'T23:59:59.999999999Z'},
-            'sort_dir': 'asc', 'with': {'financial_data': False, 'analytics_data': False,
+            'sort_dir': 'asc', 'with': {'financial_data': args.get('include_geography',False), 'analytics_data': args.get('include_geography',False),
                                          'legal_info': False}}
     return urllib.request.Request(ENDPOINTS[args['scheme']], data=json.dumps(body).encode('utf-8'),
         headers={'Client-Id': creds['client_id'], 'Api-Key': creds['api_key'],
@@ -72,7 +75,31 @@ def _page(args, data, creds):
         key = creds.get('api_key')
         if isinstance(key, str) and key and key in next_cursor:
             raise ValueError('Unsafe next cursor')
+    if 'article' in args:
+        subset=[]
+        for row in rows:
+            products=row.get('products')
+            if not isinstance(products,list): raise ValueError('Missing posting products')
+            matched=[p for p in products if p.get('offer_id')==args['article']]
+            if matched: subset.append(dict(row,products=matched))
+        rows=subset
     return rows, has_next, next_cursor
+
+
+def geography(args, rows):
+    if not args.get('include_geography'):
+        return {}
+    records=[]
+    for row in rows:
+        detail=row.get('analytics_data') or {}
+        finance=row.get('financial_data') or {}
+        records.append({'posting_number':row.get('posting_number'),'warehouse':detail.get('warehouse_name') or detail.get('warehouse'),
+            'warehouse_id':detail.get('warehouse_id'),'region':detail.get('region'),'city':detail.get('city'),
+            'cluster_from':finance.get('cluster_from') or detail.get('cluster_from'),'cluster_to':finance.get('cluster_to') or detail.get('cluster_to'),
+            'planned_handoff_at':row.get('shipment_date'),'actual_handoff_at':row.get('fact_delivery_date'),
+            'expected_delivery_at':(row.get('delivery_method') or {}).get('delivery_date') or detail.get('delivery_date_begin'),
+            'actual_buyer_delivery_at':None})
+    return {'geography':records}
 
 
 def project_response(args, data, creds):
@@ -100,7 +127,7 @@ def project_response(args, data, creds):
     return {'source': 'Ozon Seller API ' + ENDPOINTS[args['scheme']].split('.ru', 1)[1],
             'scheme': args['scheme'], 'date_from': args['date_from'], 'date_to': args['date_to'],
             'period_timezone': 'UTC', 'as_of': datetime.now(timezone.utc).isoformat(),
-            'page_counts': counts, 'page_postings': len(rows), 'has_more': has_next,
+            'page_counts': counts, 'page_postings': len(rows), 'has_more': has_next, **geography(args,rows),
             'next_cursor': next_cursor, 'complete': not args.get('cursor') and not has_next,
             'read_only': True, 'untrusted_data': True,
             'note': ('Текущие статусы отправлений на момент запроса; это не окончательные выкупы, '
@@ -130,7 +157,7 @@ def project_candidates(args, data, creds):
             'scheme':args['scheme'],'date_from':args['date_from'],'date_to':args['date_to'],
             'selection_basis':'provider_posting_filter_period', 'selection_timezone':'UTC',
             'relationship_to_order_or_accrual_date':'not_verified',
-            'posting_numbers':numbers, 'page_count':len(numbers),
+            'posting_numbers':numbers, 'page_count':len(numbers), **geography(args,rows),
             'provider_has_next':has_next, 'requested_cursor':requested_cursor, 'next_cursor':next_cursor,
             'page_or_period_completeness':'not_verified', 'other_schemes':'not_checked',
             'as_of':datetime.now(timezone.utc).isoformat(), 'read_only':True, 'untrusted_data':True,

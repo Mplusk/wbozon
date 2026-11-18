@@ -273,6 +273,18 @@ jobs:
           sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports \
             --python /opt/staging-account-acceptance/venv/bin/python \
             --baseline-service "$bridge_dir/service" --candidate-service "$full_dir/service"
+      - name: Verify v2 rollback, archive preservation and fenced systemd recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous="$RUNNER_TEMP/market-v2-parent/service"
+          mkdir -p "$previous"
+          git archive 08c6f9b3778a4ea039d8a0093623c815cc95ecc4:services/email-auth | tar -x -C "$previous"
+          packaged="$RUNNER_TEMP/native-candidate/service"
+          python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
+            --candidate-service "$packaged" --candidate-commit "$GITHUB_SHA" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
+          sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports \
+            --python /opt/staging-account-acceptance/venv/bin/python --baseline-service "$previous" --candidate-service "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash
         run: |

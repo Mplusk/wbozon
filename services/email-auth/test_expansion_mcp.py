@@ -235,7 +235,7 @@ class ExpansionMCPTests(unittest.TestCase):
             self.mcp({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, self.bearer)["body"]
         )
         directory = {t["name"]: t for t in listing["result"]["tools"]}
-        self.assertEqual(len(directory), 46)
+        self.assertEqual(len(directory), 58)
         self.assertTrue(set(CASES) <= directory.keys())
         routes = report_routes()
 

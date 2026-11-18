@@ -1,0 +1,16 @@
+[Unit]
+Description=Read and archive marketplace reporting days through the portal
+After=3dprinta-portal.service
+ConditionPathExists=/etc/3dprinta-portal/api-client-token
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -B -I /usr/local/libexec/wbozon-cd/archive_client.py
+TimeoutStartSec=150
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_INET
+IPAddressDeny=any
+IPAddressAllow=localhost

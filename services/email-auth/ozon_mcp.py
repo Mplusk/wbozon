@@ -142,6 +142,9 @@ def _page_identity(items):
 def validate_args(operation, args):
     """Reject unexpected keys and types. One request reads at most 100 rows."""
     if operation not in OPERATIONS or not isinstance(args, dict): raise ValueError('Invalid Ozon operation')
+    if operation in ('ozon_article_summary','ozon_posting_accruals') and 'discover_postings' in args:
+        import posting_discovery
+        return posting_discovery.validate(operation,args)
     if operation in ozon_fbo.ENDPOINTS:
         return ozon_fbo.validate_args(operation, args)
     if operation == ozon_supply_allocation.OPERATION:
@@ -161,7 +164,10 @@ def validate_args(operation, args):
     if operation in ('ozon_posting_status','ozon_posting_candidates'):
         return ozon_posting_status.validate_args(args)
     if operation == 'ozon_orders_analytics':
-        if set(args) != {'date_from', 'date_to'}: raise ValueError('Invalid arguments')
+        if set(args) != {'date_from', 'date_to'}:
+            import market_specs
+            if not {'dimension','sku','article'}&args.keys() or args.get('dimension','sku')!='sku': raise ValueError('Invalid dimension')
+            return market_specs.validate('ozon_sku_daily',{k:v for k,v in args.items() if k!='dimension'})
         try:
             if any(not isinstance(args[k], str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', args[k]) for k in ('date_from', 'date_to')):
                 raise ValueError('Invalid date')

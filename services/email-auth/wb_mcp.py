@@ -4,6 +4,7 @@ Responses are bounded and projected onto explicit field allowlists. Call from th
 portal's deadline-bounded worker, not directly from a request thread.
 """
 import json
+import base64
 import math
 import re
 import ssl
@@ -11,6 +12,7 @@ import urllib.request
 from datetime import date, datetime
 from urllib.parse import urlencode
 import market_cooldown
+from decimal import Decimal,InvalidOperation
 
 OPERATIONS = frozenset(('wb_products', 'wb_prices', 'wb_commissions', 'wb_box_tariffs', 'wb_sales_summary'))
 MAX_ROW_BODY = 512000
@@ -35,15 +37,30 @@ def validate_args(operation, args):
     if operation not in OPERATIONS or not isinstance(args, dict):
         raise ValueError('Invalid operation or arguments')
     allowed = {
-        'wb_products': {'limit', 'updated_at', 'nm_id'},
+        'wb_products': {'limit', 'updated_at', 'nm_id','cursor','vendor_code'},
         # nm_id is also used by the existing exact-article browser lookup.
-        'wb_prices': {'limit', 'offset', 'nm_id'},
+        'wb_prices': {'limit', 'offset', 'nm_id','cursor','vendor_code'},
         'wb_commissions': {'limit', 'subject_id', 'search'},
-        'wb_box_tariffs': {'limit', 'date', 'warehouse'},
-        'wb_sales_summary': {'limit', 'offset', 'date_from', 'date_to'},
+        'wb_box_tariffs': {'limit', 'date', 'warehouse','nm_id','rf_mgt'},
+        'wb_sales_summary': {'limit', 'offset', 'date_from', 'date_to','nm_ids','vendor_codes','group_by'},
     }[operation]
     if set(args) - allowed:
         raise ValueError('Invalid arguments')
+    if "vendor_code" in args and (not isinstance(args["vendor_code"],str) or not 0<len(args["vendor_code"])<=256 or not args["vendor_code"].isprintable()):
+        raise ValueError("Invalid seller article")
+    if 'cursor' in args:
+        cursor=args['cursor']
+        if not isinstance(cursor,str) or not re.fullmatch('[a-zA-Z0-9_-]{1,1024}',cursor) or {'offset','nm_id','updated_at'}&args.keys(): raise ValueError('Invalid cursor')
+        try:
+            op,article,values=json.loads(base64.urlsafe_b64decode(cursor+'='*(-len(cursor)%4)))
+        except (TypeError,ValueError): raise ValueError('Invalid cursor') from None
+        keys={'updated_at','nm_id'} if operation=='wb_products' else {'offset'}
+        if op!=operation or article!=args.get('vendor_code') or not isinstance(values,dict) or set(values)!=keys: raise ValueError('Cursor mismatch')
+        return validate_args(operation,{**{k:v for k,v in args.items() if k!='cursor'},**values})
+    if operation=='wb_box_tariffs' and 'nm_id' in args and (type(args['nm_id']) is not int or not 1<=args['nm_id']<=9007199254740991):
+        raise ValueError('Invalid card number')
+    if 'rf_mgt' in args and (type(args['rf_mgt']) is not bool or 'nm_id' not in args):
+        raise ValueError("Specify the item for an RF MGT estimate")
     limit = args.get('limit', 100 if operation == 'wb_sales_summary' else 20)
     if type(limit) is not int or not 1 <= limit <= (200 if operation in ('wb_commissions','wb_box_tariffs') else 100):
         raise ValueError('Invalid limit')
@@ -76,6 +93,9 @@ def validate_args(operation, args):
         if 'warehouse' in args and (not isinstance(args['warehouse'], str) or len(args['warehouse']) > 100):
             raise ValueError('Invalid warehouse')
     if operation == 'wb_sales_summary':
+        import market_specs
+        if any(k in args and not market_specs._valid(args[k],market_specs.FIELDS[k]) for k in ('nm_ids','vendor_codes','group_by')):
+            raise ValueError("Invalid product selectors")
         dates = []
         for field in ('date_from', 'date_to'):
             value = args.get(field)
@@ -89,6 +109,35 @@ def validate_args(operation, args):
         if type(offset) is not int or not 0 <= offset <= 1000000:
             raise ValueError('Invalid offset')
     return dict(args)
+
+
+def _cursor(operation,args,values):
+    return base64.urlsafe_b64encode(json.dumps([operation,args.get('vendor_code'),values],ensure_ascii=False).encode()).decode().rstrip('=')
+
+
+def _unit_tariff(row,dimensions,currency,*,rf_mgt=False,tariff_date=None):
+    def number(v):
+        try: n=Decimal(str(v).replace(',','.'))
+        except InvalidOperation: return None
+        return n if n.is_finite() and n>=0 else None
+    sides=[number(dimensions.get(k)) for k in ('length','width','height')]
+    volume=sides[0]*sides[1]*sides[2]/1000 if all(sides) else None
+    base,liter,storage=(number(row.get(k)) for k in ('boxDeliveryBase','boxDeliveryLiter','boxStorageLiter'))
+    fees={'volume_l':str(volume) if volume else None,'currency':currency,'dimensions_valid':dimensions.get('isValid'),
+          'delivery_per_unit':None,'storage_per_unit_per_day':None,'basis':'warehouse_box_tariff_estimate'}
+    if volume:
+        if volume>1 and base is not None and liter is not None: fees['delivery_per_unit']=str(base+(volume-1)*liter)
+        if volume<=1: fees['delivery_coverage']='sub_litre_tier_not_in_api'
+        if volume<=1 and rf_mgt and currency=='RUB' and tariff_date=='2026-11-18':
+            coefficient=number(row.get('boxDeliveryCoefExpr'))
+            if coefficient is not None:
+                base=next(Decimal(price) for bound,price in (('.2',23),('.4',26),('.6',29),('.8',30),('1',32)) if volume<=Decimal(bound))
+                fees.update(delivery_per_unit=str(base*coefficient/100),delivery_coverage='RF_MGT_FBW_forward_logistics',
+                    rate_as_of=tariff_date,rate_source='https://seller.wildberries.ru/instructions/ru/ru/material/logistics-types-and-cost-calculation')
+        storage_base=number(row.get('boxStorageBase'))
+        if storage_base is not None and (volume<=1 or storage is not None):
+            fees['storage_per_unit_per_day']=str(storage_base*min(volume,1)+(storage or 0)*max(0,volume-1))
+    return fees
 
 def _decode(raw):
     def reject(_): raise ValueError('Invalid provider JSON number')
@@ -111,7 +160,9 @@ def read(operation, args, creds):
     if operation == 'wb_products':
         cursor = {'limit': limit}
         if 'updated_at' in args: cursor.update(updatedAt=args['updated_at'], nmID=args['nm_id'])
-        body = json.dumps({'settings': {'cursor': cursor, 'filter': {'withPhoto': -1}}}).encode()
+        filters={'withPhoto':-1}
+        if 'vendor_code' in args: filters['textSearch']=args['vendor_code']
+        body = json.dumps({'settings': {'cursor': cursor, 'filter': filters}}).encode()
         headers['Content-Type'] = 'application/json'
         req = urllib.request.Request('https://content-api.wildberries.ru/content/v2/get/cards/list', data=body, headers=headers, method='POST')
     elif operation == 'wb_prices':
@@ -121,8 +172,10 @@ def read(operation, args, creds):
     elif operation == 'wb_commissions':
         req = urllib.request.Request('https://common-api.wildberries.ru/api/v1/tariffs/commission', headers=headers, method='GET')
     elif operation == 'wb_sales_summary':
-        body = json.dumps({'selectedPeriod': {'start': args['date_from'], 'end': args['date_to']},
-                           'skipDeletedNm': False, 'limit': limit, 'offset': args.get('offset', 0)}).encode()
+        query={'selectedPeriod': {'start': args['date_from'], 'end': args['date_to']},
+                           'skipDeletedNm': False, 'limit': limit, 'offset': args.get('offset', 0)}
+        if 'nm_ids' in args: query['nmIds']=list(map(int,args['nm_ids']))
+        body=json.dumps(query).encode()
         headers['Content-Type'] = 'application/json'
         req = urllib.request.Request('https://seller-analytics-api.wildberries.ru/api/analytics/v3/sales-funnel/products', data=body, headers=headers, method='POST')
     else:
@@ -186,7 +239,7 @@ def read(operation, args, creds):
                 if not isinstance(row['photos'],list): raise ValueError('Unexpected photos')
                 item['photos']=[project(photo, ('big','c516x688','c246x328','square','tm')) for photo in row['photos'][:20]]
             items.append(item)
-        result['items'] = items
+        result['items'] = [i for i in items if args.get('vendor_code',i.get('vendorCode'))==i.get('vendorCode')]
         cursor = data.get('cursor')
         if cursor is None:
             result['cursor'] = None
@@ -198,6 +251,8 @@ def read(operation, args, creds):
             else: raise ValueError('Unexpected cursor')
         else: raise ValueError('Unexpected cursor')
         result['first_page_only'] = 'updated_at' not in args
+        c=result['cursor'] or {}
+        result['next_cursor']=_cursor(operation,args,{'updated_at':c['updatedAt'],'nm_id':c['nmID']}) if c.get('total')==limit and 'updatedAt' in c else None
     elif operation == 'wb_prices':
         nested = data.get('data')
         rows = nested.get('listGoods') if isinstance(nested, dict) else None
@@ -209,11 +264,12 @@ def read(operation, args, creds):
             if not isinstance(sizes, list): raise ValueError('Unexpected sizes')
             item['sizes'] = [project(size, ('sizeID','techSizeName','price','discountedPrice','clubDiscountedPrice')) for size in sizes[:100] if isinstance(size, dict)]
             items.append(item)
-        result['items']=items
+        result['items']=[i for i in items if args.get('vendor_code',i.get('vendorCode'))==i.get('vendorCode')]
         offset=args.get('offset',0)
         result['offset']=offset
         result['next_offset']=(offset+len(items) if len(items)==limit and offset+len(items)<=1000000 and 'nm_id' not in args else None)
         result['first_page_only']=(offset==0)
+        result['next_cursor']=_cursor(operation,args,{'offset':result['next_offset']}) if result['next_offset'] is not None else None
     elif operation == 'wb_commissions':
         rows=data.get('report')
         if not isinstance(rows,list): raise ValueError('Unexpected commission schema')
@@ -252,7 +308,9 @@ def read(operation, args, creds):
         offset = args.get('offset', 0)
         has_more = len(items) == limit
         next_offset = offset + len(items) if has_more and offset + len(items) <= 1000000 else None
-        page_totals = {key: clean(sum(row['statistic']['selected'][key] for row in rows)) for key in metric_names}
+        if 'vendor_codes' in args: items=[r for r in items if r['product'].get('vendorCode') in args['vendor_codes']]
+        if 'nm_ids' in args: items=[r for r in items if str(r['product'].get('nmId')) in set(map(str,args['nm_ids']))]
+        page_totals = {key: clean(sum(int(row['metrics'][key]) for row in items)) for key in metric_names}
         result.update(items=items, currency=currency.upper(), date_from=args['date_from'], date_to=args['date_to'],
                       offset=offset, next_offset=next_offset, has_more=has_more, page_totals=page_totals,
                       complete=(offset == 0 and not has_more),
@@ -271,6 +329,16 @@ def read(operation, args, creds):
         if args.get('warehouse'): items=[row for row in items if args['warehouse'].casefold() in str(row.get('warehouseName','')).casefold()]
         result.update(project(table, ('currency','dtNextBox','dtTillMax')))
         result.update(items=items[:limit], matched_rows=len(items), returned_rows=min(len(items),limit), truncated=len(items)>limit)
+        if 'nm_id' in args:
+            search={'settings':{'cursor':{'limit':100},'filter':{'textSearch':str(args['nm_id']),'withPhoto':-1}}}
+            auth=creds.get('category_keys',{}).get('wb_content',creds)
+            req=urllib.request.Request('https://content-api.wildberries.ru/content/v2/get/cards/list',data=json.dumps(search).encode(),
+                headers={'Authorization':auth['api_token'],'Content-Type':'application/json'},method='POST')
+            with market_cooldown.legacy_open(opener,req,10) as response: body=response.read(MAX_TABLE_BODY+1)
+            if len(body)>MAX_TABLE_BODY: raise ValueError('Card response too large')
+            cards=[r for r in _decode(body)['cards'] if str(r.get('nmID'))==str(args['nm_id'])]
+            dims=(cards[0].get('dimensions') or {}) if len(cards)==1 else {}
+            for row in result['items']: row['per_unit']=dict(_unit_tariff(row,dims,result.get('currency'),rf_mgt=args.get('rf_mgt'),tariff_date=args['date']),article=cards[0].get('vendorCode') if len(cards)==1 else None,nm_id=args['nm_id'])
     # The bridge and its caller enforce their own response budgets. Never let
     # a valid but very large page exceed that bound after JSON serialization.
     serialized = json.dumps(result, ensure_ascii=True, allow_nan=False)

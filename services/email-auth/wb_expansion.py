@@ -33,6 +33,11 @@ CATEGORIES = {
     "wb_ads": "Продвижение",
     "wb_feedbacks": "Вопросы и отзывы",
     "wb_acceptance_slots": "Любая категория WB",
+    "wb_retentions": "Финансы",
+    "wb_returns_report": "Аналитика",
+    "wb_region_sales": "Аналитика",
+    "wb_ads_finance": "Продвижение",
+    "wb_search_queries": "Аналитика и подписка Джем",
 }
 
 
@@ -177,7 +182,7 @@ def _goods(args, request):
     )
 
 
-def _stats(name, args, request):
+def _stats(name, args, request, *, exact_day=False):
     sale = name == "wb_sales"
     start = date.fromisoformat(args["date_from"])
     if start < datetime.now(MOSCOW).date() - timedelta(days=90):
@@ -196,7 +201,7 @@ def _stats(name, args, request):
         request(
             "GET",
             STAT + ("sales" if sale else "orders"),
-            query={"dateFrom": stamp, "flag": 0},
+            query={"dateFrom": stamp, "flag": int(exact_day)},
             interval=60,
             basic_interval=7200 if sale else 10800,
             ttl=1800,
@@ -240,7 +245,7 @@ def _stats(name, args, request):
     next_cursor = None
     if index + limit < len(page):
         next_cursor = stamp + "|" + str(index + limit)
-    elif page:
+    elif page and not exact_day:
         next_cursor = page[-1].get("lastChangeDate")
         if not next_cursor or next_cursor == stamp:
             return result(items, complete=False, issues=["nonadvancing_change_cursor"])
@@ -436,6 +441,10 @@ FIN_FIELDS = {
     "acceptance": "paidAcceptance",
     "penalty": "penalty",
     "for_pay": "forPay",
+    "deduction": "deduction",
+    "reason": "bonusTypeName",
+    "additional_payment": "additionalPayment",
+    "gross_sales": "retailAmount",
     "date": "rrDate",
 }
 
@@ -460,9 +469,10 @@ def finance_summary(items):
             "acceptance",
             "penalty",
             "for_pay",
+            "deduction", "additional_payment", "gross_sales",
         ):
-            n = money(row[field])
-            if field in ("for_pay", "commission_ex_vat", "commission_vat") and n:
+            n = money(row.get(field))
+            if field in ("for_pay", "commission_ex_vat", "commission_vat", "gross_sales") and n:
                 if row["document"] == "Возврат":
                     n = -n
                 elif row["document"] != "Продажа":
@@ -543,6 +553,9 @@ def _finance(args, request):
 
 
 def _funnel(args, request):
+    if "group_by" in args:
+        from wb_reports import funnel_history
+        return funnel_history(args, request)
     limit, offset = args.get("limit", 50), args.get("offset", 0)
     body = {
         "selectedPeriod": {"start": args["date_from"], "end": args["date_to"]},
@@ -551,6 +564,8 @@ def _funnel(args, request):
     }
     if "nm_id" in args:
         body["nmIds"] = [int(args["nm_id"])]
+    elif "nm_ids" in args:
+        body["nmIds"] = list(map(int,args["nm_ids"]))
     data = request(
         "POST",
         ANALYTICS + "/api/analytics/v3/sales-funnel/products",
@@ -569,6 +584,8 @@ def _funnel(args, request):
             cart_count=selected.get("cartCount"),
             order_count=selected.get("orderCount"),
             order_sum=selected.get("orderSum"),
+            buyout_count=selected.get("buyoutCount"), buyout_sum=selected.get("buyoutSum"),
+            cancel_count=selected.get("cancelCount"),
             currency=data.get("currency"),
             conversions=selected.get("conversions"),
         )
@@ -660,6 +677,17 @@ def _ads(args, request):
         )
     if report == "statistics" and not ids:
         raise ValueError("Campaign IDs required for statistics")
+    if (report=="campaigns" or not ids) and not args.get("offset"):
+        path="/api/advert/v3/adverts"
+        q={"advertIds":",".join(map(str,ids))} if ids else {"limit":min(50,args.get("limit",50))}
+        if args.get("cursor"): q["next"]=args["cursor"]
+        raw=request("GET",ADVERT+path,query=q,interval=1,basic_interval=3600,ttl=1800)
+        records=[dict(campaign_id=r["advertId"],status=r.get("status"),type=None,
+                      payment_type=(r.get("settings") or {}).get("paymentType"),currency=r.get("currency"),
+                      nm_ids=[n["nmId"] for n in rows(r.get("nms",[]))]) for r in rows(raw["adverts"])]
+        marker=raw["next"]
+        if not isinstance(marker,str) or marker and marker==args.get("cursor"): raise ValueError("Invalid advertising cursor")
+        return result(records,marker or None,status="choose_campaign_ids",source=path)
     if report == "campaigns" or not ids:
         raw = request("GET", ADVERT + "/adv/v1/promotion/count", interval=1, basic_interval=900, ttl=1800)
         campaigns = [
@@ -827,6 +855,9 @@ def _warehouse_directory(args, request, data):
 
 def read(name, args, request):
     validate(name, args)
+    from wb_reports import READERS
+    if name in READERS:
+        return READERS[name](args,request)
     if name == "wb_supplies":
         return _supplies(args, request)
     if name == "wb_supply_goods":

@@ -117,6 +117,32 @@ TOOLS = [
           {'date_from':{'type':'string','format':'date'}, 'date_to':{'type':'string','format':'date'},
            'limit':_integer(1,100), 'offset':_integer(0,1000000)}, ('date_from','date_to')),
 ]
+_EXTRA_ARGUMENTS={
+    'ozon_realization_article_month': {'all_articles':{'type':'boolean'}},
+    'ozon_posting_status': {'include_geography':{'type':'boolean'},'article':_text(256)},
+    'ozon_posting_candidates': {'include_geography':{'type':'boolean'},'article':_text(256)},
+    'ozon_posting_accruals': {'offer_id':_text(256),'discover_postings':{'type':'boolean'},'batch':_integer(1,500)},
+    'ozon_article_summary': {'discover_postings':{'type':'boolean'},'batch':_integer(1,500)},
+    'ozon_orders_analytics': {k:market_specs.FIELDS[k] for k in ('article','sku','limit','offset','include_funnel','mode')},
+    'wb_sales_summary': {k:market_specs.FIELDS[k] for k in ('nm_ids','vendor_codes','group_by')},
+    'wb_box_tariffs': {'nm_id':_integer(1,9007199254740991),'rf_mgt':{'type':'boolean','description':'Расчёт для малогабаритного товара, прямая доставка FBW по РФ.'}},
+    'wb_products': {'vendor_code':_text(256),'cursor':_text(1024)},
+    'wb_prices': {'vendor_code':_text(256),'cursor':_text(1024)},
+}
+_EXTRA_ARGUMENTS['ozon_orders_analytics']['dimension']={'type':'string','enum':['sku']}
+for tool in TOOLS:
+    name=tool['name']
+    if name in _EXTRA_ARGUMENTS:
+        schema=tool['inputSchema']
+        schema['properties'].update(_EXTRA_ARGUMENTS[name])
+        if name in ('ozon_article_summary','ozon_posting_accruals'):
+            schema['required']=[k for k in schema.get('required',[]) if k!='posting_numbers']
+            tool['description']+=' Для автоматического поиска передайте discover_postings=true, offer_id, date_from и date_to.'
+        elif name=='ozon_realization_article_month':
+            schema['required']=['year','month']
+            tool['description']+=' Для сводки по всем артикулам месяца передайте all_articles=true.'
+        elif name=='ozon_orders_analytics':
+            tool['description']+=' Для штук и суммы по SKU задайте dimension=sku и при необходимости article.'
 TOOLS.extend(_tool(name, contract[0], *market_specs.schema(name)) for name, contract in market_specs.TOOLS.items())
 TOOL_NAMES = frozenset(tool['name'] for tool in TOOLS)
 
@@ -146,8 +172,9 @@ class MCPToolError(Exception):
         self.reason = reason
         super().__init__(code)
 
-def _tool_error(code, retry_after_seconds=None, reason=None):
+def _tool_error(code, retry_after_seconds=None, reason=None, diagnostic=None):
     details={'error':code, 'message':_ERRORS[code]}
+    if code=='provider_timeout' and diagnostic: details.update(diagnostic)
     if code == 'rate_limited':
         details['retry_after_seconds']=retry_after_seconds
         if reason == 'retry_time_unknown':
@@ -290,7 +317,7 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
                 if name in market_specs.TOOLS and data.get('status')=='provider_access_denied':
                     result['isError']=True
             except MCPToolError as exc:
-                result = _tool_error(exc.code,exc.retry_after_seconds,exc.reason)
+                result = _tool_error(exc.code,exc.retry_after_seconds,exc.reason,getattr(exc,'diagnostic',None))
             except Exception:
                 result = _tool_error('unavailable')
     else:

@@ -639,8 +639,47 @@ def read(name, args, request):
         return _orders(args, request)
     if name == "ozon_supply_items":
         return _items(args, request)
-    if name in ("ozon_stocks", "ozon_stocks_by_cluster"):
+    if name in ("ozon_stocks", "ozon_stocks_by_cluster", "ozon_stocks_analytics"):
         return _stocks(name, args, request)
+    if name == "ozon_turnover":
+        skus = args.get("skus") or _report_skus(args, request)
+        if "article" in args and "skus" in args and not set(map(str,skus))<=set(map(str,lookup(args["article"],request))):
+            return result([],complete=False,issues=["article_sku_conflict"])
+        if "article" in args and not skus:
+            return result([], complete=False, issues=["article_identity_unavailable"])
+        limit, offset = args.get("limit", 100), args.get("offset", 0)
+        path = "/v1/analytics/turnover/stocks"
+        raw = request("POST", BASE + path, body={"sku":list(map(str,skus)), "limit":limit, "offset":offset}, ttl=1800)
+        page = rows(raw.get("items"))
+        items = [dict(_identity(row), **select(row,"name ads current_stock idc idc_grade turnover turnover_grade"))
+                 for row in page if ("article" not in args or row.get("offer_id")==args["article"])
+                 and (not skus or str(row.get("sku")) in set(map(str,skus)))]
+        return result(items, offset+limit if len(page)==limit else None, source=path)
+    if name == "ozon_delivery_time":
+        skus = _report_skus(args, request)
+        if "article" in args and not skus:
+            return result([], complete=False, issues=["article_identity_unavailable"])
+        filters = {"period":{"from":args["date_from"],"to":args["date_to"]}, "delivery_schema":"ALL"}
+        if skus:
+            filters["skus"] = list(map(str,skus))
+        if "cluster_id" in args:
+            filters["macrolocal_cluster_to_ids"] = [str(args["cluster_id"])]
+        limit, offset = args.get("limit",100), args.get("offset",0)
+        path = "/v1/analytics/local-sale/clusters-items/info"
+        raw = request("POST", BASE+path,body={"filter":filters,"limit":limit,"offset":offset,
+                      "sort_by":"LOCALITY","sort_dir":"DESC"},ttl=1800)
+        page = rows(raw.get("items"))
+        items = []
+        for row in page:
+            product, metrics = row["item"], row["metrics"]["local_data"]
+            items.append(dict(_identity(product), cluster_id=row.get("cluster_to_id"),
+                              local_units=metrics.get("local_quantity"), total_units=metrics.get("total_quantity"),
+                              locality_index=metrics.get("index"), average_delivery_hours=None))
+        total = raw.get("total")
+        if type(total) is not int or total < 0:
+            raise ValueError("Invalid Ozon locality total")
+        return result(items,offset+len(page) if page and offset+len(page)<total else None,
+                      complete=offset+len(page)>=total,source=path, time_coverage="actual_delivery_duration_unavailable_in_current_seller_schema")
     if name == "ozon_sku_daily":
         return _daily(args, request)
     if name == "ozon_fbo_postings_geo":

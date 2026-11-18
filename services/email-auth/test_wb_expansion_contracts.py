@@ -572,12 +572,12 @@ class WBExpansionContracts(unittest.TestCase):
         self.assertEqual(result['mean_rating'], 4)
 
     def test_advertising_campaign_list_preserves_status_and_id(self):
-        raw = {'all': 2, 'adverts': [{'type': 9, 'status': 9, 'count': 1, 'advert_list': [{'advertId': 123}]},
-                                     {'type': 8, 'status': 7, 'count': 1, 'advert_list': [{'advertId': 124}]}]}
-        wire = Wire(('GET', ADVERT + '/adv/v1/promotion/count', raw))
+        raw = {'next':'', 'adverts': [{'status': 9, 'advertId': 123,'settings':{'paymentType':'cpm'}},
+                                     {'status': 7,'advertId': 124,'settings':{'paymentType':'cpc'}}]}
+        wire = Wire(('GET', ADVERT + '/api/advert/v3/adverts', raw))
         result = self.read('wb_ads', {**PERIOD, 'report': 'campaigns'}, wire)
-        self.assertEqual([(r['campaign_id'], r['status'], r['type']) for r in result['items']],
-                         [(123, 9, 9), (124, 7, 8)])
+        self.assertEqual([(r['campaign_id'], r['status'], r['payment_type']) for r in result['items']],
+                         [(123, 9, 'cpm'), (124, 7, 'cpc')])
 
     def test_advertising_attribution_and_campaign_debits_remain_distinct(self):
         endpoint = ADVERT + '/api/advert/v4/fullstats'

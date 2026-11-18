@@ -2,7 +2,7 @@
 
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 from hashlib import sha256
 import urllib.error
 
@@ -135,9 +135,9 @@ def _locations(state, horizon, as_of):
         avg, counts, cancelled, retained = {}, {}, {}, {}
         for days in (7, 30, 90):
             first = (as_of - timedelta(days=days - 1)).isoformat()
-            units = sum(v for d, v in g["daily"].items() if d >= first)
+            units = sum(v for d, v in g["daily"].items() if first<=d<=as_of.isoformat())
             counts[str(days)] = units
-            cancellations = sum(v for d, v in g.get("days_with_cancellations", {}).items() if d >= first)
+            cancellations = sum(v for d, v in g.get("days_with_cancellations", {}).items() if first<=d<=as_of.isoformat())
             known = demand_verified and not any(d >= first for d in g.get("unknown_cancellation_days", {}))
             cancelled[str(days)] = cancellations if known else None
             retained[str(days)] = units - cancellations if known else None
@@ -150,6 +150,30 @@ def _locations(state, horizon, as_of):
             else None
         )
         net = max(0, gross - inbound) if gross is not None and inbound is not None else None
+        planning=state.get("planning")
+        coverage={}
+        if planning is not None:
+            known_days=set(g.get("known_stock_days", []))
+            zero_days=set(g.get("stockout_days", [])) & known_days
+            for days in (7,30,90):
+                dates={(as_of-timedelta(days=i)).isoformat() for i in range(days)}
+                observed=dates & known_days
+                unavailable=dates & zero_days
+                bulk=sum(g.get("wholesale_daily",{}).get(d,0) for d in dates-unavailable)
+                ordinary=sum(g["daily"].get(d,0) for d in dates-unavailable)-bulk
+                denominator=days-len(unavailable)
+                consistent=all(0<=g.get("wholesale_daily",{}).get(d,0)<=g["daily"].get(d,0) for d in dates)
+                avg[str(days)]=str(Decimal(ordinary)/denominator) if demand_verified and denominator and ordinary>=0 and consistent else None
+                coverage[str(days)]={"stock_observed_days":len(observed),"stockout_days":len(unavailable),
+                    "unknown_stock_days":days-len(observed),"excluded_wholesale_units":bulk,"demand_days":denominator,
+                    "ordinary_ordered_units":ordinary}
+            rate=Decimal(avg["30"]) if avg["30"] is not None else None
+            # Keep the unrounded rational until the final ceiling.
+            window=coverage["30"]
+            expected=(Decimal(window["ordinary_ordered_units"])*(horizon+planning["lead_time_days"])*
+                      (100+planning["safety_stock_percent"])/(100*window["demand_days"])) if rate is not None else None
+            gross=max(0,int((expected-available).to_integral_value(rounding=ROUND_CEILING))) if complete and available is not None and expected is not None else None
+            net=max(0,gross-inbound) if gross is not None and inbound is not None else None
         answer.append(
             {
                 "warehouse": g["warehouse"] or key,
@@ -163,7 +187,7 @@ def _locations(state, horizon, as_of):
                 "order_basis": "gross_ordered_units_including_cancellations",
                 "cancelled_units": cancelled,
                 "ordered_units_after_known_cancellations": retained,
-                "days_of_cover": str(Decimal(available) * 30 / counts["30"])
+                "days_of_cover": str(Decimal(available)/rate)
                 if complete and available is not None and rate
                 else None,
                 "transfer_units": sum(s["transfers"] for s in stock)
@@ -177,8 +201,9 @@ def _locations(state, horizon, as_of):
                 "recommendation_without_inbound": gross,
                 "recommendation_if_inbound_arrives": net,
                 "confirmed_recommended_quantity": gross
-                if not state.get("orders_preliminary") and (gross == 0 or inbound == 0)
+                if not state.get("orders_preliminary") and (gross == 0 or inbound == 0) and (planning is None or coverage["30"]["unknown_stock_days"]==0)
                 else None,
+                "demand_coverage":coverage, "calendar_ordered_units":counts,
                 "recommendation_note": (
                     "Расчёт на валовых заказах с отменами. Количество к поставке предполагает, что весь указанный транзит поступит в пределах горизонта."
                     if net is not None
@@ -259,13 +284,19 @@ def _market_total(state, horizon, as_of, missing_stock):
 
 
 def _merge_cancellations(group, location):
+    for field in ("known_stock_days","stockout_days"):
+        dates=set(location.get(field,[]))
+        group[field]=sorted(dates if field not in group else dates & set(group[field]))
+    wholesale=group.setdefault("wholesale_daily",{})
+    for day,units in location.get("wholesale_daily",{}).items():
+        wholesale[day]=wholesale.get(day,0)+units
     counts = group.setdefault("days_with_cancellations", {})
     for day, count in location.get("days_with_cancellations", {}).items():
         counts[day] = counts.get(day, 0) + count
     group.setdefault("unknown_cancellation_days", {}).update(location.get("unknown_cancellation_days", {}))
 
 
-def _platform(provider, article, nm, wire, horizon, as_of):
+def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
     since = (as_of - timedelta(days=89)).isoformat()
     key = [provider, article, nm, as_of.isoformat()]
     context = (
@@ -390,6 +421,35 @@ def _platform(provider, article, nm, wire, horizon, as_of):
                     checkpoint()
                     break
                 checkpoint()
+        if planning is not None:
+            state["planning"]=planning
+            for loc in state["locations"].values():
+                loc.update(wholesale_daily={},known_stock_days=[],stockout_days=[])
+            from statistics import median
+            event_units=[event[2] for event in state["orders"].values() if event[2]>0]
+            ordinary_size=median(event_units) if len(event_units)>=5 else None
+            for loc,day,units,_ in state["orders"].values():
+                outlier=(planning.get("bulk_explicit") or (ordinary_size is not None and units>=4*ordinary_size))
+                if units >= planning["bulk_order_min_units"] and outlier and loc in state["locations"]:
+                    by_day=state["locations"][loc]["wholesale_daily"]
+                    by_day[day]=by_day.get(day,0)+units
+            if hasattr(wire,"gate_dir"):
+                import market_history
+                records=market_history.History(wire.gate_dir).verified_days(provider,wire.creds,provider+"_availability",since,as_of.isoformat())
+                for day,(_,items) in records.items():
+                    groups={}
+                    for item in items:
+                        if item.get("article")==article and item.get("kind","warehouse")=="warehouse":
+                            location=str(item.get("warehouse_id") if provider=="ozon" else item.get("warehouse"))
+                            groups.setdefault(location,[]).append((item.get("available_stock_count",item.get("quantity")),item.get("availability_basis")))
+                    for loc,positions in groups.items():
+                        values=[v for v,_ in positions]
+                        if loc in state["locations"] and all(type(v) is int and v>=0 for v in values):
+                            whole_day=all(b=="whole_day" for _,b in positions)
+                            if any(values) or whole_day:
+                                state["locations"][loc]["known_stock_days"].append(day)
+                            if not any(values) and whole_day and not state["locations"][loc]["daily"].get(day):
+                                state["locations"][loc]["stockout_days"].append(day)
         locations = _locations(state, horizon, as_of)
         unmapped = [
             key
@@ -404,6 +464,34 @@ def _platform(provider, article, nm, wire, horizon, as_of):
         clusters = _clusters(state, horizon, as_of, unmapped) if provider == "ozon" else []
         destinations = clusters if provider == "ozon" else locations
         total = _market_total(state, horizon, as_of, missing_stock)
+        if provider=="wb" and planning is not None and hasattr(wire,"deadline") and state["done"]["stock"]:
+            import supply_history
+            from market_composites import observed
+            cutoff=(as_of+timedelta(days=1+horizon+planning["lead_time_days"])).isoformat()
+            arrivals=observed(lambda:supply_history.report("wb_supplies",{
+                "article":article,"date_from":(as_of-timedelta(days=179)).isoformat(),
+                "date_to":(as_of+timedelta(days=1)).isoformat(),"status_ids":[4,6],"limit":100},wire))
+            incoming={}
+            usable=arrivals["complete"]
+            for shipment in arrivals["items"]:
+                declared,accepted=shipment.get("declared_units"),shipment.get("accepted_units")
+                day=(shipment.get("supply_date") or "")[:10]
+                if not day or not shipment.get("warehouse") or type(declared) is not int or type(accepted) is not int or not 0<=accepted<=declared:
+                    usable=False
+                    continue
+                if day<=cutoff:
+                    name=shipment["warehouse"]
+                    incoming[name]=incoming.get(name,0)+declared-accepted
+            if usable:
+                for rec in [*locations,total]:
+                    inbound=incoming.get(rec["warehouse"],0) if "warehouse" in rec else sum(incoming.values())
+                    rec["inbound_units"]=inbound
+                    rec["inbound_assumption"]="unaccepted_units_on_reported_receiving_or_gate_supplies_created_in_180_days"
+                    gross=rec["recommendation_without_inbound"]
+                    if gross is not None:
+                        rec["recommended_quantity"]=rec["recommendation_if_inbound_arrives"]=max(0,gross-inbound)
+            else:
+                pending.append({"source":"wb_supplier_inbound","status":arrivals.get("status","partial")})
         total["stock_pooling_assumption"] = (
             "Общий расчёт площадки предполагает, что весь запас доступен любому складу."
         )
@@ -484,7 +572,9 @@ def read(args, wires, mapping):
         as_of = datetime.now(timezone.utc if provider == "ozon" else MOSCOW).date() - timedelta(days=1)
         try:
             report = _platform(
-                provider, mapping[field], mapping.get("wb_nm_id"), wires[provider], horizon, as_of
+                provider, mapping[field], mapping.get("wb_nm_id"), wires[provider], horizon, as_of,
+                dict({k:args.get(k,v) for k,v in (("lead_time_days",0),("safety_stock_percent",0),("bulk_order_min_units",10))},
+                     bulk_explicit="bulk_order_min_units" in args)
             )
         except finance_gate.GateError as exc:
             report = {"marketplace": provider, "complete": False, "status": exc.reason}
@@ -504,5 +594,7 @@ def read(args, wires, mapping):
         account_coverage="partial",
         scope_note="План пополнения складов Ozon FBO и Wildberries FBW. Продажи со склада продавца вынесены за пределы расчёта. Темп рассчитан по заказанным штукам с отменами.",
         order_basis="gross_ordered_units_including_cancellations; Ozon FBO UTC and WB Moscow completed calendar days",
-        recommendation_basis="ceil(mean_30d_units * horizon) less available and separately identified inbound; minimum zero",
+        lead_time_days=args.get("lead_time_days",0),safety_stock_percent=args.get("safety_stock_percent",0),
+        bulk_order_min_units=args.get("bulk_order_min_units",10),
+        recommendation_basis="max(0,ceil(d*(lead_time_days+horizon_days)*(1+safety_stock_percent/100)-available-inbound)); unobserved stock days yield a conditional estimate",
     )

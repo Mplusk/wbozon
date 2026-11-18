@@ -1,0 +1,11 @@
+[Unit]
+Description=Collect and backfill marketplace reporting days
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+RandomizedDelaySec=45
+Unit=wbozon-market-archive.service
+
+[Install]
+WantedBy=timers.target
