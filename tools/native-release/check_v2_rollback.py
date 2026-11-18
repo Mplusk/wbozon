@@ -1,4 +1,4 @@
-"""Offline, bidirectional acceptance of the deployed reports release and v2.
+"""Offline, bidirectional acceptance of the historic and next marketplace releases.
 
 Both supplied services run in separate interpreter processes with synthetic data.
 The packaged candidate must match its Git archive and the controller's pinned
@@ -34,15 +34,18 @@ import check_market_cutover as replay
 BASE = 'c8b2257cdd11bb539d3705d269fda6b23c0bde99'
 BRIDGE = '6eccd5d159bd2957e6ff25b18783aa6e20e81ea2'
 SERVER = '08c6f9b3778a4ea039d8a0093623c815cc95ecc4'
+DEPLOYED_V2 = '4de7fd3f83fcd90eacf5221ef9d02651c1a49a09'
 BASE_INVENTORY = 'b543e1568394095a20f14213feb3a194a456716c70d43b95c06b33c98cd32aed'
 BRIDGE_INVENTORY = '4fbd8858010f37f39b7676c4b34fede5526aa56623569bbc231e77524edce0cf'
 SERVER_INVENTORY = '88b7d5dde100b635d7ac881e1f6999fc9d0626fff5c1ea9e722e31ec58aa9dbc'
+V2_INVENTORY = 'efce8b3fceb171b0ce4025e08708389623993046cb2962d26fbee43063af4187'
 NEW_TOOLS = frozenset((
     'article_map', 'unit_economics', 'sales_drop_check', 'mcp_health',
     'ozon_stocks_analytics', 'ozon_turnover', 'ozon_delivery_time',
     'wb_retentions', 'wb_region_sales', 'wb_returns_report', 'wb_ads_finance', 'wb_search_queries',
 ))
 CREDS = {'client_id': '101', 'api_key': 'synthetic-v2-rollback-key'}
+ROTATED_CREDS = {'client_id': '101', 'api_key': 'synthetic-v2-rotated-key'}
 BRIDGE_TOKEN = 'b' * 48
 SESSION = 's' * 43
 NOW = 100000
@@ -65,26 +68,42 @@ def assert_sources(old, new, candidate_ref, root):
         raise ValueError('candidate commit must be a full lowercase Git SHA')
     reference = root / 'candidate-reference'
     server = root / 'server-reference'
+    deployed = root / 'deployed-v2-reference'
     export_service(candidate_ref, reference)
     export_service(SERVER, server)
+    export_service(DEPLOYED_V2, deployed)
     old_hash, new_hash = service_digest(old), service_digest(new)
     if old_hash != SERVER_INVENTORY or service_digest(server) != SERVER_INVENTORY:
-        raise AssertionError('the deployed 08c6f9b service inventory does not match')
-    if new_hash == old_hash or new_hash != service_digest(reference):
-        raise AssertionError('packaged candidate is not the distinct exact Git service tree')
+        raise AssertionError('the historic 08c6f9b service inventory does not match')
+    if new_hash != V2_INVENTORY or service_digest(deployed) != V2_INVENTORY or new_hash != service_digest(reference):
+        raise AssertionError('the historic v2 service does not match its exact deployed Git tree')
     for name in ('finance_gate.py', 'market_cooldown.py'):
         if (old / name).read_bytes() != (new / name).read_bytes():
             raise AssertionError('shared cooldown implementation changed: ' + name)
     return old_hash, new_hash
 
 
-def assert_policy(old, new, root, new_hash):
+def assert_next_sources(deployed, candidate, candidate_ref, root):
+    if not re.fullmatch(r'[0-9a-f]{40}', candidate_ref):
+        raise ValueError('next candidate commit must be a full lowercase Git SHA')
+    reference = root / 'next-reference'
+    export_service(candidate_ref, reference)
+    old_hash, new_hash = service_digest(deployed), service_digest(candidate)
+    if old_hash != V2_INVENTORY or new_hash == old_hash or new_hash != service_digest(reference):
+        raise AssertionError('next candidate must be distinct and match its exact Git service tree')
+    for name in ('finance_gate.py', 'market_cooldown.py'):
+        if (deployed / name).read_bytes() != (candidate / name).read_bytes():
+            raise AssertionError('next candidate changed the shared cooldown implementation: ' + name)
+    return old_hash, new_hash
+
+
+def assert_policy(old, new, root, new_hash, next_service=None, next_hash=None):
     # Import the policy which is to be shipped, not an older surrogate.
     import cd
     if (cd.MARKET_BASE, cd.MARKET_BRIDGE, cd.MARKET_REPORTS) != (
             BASE_INVENTORY, BRIDGE_INVENTORY, SERVER_INVENTORY):
         raise AssertionError('historical marketplace policy identities changed')
-    if getattr(cd, 'MARKET_V2', None) != new_hash:
+    if getattr(cd, 'MARKET_V2', None) != V2_INVENTORY or new_hash != V2_INVENTORY:
         raise AssertionError('candidate inventory is not independently pinned by the controller')
     base, bridge, previous, candidate = (root / x for x in ('base', 'bridge', 'previous', 'candidate'))
     export_service(BASE, base / 'service')
@@ -113,6 +132,25 @@ def assert_policy(old, new, root, new_hash):
         except cd.ReleaseError:
             continue
         raise AssertionError('unreviewed marketplace pair admitted: %s -> %s' % (first.name, second.name))
+    if next_service is not None:
+        if not isinstance(next_hash, str) or getattr(cd, 'MARKET_V2_NEXT', None) != next_hash:
+            raise AssertionError('next candidate inventory has not been independently pinned by the controller')
+        following, altered = root / 'following', root / 'hybrid-next'
+        shutil.copytree(next_service, following / 'service')
+        shutil.copytree(following, altered)
+        with (altered / 'service' / 'portal.py').open('ab') as stream:
+            stream.write(b'\n# synthetic altered next tree\n')
+        for first, second in ((candidate, following), (following, candidate), (following, following)):
+            if cd.market_transition(first, second) != 'preserve_blocked_finance':
+                raise AssertionError('reviewed next transition was not admitted')
+        for first, second in ((base, following), (following, base), (bridge, following), (following, bridge),
+                              (previous, following), (following, previous),
+                              (candidate, altered), (altered, candidate), (following, altered), (altered, following)):
+            try:
+                cd.market_transition(first, second)
+            except cd.ReleaseError:
+                continue
+            raise AssertionError('unreviewed next marketplace pair admitted: %s -> %s' % (first.name, second.name))
 
 
 def network_fence():
@@ -140,6 +178,7 @@ def state_child():
     import portal
     import market_transport
     data, stage = Path(spec['data']), spec['stage']
+    previous_is_v2 = spec.get('previous_is_v2', False)
     os.environ.update({'DATABASE_PATH': str(data / 'auth.sqlite'), 'VAULT_PATH': str(data / 'vault.sqlite'),
                        'SESSION_SECRET_FILE': str(data / 'session-secret'),
                        'VAULT_KEY_FILE': str(data / 'vault-secret'),
@@ -186,9 +225,28 @@ def state_child():
     if stage == 'restored':
         if app.vault.bridge_activity('bridge') != ('unknown', 'ok', NOW + 10):
             raise AssertionError('old release cannot read new operation activity')
-        status, _ = request(app, '/api/read', {'operation': 'ozon_turnover', 'arguments': {}}, BRIDGE_TOKEN)
-        if status != 400:
-            raise AssertionError('old release should reject the unknown v2 operation')
+        if previous_is_v2:
+            from market_history import History, scope
+            history = History(str(data / '.ozon-finance-gates'))
+            if (not history.authorized(CREDS, 'synthetic-owner') or
+                    not history.authorized(ROTATED_CREDS, 'synthetic-owner') or
+                    scope('ozon', CREDS) != (data / 'archive-scope').read_text(encoding='ascii') or
+                    scope('ozon', ROTATED_CREDS) != scope('ozon', CREDS)):
+                raise AssertionError('deployed v2 cannot recognize next-release archive identity')
+            expected = {
+                '2026-11-16': ('2026-11-17T08:00:00+00:00',
+                               [{'article': 'previous-synthetic-history', 'quantity': 1}]),
+                '2026-11-17': ('2026-11-18T08:00:00+00:00',
+                               [{'article': 'private-synthetic-history', 'quantity': 2}]),
+            }
+            if history.read_days('synthetic-owner', 'wb_orders', '2026-11-16', '2026-11-17') != expected:
+                raise AssertionError('deployed v2 cannot read next-release encrypted history')
+            if history.check(CREDS, 'ozon_turnover')['status'] != 'ok':
+                raise AssertionError('deployed v2 cannot read next-release tool status')
+        else:
+            status, _ = request(app, '/api/read', {'operation': 'ozon_turnover', 'arguments': {}}, BRIDGE_TOKEN)
+            if status != 400:
+                raise AssertionError('old release should reject the unknown v2 operation')
     wire = market_transport.Wire('ozon', CREDS, str(data / '.ozon-finance-gates'), 10**12)
     cache_now = int((data / 'cache-clock').read_text(encoding='ascii'))
     if stage == 'seed':
@@ -196,6 +254,14 @@ def state_child():
         wire.record_stocks(['101'], 'synthetic-item',
                            [{'sku': '101', 'article': 'synthetic-item', 'available': 4}],
                            '2026-11-17T12:00:00Z')
+        if previous_is_v2:
+            from market_history import History, scope
+            history = History(str(data / '.ozon-finance-gates'))
+            (data / 'archive-scope').write_text(scope('ozon', CREDS), encoding='ascii')
+            history.confirm(CREDS, 'synthetic-owner')
+            history.save_day('synthetic-owner', 'wb_orders', '2026-11-16',
+                             [{'article': 'previous-synthetic-history', 'quantity': 1}],
+                             '2026-11-17T08:00:00+00:00')
     else:
         if wire.cached('legacy-cache') != b'{"origin":"legacy"}':
             raise AssertionError('legacy encrypted cache lost across transition')
@@ -209,6 +275,17 @@ def state_child():
                                '2026-11-18T12:00:00Z')
             from market_history import History
             history = History(str(data / '.ozon-finance-gates'))
+            if previous_is_v2:
+                from market_history import scope
+                if (not history.authorized(CREDS, 'synthetic-owner') or
+                        scope('ozon', CREDS) != (data / 'archive-scope').read_text(encoding='ascii') or
+                        scope('ozon', ROTATED_CREDS) != scope('ozon', CREDS)):
+                    raise AssertionError('next release cannot recognize deployed v2 archive identity')
+                if history.read_days('synthetic-owner', 'wb_orders', '2026-11-16', '2026-11-16') != {
+                        '2026-11-16': ('2026-11-17T08:00:00+00:00',
+                                       [{'article': 'previous-synthetic-history', 'quantity': 1}])}:
+                    raise AssertionError('next release cannot read deployed v2 encrypted history')
+                history.confirm(ROTATED_CREDS, 'synthetic-owner')
             history.save_day('synthetic-owner', 'wb_orders', '2026-11-17',
                              [{'article': 'private-synthetic-history', 'quantity': 2}],
                              '2026-11-18T08:00:00+00:00')
@@ -233,11 +310,17 @@ def state_child():
                 raise AssertionError('stale v2 fetch time was attached to a rollback cache write')
             from market_history import History
             history = History(str(data / '.ozon-finance-gates'))
-            days = history.read_days('synthetic-owner', 'wb_orders', '2026-11-17', '2026-11-18')
-            if days != {'2026-11-17': ('2026-11-18T08:00:00+00:00',
-                                       [{'article': 'private-synthetic-history', 'quantity': 2}])}:
+            days = history.read_days('synthetic-owner', 'wb_orders', '2026-11-16', '2026-11-18')
+            expected_days = {'2026-11-17': ('2026-11-18T08:00:00+00:00',
+                                             [{'article': 'private-synthetic-history', 'quantity': 2}])}
+            expected_coverage = {'2026-11-17': '2026-11-18T08:00:00+00:00'}
+            if previous_is_v2:
+                expected_days['2026-11-16'] = ('2026-11-17T08:00:00+00:00',
+                                                [{'article': 'previous-synthetic-history', 'quantity': 1}])
+                expected_coverage['2026-11-16'] = '2026-11-17T08:00:00+00:00'
+            if days != expected_days:
                 raise AssertionError('v2 could not decrypt its archive after rollback')
-            if history.coverage('synthetic-owner', 'wb_orders') != {'2026-11-17': '2026-11-18T08:00:00+00:00'}:
+            if history.coverage('synthetic-owner', 'wb_orders') != expected_coverage:
                 raise AssertionError('history coverage did not survive rollback')
             check = history.check(CREDS, 'ozon_turnover')
             if check['status'] != 'ok' or not check['last_checked_at']:
@@ -257,11 +340,12 @@ def state_child():
     print(json.dumps({'stage': stage, 'names': sorted(t['name'] for t in catalog['result']['tools'])}))
 
 
-def run_state(python, service, data, stage):
+def run_state(python, service, data, stage, *, previous_is_v2=False):
     env = {name: os.environ[name] for name in ('PATH', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP') if name in os.environ}
     env['PYTHONDONTWRITEBYTECODE'] = '1'
     result = subprocess.run([str(python), '-B', '-I', str(Path(__file__).resolve()), '--_state'], cwd=service,
-                            input=json.dumps({'data': str(data), 'stage': stage}), text=True, capture_output=True,
+                            input=json.dumps({'data': str(data), 'stage': stage, 'previous_is_v2': previous_is_v2}),
+                            text=True, capture_output=True,
                             env=env, timeout=25)
     if result.returncode:
         raise AssertionError('state probe %s failed: %s' % (stage, result.stderr))
@@ -324,32 +408,41 @@ def check_history_key_loss(python, service, data, root):
         raise AssertionError('history key loss changed the original archive or installed a replacement key')
 
 
-def check_state(python, old, new, root):
+def check_state(python, old, new, root, *, previous_is_v2=False):
     data = root / 'state'
     data.mkdir(mode=0o700)
     (data / 'session-secret').write_text('x' * 32, encoding='ascii')
     (data / 'vault-secret').write_bytes(b'V' * 32)
     (data / 'bridge-hash').write_text(hashlib.sha256(BRIDGE_TOKEN.encode()).hexdigest(), encoding='ascii')
     (data / 'cache-clock').write_text(str(int(time.time())), encoding='ascii')
-    first = run_state(python, old, data, 'seed')
+    first = run_state(python, old, data, 'seed', previous_is_v2=previous_is_v2)
     auth, vault, reports = data / 'auth.sqlite', data / 'vault.sqlite', data / '.market-reports' / 'reports.db'
     before = {p: schema(p) for p in (auth, vault, reports)}
-    upgraded = run_state(python, new, data, 'candidate')
-    if len(first['names']) != 46 or len(upgraded['names']) != 58 or set(upgraded['names']) - set(first['names']) != NEW_TOOLS:
-        raise AssertionError('expected 46 existing and 12 additional MCP tools')
-    if not set(first['names']) < set(upgraded['names']):
-        raise AssertionError('existing MCP tools were removed')
+    history = reports.parent / 'history-v2.db'
+    history_key = reports.parent / 'history-v2.key'
+    previous_history_schema = schema(history) if previous_is_v2 else None
+    previous_history_key = history_key.read_bytes() if previous_is_v2 else None
+    upgraded = run_state(python, new, data, 'candidate', previous_is_v2=previous_is_v2)
+    if previous_is_v2:
+        if len(first['names']) != 58 or upgraded['names'] != first['names']:
+            raise AssertionError('next release must retain the exact 58-tool v2 catalogue')
+    else:
+        if len(first['names']) != 46 or len(upgraded['names']) != 58 or set(upgraded['names']) - set(first['names']) != NEW_TOOLS:
+            raise AssertionError('expected 46 existing and 12 additional MCP tools')
+        if not set(first['names']) < set(upgraded['names']):
+            raise AssertionError('existing MCP tools were removed')
     for path in (auth, vault):
         if schema(path) != before[path]:
             raise AssertionError('controller requires an unchanged auth/vault schema')
     new_schema = schema(reports)
     if not before[reports].items() <= new_schema.items():
         raise AssertionError('candidate changed a previous report schema object')
+    if previous_is_v2 and (new_schema != before[reports] or schema(history) != previous_history_schema or
+                           history_key.read_bytes() != previous_history_key):
+        raise AssertionError('next candidate changed the deployed report/history schema or encryption key')
     observations = cache_observations(reports)
     if len(observations) != 1:
         raise AssertionError('candidate did not persist its observation')
-    history = reports.parent / 'history-v2.db'
-    history_key = reports.parent / 'history-v2.key'
     schema(history)
     key_bytes = history_key.read_bytes()
     if len(key_bytes) != 32 or b'private-synthetic-history' in history.read_bytes():
@@ -358,20 +451,23 @@ def check_state(python, old, new, root):
         raise AssertionError('history encryption key is not private')
     check_history_key_loss(python, new, data, root)
     archive_digest = hashlib.sha256(history.read_bytes()).digest()
-    restored = run_state(python, old, data, 'restored')
+    restored = run_state(python, old, data, 'restored', previous_is_v2=previous_is_v2)
     if restored['names'] != first['names']:
         raise AssertionError('rollback did not restore the previous MCP catalogue')
     if hashlib.sha256(history.read_bytes()).digest() != archive_digest or history_key.read_bytes() != key_bytes:
         raise AssertionError('old release modified the v2 history archive or key')
     if cache_observations(reports) != observations:
         raise AssertionError('old release modified the v2 observations')
-    resumed = run_state(python, new, data, 'resume')
+    resumed = run_state(python, new, data, 'resume', previous_is_v2=previous_is_v2)
     if resumed['names'] != upgraded['names']:
         raise AssertionError('re-upgrade did not restore the v2 MCP catalogue')
     if any(schema(path) != before[path] for path in (auth, vault)):
         raise AssertionError('auth/vault schema changed after rollback or resume')
     if not before[reports].items() <= schema(reports).items():
         raise AssertionError('previous report schema objects were not preserved')
+    if previous_is_v2 and (schema(reports) != before[reports] or schema(history) != previous_history_schema or
+                           history_key.read_bytes() != previous_history_key):
+        raise AssertionError('deployed report/history schema or encryption key changed after rollback')
 
 
 def check_submissions(python, source, target, data, provider):
@@ -618,25 +714,42 @@ def main():
     parser.add_argument('--current-service', required=True, type=Path)
     parser.add_argument('--candidate-service', required=True, type=Path)
     parser.add_argument('--candidate-commit', required=True)
+    parser.add_argument('--next-service', type=Path)
+    parser.add_argument('--next-commit')
     parser.add_argument('--python', required=True, type=Path)
     args = parser.parse_args()
+    if bool(args.next_service) != bool(args.next_commit):
+        parser.error('--next-service and --next-commit must be supplied together')
     old = args.current_service.resolve(strict=True)
     new = args.candidate_service.resolve(strict=True)
+    following = args.next_service.resolve(strict=True) if args.next_service else None
     python = args.python.absolute()  # preserve venv symlink
     if not python.is_file():
         parser.error('--python must be an existing interpreter')
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         old_hash, new_hash = assert_sources(old, new, args.candidate_commit, root)
-        assert_policy(old, new, root, new_hash)
+        next_hash = None
+        if following is not None:
+            _, next_hash = assert_next_sources(new, following, args.next_commit, root)
+        assert_policy(old, new, root, new_hash, following, next_hash)
         print('PASS pinned service inventories and exact allowed release pairs', flush=True)
-        check_state(python, old, new, root)
-        print('PASS session, MCP key, auth/vault schemas, report data and encrypted v2 archive', flush=True)
-        check_finance(python, old, new, root)
-        check_cooldowns(python, old, new, root)
-        check_category_wire(python, old, new, root)
+        pairs = [('historic C to D', old, new, False)]
+        if following is not None:
+            pairs.append(('deployed D to next E', new, following, True))
+        for label, source, target, previous_is_v2 in pairs:
+            pair_root = root / ('next-checks' if previous_is_v2 else 'historic-checks')
+            pair_root.mkdir(mode=0o700)
+            print('Checking', label, flush=True)
+            check_state(python, source, target, pair_root, previous_is_v2=previous_is_v2)
+            print('PASS session, MCP key, auth/vault schemas, report data and encrypted v2 archive', flush=True)
+            check_finance(python, source, target, pair_root)
+            check_cooldowns(python, source, target, pair_root)
+            check_category_wire(python, source, target, pair_root)
         if (service_digest(old), service_digest(new)) != (old_hash, new_hash):
             raise AssertionError('a tested service changed during the check')
+        if following is not None and service_digest(following) != next_hash:
+            raise AssertionError('the next tested service changed during the check')
     print('PASS v2 rollback offline acceptance', flush=True)
 
 

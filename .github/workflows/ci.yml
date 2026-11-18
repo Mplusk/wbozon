@@ -148,7 +148,8 @@ jobs:
     if: github.event_name == 'push'
     needs: [email-auth, marketplace-egress]
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # Retain historical systemd acceptance and add separate D/E and E/E checks.
+    timeout-minutes: 35
     outputs:
       artifact_id: ${{ steps.native_artifact.outputs.artifact-id }}
       artifact_attempt: ${{ github.run_attempt }}
@@ -278,13 +279,26 @@ jobs:
         run: |
           set -euo pipefail
           previous="$RUNNER_TEMP/market-v2-parent/service"
-          mkdir -p "$previous"
+          deployed="$RUNNER_TEMP/market-v2-deployed/service"
+          mkdir -p "$previous" "$deployed"
           git archive 08c6f9b3778a4ea039d8a0093623c815cc95ecc4:services/email-auth | tar -x -C "$previous"
+          git archive 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09:services/email-auth | tar -x -C "$deployed"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
-            --candidate-service "$packaged" --candidate-commit "$GITHUB_SHA" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
+            --candidate-service "$deployed" --candidate-commit 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09 \
+            --next-service "$packaged" --next-commit "$GITHUB_SHA" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports --interrupted-finance \
-            --python /opt/staging-account-acceptance/venv/bin/python --baseline-service "$previous" --candidate-service "$packaged"
+            --python /opt/staging-account-acceptance/venv/bin/python --baseline-service "$previous" --candidate-service "$deployed"
+      - name: Verify next release rollback and same-release recovery under systemd
+        shell: bash
+        run: |
+          set -euo pipefail
+          deployed="$RUNNER_TEMP/market-v2-deployed/service"
+          packaged="$RUNNER_TEMP/native-candidate/service"
+          sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports --interrupted-finance \
+            --python /opt/staging-account-acceptance/venv/bin/python --baseline-service "$deployed" --candidate-service "$packaged"
+          sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports --interrupted-finance \
+            --python /opt/staging-account-acceptance/venv/bin/python --baseline-service "$packaged" --candidate-service "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash
         run: |

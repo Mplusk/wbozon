@@ -24,6 +24,9 @@ MARKET_BASE = 'b543e1568394095a20f14213feb3a194a456716c70d43b95c06b33c98cd32aed'
 MARKET_BRIDGE = '4fbd8858010f37f39b7676c4b34fede5526aa56623569bbc231e77524edce0cf'
 MARKET_REPORTS = '88b7d5dde100b635d7ac881e1f6999fc9d0626fff5c1ea9e722e31ec58aa9dbc'
 MARKET_V2 = 'efce8b3fceb171b0ce4025e08708389623993046cb2962d26fbee43063af4187'
+# Exact next service inventory from d5ae72734b1827894c1a26d132389005eb166e4c.
+# Change only together with the complete transition review.
+MARKET_V2_NEXT = '0f009122b40353df9f0a65c8cd8b01b3efaf39703eaa5281349bd8c8183aae81'
 
 
 def present(path):
@@ -45,15 +48,25 @@ def market_inventory(release):
 
 def market_transition(old, new):
     first, second = market_inventory(old), market_inventory(new)
+    protected = {MARKET_BRIDGE, MARKET_REPORTS, MARKET_V2}
+    if MARKET_V2_NEXT is not None:
+        if (not isinstance(MARKET_V2_NEXT, str) or not re.fullmatch('[0-9a-f]{64}', MARKET_V2_NEXT) or
+                MARKET_V2_NEXT in protected or MARKET_V2_NEXT == MARKET_BASE or MARKET_V2_NEXT == '0' * 64):
+            raise ReleaseError('invalid next marketplace service inventory')
+        protected.add(MARKET_V2_NEXT)
     if (first, second) == (MARKET_BASE, MARKET_BRIDGE):
         return 'bootstrap'
     if (first, second) == (MARKET_V2, MARKET_V2) or {first, second} == {MARKET_REPORTS, MARKET_V2}:
         # These exact service trees enforce the same on-disk cooldowns even
         # when a previous provider request ended without a known result.
         return 'preserve_blocked_finance'
+    if MARKET_V2_NEXT is not None and (
+            (first, second) == (MARKET_V2_NEXT, MARKET_V2_NEXT) or
+            {first, second} == {MARKET_V2, MARKET_V2_NEXT}):
+        return 'preserve_blocked_finance'
     if {first, second} == {MARKET_BRIDGE, MARKET_REPORTS}:
         return 'shared'
-    if first != second and {first, second} & {MARKET_BRIDGE, MARKET_REPORTS, MARKET_V2}:
+    if first != second and {first, second} & protected:
         raise ReleaseError('unreviewed marketplace cooldown transition')
     compatible(old, new)
     return None
