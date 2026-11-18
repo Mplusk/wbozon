@@ -8,7 +8,7 @@ import secrets
 import sys
 import time
 import urllib.error
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, os.getcwd())
 import portal
@@ -130,9 +130,76 @@ def worker(data, scenario, tag, tick=None, hold=0):
     return json.loads(output.getvalue())
 
 
+def report_state(data, stage):
+    """Observe the real worker boundary with synthetic state and an offline HTTP transport."""
+    gate = str(data / '.ozon-finance-gates')
+    wb = {'api_token': 'synthetic-report-fixture'}
+    paths = {
+        'ozon': ('https://api-seller.ozon.ru/v1/analytics/data', CREDENTIALS, 'ozon_orders_analytics',
+                 {'date_from': '2026-11-17', 'date_to': '2026-11-17'}),
+        'wb': ('https://content-api.wildberries.ru/content/v2/get/cards/list', wb, 'wb_products', {'limit': 1}),
+    }
+    honored = {}
+    for provider, (url, creds, name, args) in paths.items():
+        http = Mock()
+        http.open.side_effect = urllib.error.HTTPError('', 429, '', {}, None)
+        if stage == 'legacy':
+            envelope = dict(operation=name, args=args, creds=creds, finance_gate_dir=gate,
+                            deadline_monotonic=time.monotonic() + 8)
+            output = io.StringIO()
+            with patch('sys.stdin', io.StringIO(json.dumps(envelope))), patch('sys.stdout', output), \
+                 patch('urllib.request.build_opener', return_value=http):
+                portal._provider_worker()
+            result = json.loads(output.getvalue())
+            if http.open.called:
+                http.open.assert_called_once()
+                assert http.open.call_args.args[0].full_url == url and result['status'] == 429, result
+            else:
+                assert result.get('reason') == 'retry_time_unknown', result
+            honored[provider] = not http.open.called
+        else:
+            from market_transport import Wire
+            wire = Wire(provider, creds, gate, time.monotonic() + 5)
+            wire.opener = http
+            try:
+                wire('POST', url, body={}, interval=0)
+            except urllib.error.HTTPError as exc:
+                assert stage == 'seed' and exc.code == 429 and http.open.call_count == 1
+                exc.close()
+            except portal.finance_gate.GateError as exc:
+                assert stage == 'resume' and exc.reason == 'retry_time_unknown' and not http.open.called
+            else:
+                raise AssertionError('offline method limit unexpectedly admitted')
+    if stage == 'legacy':
+        return honored
+
+    wire = Wire('wb', wb, gate, time.monotonic() + 5)
+    base = 'https://seller-analytics-api.wildberries.ru/api/v1/'
+    for path, confirmed in (('warehouse_remains', True), ('paid_storage', False)):
+        wire.opener = Mock()
+        wire.opener.open.side_effect = TimeoutError()
+        if confirmed:
+            response = io.BytesIO(b'{"data":{"taskId":"synthetic-report-id"}}')
+            response.status = 200
+            wire.opener.open.side_effect = None
+            wire.opener.open.return_value = response
+        try:
+            value = wire('GET', base + path, query={}, interval=0, job=True)
+            assert confirmed and value['data']['taskId'] == 'synthetic-report-id'
+        except TimeoutError:
+            assert not confirmed and stage == 'seed'
+        except portal.finance_gate.GateError as exc:
+            assert not confirmed and stage == 'resume' and exc.reason == 'retry_time_unknown'
+        assert wire.opener.open.call_count == (1 if stage == 'seed' else 0)
+    return {'confirmed_task_reused_and_unknown_creation_blocked': stage == 'resume'}
+
+
 if __name__ == '__main__':
     action, directory, *args = sys.argv[1:]
     if action == 'worker':
         print(json.dumps(worker(Path(directory), args[0], args[1], int(args[2]))))
     elif action == 'activity':
         activity(Path(directory), args[0])
+    elif action == 'report-state' and args[0] in ('seed', 'legacy', 'resume'):
+        with patch('socket.socket.connect', side_effect=AssertionError('network disabled')):
+            print(json.dumps(report_state(Path(directory), args[0])))

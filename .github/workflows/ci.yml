@@ -229,6 +229,18 @@ jobs:
             sudo python3 -u -I tools/native-release/host_acceptance.py \
               --python /opt/staging-account-acceptance/venv/bin/python --gate-source "$packaged/finance_gate.py"
           fi
+      - name: Measure the packaged reports release against the verified production rollback version
+        shell: bash
+        run: |
+          set -euo pipefail
+          reports=bed0c74cdbc320ceaf3763f596c260ae998f5530
+          if [[ "$(git rev-parse "$GITHUB_SHA:services/email-auth")" == "$(git rev-parse "$reports:services/email-auth")" ]]; then
+            python3 -B -I tools/native-release/check_report_rollback.py \
+              --python "$RUNNER_TEMP/native-candidate-venv/bin/python" \
+              --packaged-service "$RUNNER_TEMP/native-candidate/service" --evidence-only
+          else
+            echo "This pinned rollback measurement applies only to the reports service from $reports."
+          fi
       - name: Package candidate with source provenance and hashes
         shell: bash
         run: |
