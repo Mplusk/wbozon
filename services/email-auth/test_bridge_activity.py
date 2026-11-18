@@ -46,24 +46,6 @@ class BridgeActivityTests(unittest.TestCase):
         self.vault.record_bridge_activity('bridge','ozon_products','failed',99)
         self.assertEqual(self.vault.bridge_activity('bridge'),('wb_prices','ok',100))
 
-    def test_new_operations_keep_activity_readable_by_the_previous_release(self):
-        token=secrets.token_urlsafe(32)
-        self.app.mcp_token_hash=hashlib.sha256(token.encode()).hexdigest()
-        operations={'ozon_unallocated_accruals':{'date':'2026-11-17'}, 'ozon_fbo_supply_orders':{},
-                    'ozon_fbo_supply_details':{'order_ids':['2']}, 'ozon_fbo_supply_items':{'bundle_id':'items'},
-                    'ozon_fbo_volume_allocation':{'order_id':'2','supply_id':'3'}}
-        for source,auth in [('bridge',self.token),('mcp',token)]:
-            for op,args in operations.items():
-                with self.subTest(source=source,op=op):
-                    self.now+=1
-                    self.assertTrue(self.read(op,auth,args)['status'].startswith('409'))
-                    self.assertEqual(self.vault.bridge_activity(source),('unknown','not_configured',self.now))
-                    with self.assertRaises(ValueError):
-                        self.vault.record_bridge_activity(source,op,'ok',self.now)
-        previous=self.vault.bridge_activity('bridge')
-        self.vault.record_bridge_activity('bridge','wb_prices','ok',previous[2]-1)
-        self.assertEqual(self.vault.bridge_activity('bridge'),previous)
-
     def test_distinct_mcp_token_and_activity(self):
         self.save()
         mcp_token=secrets.token_urlsafe(32)

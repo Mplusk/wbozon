@@ -247,8 +247,8 @@ jobs:
           set -euo pipefail
           cutover="$RUNNER_TEMP/market-cutover"
           baseline=c8b2257cdd11bb539d3705d269fda6b23c0bde99
-          bridge=824a4645e9d756322f2af8668ada1678dc2b54f5
-          reports=6c4b21bc5d70a98e305af063bbce734b0e0d99af
+          bridge=6eccd5d159bd2957e6ff25b18783aa6e20e81ea2
+          reports=bf24f2c198bd67bfee5361006beedf9c19382700
           for ref in "$baseline" "$bridge" "$reports"; do
             mkdir -p "$cutover/$ref/service"
             git -c core.autocrlf=false archive "$ref:services/email-auth" | tar -x -C "$cutover/$ref/service"
@@ -267,6 +267,9 @@ jobs:
           sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-bootstrap \
             --python /opt/staging-account-acceptance/venv/bin/python \
             --baseline-service "$base_dir/service" --candidate-service "$bridge_dir/service"
+          sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports \
+            --python /opt/staging-account-acceptance/venv/bin/python \
+            --baseline-service "$bridge_dir/service" --candidate-service "$full_dir/service"
       - name: Package candidate with source provenance and hashes
         shell: bash
         run: |

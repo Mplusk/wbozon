@@ -31,6 +31,43 @@ def provider():
 
 def application(env, start):
     route = env['PATH_INFO']
+    if route in ('/market-limit-wb', '/market-limit-ozon'):
+        import importlib.util
+        import market_cooldown
+        import urllib.error
+        import urllib.request
+        provider = route.rsplit('-', 1)[1]
+        creds = {'api_token':'fixture-token'} if provider == 'wb' else {'client_id':'101','api_key':'fixture-key'}
+        url = ('https://content-api.wildberries.ru/content/v2/get/cards/list' if provider == 'wb'
+               else 'https://api-seller.ozon.ru/v3/product/info/list')
+        gate = str(data / '.ozon-finance-gates')
+        class Offline:
+            def open(self, req, timeout):
+                with (data / ('attempts-' + provider)).open('a') as f:
+                    f.write('attempt\n')
+                raise urllib.error.HTTPError('', 429, 'synthetic', {'Retry-After':'3600'}, None)
+        try:
+            if importlib.util.find_spec('market_transport'):
+                from market_transport import Wire
+                wire = Wire(provider, creds, gate, time.monotonic()+5)
+                wire.opener = Offline()
+                wire('POST', url, body={}, interval=0)
+            else:
+                req = urllib.request.Request(url, data=b'{}')
+                with market_cooldown.worker(gate, creds):
+                    market_cooldown.legacy_open(Offline(), req, 5)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429:
+                raise
+            result = b'recorded'
+        except finance_gate.GateError as exc:
+            if exc.reason != 'cooldown' or exc.retry_after_seconds <= 0:
+                raise
+            result = b'held'
+        else:
+            raise AssertionError('mock provider did not return its expected rate limit')
+        start('200 OK', [])
+        return [result]
     if route == '/market-cutover':
         import market_cooldown
         import urllib.request

@@ -21,8 +21,16 @@ from release_host import Host, ReleaseError, atomic_json, boot_id, command, comp
 CONFIG = '/etc/wbozon-cd.json'
 
 MARKET_BASE = 'b543e1568394095a20f14213feb3a194a456716c70d43b95c06b33c98cd32aed'
-MARKET_BRIDGE = 'c37446a5e91c2d827c5a41cf581f1325b079e6922aecdf94417306c6315febd8'
-MARKET_REPORTS = 'e231e0b8868069a89f2c410f028c17b32c61fc417ddbbb6cdfe7837e6a3d7da7'
+MARKET_BRIDGE = '4fbd8858010f37f39b7676c4b34fede5526aa56623569bbc231e77524edce0cf'
+MARKET_REPORTS = '995e1acafeb930500f5bbb226bd3c429c6ae7bb47400dce6f9d1d4f00cdca87a'
+
+
+def present(path):
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def market_inventory(release):
@@ -88,7 +96,7 @@ class Transaction:
             self.phase(j, 'market-final')
         if j['market_final'] != name:
             raise ReleaseError('marketplace bootstrap decision differs from serving release')
-        if os.path.lexists(self.market_hold):
+        if present(self.market_hold):
             self.check_market_hold(j)
             discard(self.market_hold)
 
@@ -183,7 +191,7 @@ class Transaction:
         h = self.host
         if self.pending.exists():
             raise ReleaseError('previous recovery is pending')
-        if os.path.lexists(self.market_hold):
+        if present(self.market_hold):
             raise ReleaseError('orphaned marketplace bootstrap hold')
         old, old_sha = self.receipt()
         old_dir = h.verify(old, old_sha)
@@ -191,7 +199,7 @@ class Transaction:
         transition = market_transition(old_dir, candidate)
         if transition == 'bootstrap':
             parent = h.gate.parent
-            if os.path.lexists(parent / '.market-reports') or any(parent.glob('.market-method-gates*')):
+            if present(parent / '.market-reports') or any(p.name.startswith('.market-method-gates') for p in parent.iterdir()):
                 raise ReleaseError('legacy service already has marketplace report or cooldown state')
         h.check_unit()
         h.settled()

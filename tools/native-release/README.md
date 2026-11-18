@@ -73,7 +73,7 @@ installer applies to new hosts.
 ## Marketplace cooldown migration
 
 The first push uses the legacy catalogue and the shared HTTP guard from
-`824a464`. The controller accepts only the pinned inventory of the running
+`6eccd5d`. The controller accepts only the pinned inventory of the running
 `c8b2257` service as its starting point. It requires an empty reports/cooldown
 store for this one-time adoption. Before starting the bridge it creates a
 root-owned `.market-cutover-pending` file. All its seller HTTP routes check this
@@ -83,7 +83,7 @@ then clears the transaction. The recovery timer always sees a pending journal
 until outbound reads are enabled. After the final choice it can recover only
 the recorded release, including if the controller dies just after removing the hold.
 
-The second push activates the reports inventory from `6c4b21b`. Its automatic
+The second push activates the reports inventory from `bf24f2c`. Its automatic
 rollback target is the verified bridge. The two releases share per-method locks,
 boot identity, elapsed-time deadlines and unresolved outcomes. Both directions
 are tested with separate provider workers. A direct downgrade to the pre-guard

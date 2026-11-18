@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
-from cd import MARKET_BRIDGE, Transaction, market_transition
+from cd import Transaction, market_transition
 from release_host import ReleaseError, atomic_json
 
 

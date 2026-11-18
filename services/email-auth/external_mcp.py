@@ -11,7 +11,6 @@ import re
 
 import ozon_mcp
 import wb_mcp
-import market_specs
 
 SUPPORTED = ('2025-03-26', '2025-06-18', '2025-11-25')
 LATEST = SUPPORTED[-1]
@@ -38,29 +37,7 @@ def _tool(name, description, properties, required=()):
             'securitySchemes':[{'type':'oauth2','scopes':['mcp:read']}],
             '_meta':{'securitySchemes':[{'type':'oauth2','scopes':['mcp:read']}]}}
 
-_DOCUMENT_DATE = {'type':'string', 'format':'date'}
-_SUPPLY_EXPENSE = {'type':'object', 'additionalProperties':False,
-    'description':'Одна строка предоставленного документа. Укажите её собственные дату, ссылку, сумму со знаком, валюту и явно указанную поставку.',
-    'properties':{'document_id':_text(128), 'line_id':_text(128), 'document_date':_DOCUMENT_DATE,
-                  'period_from':_DOCUMENT_DATE, 'period_to':_DOCUMENT_DATE, 'supply_id':_text(19),
-                  'scope':{'type':'string', 'enum':['single_supply','shared_or_unknown']},
-                  'amount':{'type':'string', 'description':'Сумма со знаком и исходными десятичными разрядами.'},
-                  'currency':_text(16), 'accrual_id':{'type':'string', 'maxLength':19,
-                      'description':'Если основание — начисление Ozon, укажите его ID. Без документированной связи API расчёт будет неполным.'}}}
-
 TOOLS = [
-    _tool('ozon_unallocated_accruals', 'Одна страница по дате начисления для типов 12, 133, 134, 77 и 46. Возвращает исходный знак, валюту, accrual_id, unit_number и возможный номер отправления для категории POSTING. Ссылка на отправление требует сверки. Строки с явным SKU перечислены отдельно. Справочник названий запрашивается у Ozon по умолчанию. Не приписывайте строки без SKU артикулу или поставке. Для следующей страницы используйте ту же дату, учитывайте повторы курсоров и ID. Соблюдайте Retry-After.',
-          {'date':_DOCUMENT_DATE, 'last_id':_text(512), 'include_types':{'type':'boolean'}}, ('date',)),
-    _tool('ozon_fbo_supply_orders', 'Страница идентификаторов заявок на поставку FBO, начиная с новых. По умолчанию запрашивает все документированные статусы. Для продолжения передайте next_cursor как last_id с теми же фильтрами. Для состава сначала получите сведения о заявках.',
-          {'states':{'type':'array','minItems':1,'maxItems':len(ozon_mcp.ozon_fbo.STATES),'uniqueItems':True,
-                     'items':{'type':'string','enum':list(ozon_mcp.ozon_fbo.STATES)}},
-           'order_number':_text(128), 'limit':_integer(1,100), 'last_id':_text(512)}),
-    _tool('ozon_fbo_supply_details', 'Сведения по ID заявок FBO. Для каждой заявки показывает статусы, даты и все её поставки с supply_id и bundle_id. Используйте bundle_id конкретной поставки для чтения состава.',
-          {'order_ids':{'type':'array','minItems':1,'maxItems':50,'uniqueItems':True,'items':_text(19)}}, ('order_ids',)),
-    _tool('ozon_fbo_supply_items', 'Одна страница состава по точному bundle_id. Каждая строка сохраняет SKU, артикул, название, количество, объём единицы и объём строки в литрах. При has_next=true продолжите по next_cursor. Количество относится к составу заявки. Проверяйте повторы SKU по всем страницам.',
-          {'bundle_id':_text(512), 'limit':_integer(1,100), 'last_id':_text(512)}, ('bundle_id',)),
-    _tool('ozon_fbo_volume_allocation', 'Распределение одной строки документа по объёму товаров указанной поставки FBO. Читает все доступные страницы её состава. Для оценки передайте expense с document_id, line_id, document_date, суммой, валютой, supply_id из документа и scope=single_supply. Неполный состав, отсутствующие объёмы и неподтверждённая привязка начисления к поставке блокируют расчёт. Результат — модель по данным документа. Не добавляйте её к фактическим начислениям по артикулу.',
-          {'order_id':_text(19), 'supply_id':_text(19), 'expense':_SUPPLY_EXPENSE}, ('order_id','supply_id')),
     _tool('ozon_products', 'Одна страница товаров Ozon. По умолчанию дополнительно получает название и все наблюдаемые SKU из карточки, сверяя product_id и точный артикул; проверяйте identity_status и identity_enrichment. При несовпадении данные не прикрепляются. Полнота SKU, исторические связи и совпадения между страницами не подтверждены. include_identity=false отключает дополнительный запрос.',
           {'limit':_integer(1,100), 'last_id':_text(512), 'include_identity':{'type':'boolean'}}),
     _tool('ozon_product_info', 'Названия, артикулы и все SKU, перечисленные Ozon в основных полях, sources и stocks.stocks выбранных товаров. Передайте ровно один массив идентификаторов; сохраняйте все SKU и учитывайте conflicts, incomplete_fields и unmatched_identifiers. Полнота источника не подтверждена.',
@@ -68,21 +45,21 @@ TOOLS = [
            'product_ids':{'type':'array','minItems':1,'maxItems':100,'items':_text(19)},
            'skus':{'type':'array','minItems':1,'maxItems':100,'items':_text(19)}}),
     _tool('ozon_accrual_types', 'Справочник видов начислений Ozon по ID. Названия и описания исходят от Ozon; известные точные пары названия и описания распределены на commission, logistics, last_mile и returns. Other означает не классифицировано и может содержать любую из этих статей. Классификация и итоги по категориям неполны. Returns означает начисления, связанные с возвратами, со знаком Ozon, а не количество товаров.', {}),
-    _tool('ozon_accrual_day', 'Одна страница начислений за дату по переданным SKU. После 429 соблюдайте Retry-After. Фильтр posting_number ищет точное значение unit_number в категории POSTING. Ozon использует это поле для заказов и услуг. Данные отправления доступны отдельно в ozon_posting_accruals. Общего accrual_id для привязки дневной строки эти ответы не дают. Получите все SKU через ozon_product_info, типы через ozon_accrual_types. В summary суммы сгруппированы по SKU, виду и валюте. В details доступны цены, sale_amount, скидки и общий итог доставки. Проверяйте повтор курсоров и ID. Независимость итогов и составляющих, связь расходов без SKU с артикулом и полнота периода неизвестны.',
+    _tool('ozon_accrual_day', 'Одна страница начислений Ozon за конкретную дату начисления для переданных SKU. После 429 для postings и ожидания Retry-After можно попробовать этот метод с posting_number: он найдёт только строки POSTING за указанную дату и исключит несвязанные с номером начисления, поэтому результат частичный. Предварительно получите все наблюдаемые SKU через ozon_product_info, а названия и категории по type_id — через ozon_accrual_types. По умолчанию summary группирует наблюдаемые строки по SKU, виду и валюте, но исключает поля цен, sale_amount, скидок и итога доставки: для них нужен details. Это арифметика видимых строк, а не подтверждённый финансовый итог. Не складывайте итог доставки с его услугами, а поля комиссии, цены и скидок друг с другом или с итогами: их независимость не подтверждена. Получите все страницы, проверяйте повтор курсоров и ID; полнота периода не подтверждена, расходы без SKU не распределяются.',
           {'date':{'type':'string','format':'date'}, 'last_id':_text(512),
            'skus':{'type':'array','minItems':1,'maxItems':100,'items':_text(19)}, 'posting_number':_text(128),
            'view':{'type':'string','enum':['summary','details']}}, ('date','skus')),
-    _tool('ozon_posting_accruals', 'Начисления Ozon по указанным отправлениям за период по дате начисления. view=summary разделяет SKU, вид начисления, валюту и отправления. В breakdown поле observed_unit_rate показывает начисление на единицу в строках одного вида услуги. Сохраняйте виды отдельно: один товар может участвовать в нескольких услугах. Справочник выделяет commission, logistics, last_mile и returns. Returns относится к услугам возврата, other — к неклассифицированным видам. include_types=false отключает справочник. После 429 соблюдайте Retry-After. При response_too_large разбивайте отправления на непересекающиеся партии. Учитывайте все SKU из ozon_product_info и проверяйте конфликты. Число выкупов, выплата и полнота финансового итога неизвестны.',
+    _tool('ozon_posting_accruals', 'Начисления Ozon по указанным отправлениям. По умолчанию запрашивает справочник и отмечает известные типы как commission, logistics, last_mile, returns; other означает не классифицировано. Returns — начисления за связанные с возвратами услуги, не сумма денег или число товаров, возвращённых покупателями. include_types=false отключает дополнительный запрос справочника. При 429 соблюдайте Retry-After и ограничения gate до повтора. Период date_from/date_to отбирает дату начисления, не заказа. view=summary считает наблюдаемые строки по SKU, виду, категории и валюте и отдельно по отправлению; уникальность, аддитивность и полнота строк не подтверждены, финансовый итог неизвестен. При response_too_large разделите отправления на непересекающиеся партии. Для skus используйте все SKU из ozon_product_info и проверяйте конфликты; расходы без SKU не распределяются. Выкупы и выплаты не определяются.',
           {'posting_numbers':{'type':'array','minItems':1,'maxItems':200,'items':_text(128)},
            'date_from':{'type':'string','format':'date'}, 'date_to':{'type':'string','format':'date'},
            'view':{'type':'string','enum':['details','summary']}, 'include_types':{'type':'boolean'},
            'skus':{'type':'array','minItems':1,'maxItems':100,'items':_text(19)}}, ('posting_numbers',)),
-    _tool('ozon_article_summary', 'Частичная сводка артикула по переданным отправлениям за период по дате начисления. Проверяет артикул, название и все наблюдаемые SKU в обоих направлениях. observations.article_unit_rates даёт среднюю ставку по всем сопоставленным SKU артикула отдельно для каждого вида услуги и валюты. В observations.breakdown доступны суммы и ставки отдельных SKU. Для категорий используется ozon_accrual_types. include_types=false отключает справочник. Номера-кандидаты доступны через ozon_posting_candidates. Период их отбора не подтверждает полноту начислений. Расходы без SKU остаются нераспределёнными. Полнота текущих и исторических SKU, уникальность и аддитивность строк не подтверждены. Полное число выкупов и банковская выплата неизвестны.',
+    _tool('ozon_article_summary', 'Частичная сводка одного артикула Ozon только по переданным отправлениям: прямое и обратное сопоставление наблюдаемых SKU, период по дате начисления, строки по SKU/типу/валюте и отдельно по отправлению. По умолчанию запрашивает категории из справочника ozon_accrual_types; include_types=false отключает этот запрос. Other означает не классифицировано. Номера кандидатов доступны через ozon_posting_candidates, но его дата отбора не равна доказанно дате начисления. Откажется от неоднозначной идентичности. Полнота периода, текущих и исторических SKU, аддитивность, выкупы, возвраты и выплаты не подтверждены; не представляйте их как ноль или полный итог.',
           {'offer_id':_text(256), 'posting_numbers':{'type':'array','minItems':1,'maxItems':200,'items':_text(128)},
            'date_from':{'type':'string','format':'date'}, 'date_to':{'type':'string','format':'date'},
            'include_types':{'type':'boolean'}},
           ('offer_id','posting_numbers','date_from','date_to')),
-    _tool('ozon_realization_article_month', 'Месячный отчёт реализации Ozon по точному артикулу. Проверяет все пары SKU и артикулов в ответе. Конфликт или пропуск идентификатора даёт status=blocked. В summary показаны количества и observed_article_unit_rates по артикулу. В by_sku доступны ставки по каждому SKU. Доставки и возвраты посчитаны отдельно. total — итого к начислению, standard_fee — базовое вознаграждение Ozon. Знаменатель относится к единицам в строках соответствующей части отчёта, знак сумм сохранён. Пробелы указываются в issues. В details доступны исходные строки. База дат — месяц реализации. Уникальность и аддитивность исходных строк не подтверждены. Более поздние возвраты, полнота продаж и банковская выплата неизвестны.',
+    _tool('ozon_realization_article_month', 'Месячный отчёт реализации Ozon по точному артикулу. До отбора проверяются SKU и точные артикулы всех строк ответа: конфликт или пропуск идентификатора возвращает status=blocked с диагностикой без расчёта количеств. По умолчанию summary группирует наблюдаемые названия, SKU и количества; details возвращает строки и суммы. Возвраты показываются со знаком Ozon. Уникальность и аддитивность строк не подтверждены: суммы не являются доказанным итогом выкупов. Месяц относится к отчёту реализации, не к дате заказа. Отчёт доступен, когда Ozon его сформировал; будущие возвраты и полнота исторических SKU не подтверждены. Не выдавайте отсутствие строк за подтверждённый ноль и не складывайте суммы разной природы.',
           {'offer_id':_text(256), 'year':_integer(2023,9999), 'month':_integer(1,12),
            'view':{'type':'string','enum':['summary','details']}},
           ('offer_id','year','month')),
@@ -117,7 +94,6 @@ TOOLS = [
           {'date_from':{'type':'string','format':'date'}, 'date_to':{'type':'string','format':'date'},
            'limit':_integer(1,100), 'offset':_integer(0,1000000)}, ('date_from','date_to')),
 ]
-TOOLS.extend(_tool(name, contract[0], *market_specs.schema(name)) for name, contract in market_specs.TOOLS.items())
 TOOL_NAMES = frozenset(tool['name'] for tool in TOOLS)
 
 _ERRORS = {
@@ -273,8 +249,7 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
         if not isinstance(name,str) or name not in TOOL_NAMES:
             return rpc_error(-32602,'Unknown tool',ident)
         try:
-            if name in market_specs.TOOLS: market_specs.validate(name,args)
-            elif name in ozon_mcp.OPERATIONS: ozon_mcp.validate_args(name,args)
+            if name in ozon_mcp.OPERATIONS: ozon_mcp.validate_args(name,args)
             else:
                 wb_mcp.validate_args(name,args)
                 if name == 'wb_prices' and 'nm_id' in args: raise ValueError()
@@ -287,8 +262,6 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
                 text = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(',',':'))
                 result = (_tool_error('response_too_large') if len(text.encode('utf-8')) > MAX_OUTPUT
                           else {'content':[{'type':'text','text':text}]})
-                if name in market_specs.TOOLS and data.get('status')=='provider_access_denied':
-                    result['isError']=True
             except MCPToolError as exc:
                 result = _tool_error(exc.code,exc.retry_after_seconds,exc.reason)
             except Exception:
