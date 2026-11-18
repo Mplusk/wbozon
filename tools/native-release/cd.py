@@ -82,6 +82,8 @@ class Transaction:
         # Recovery has a ConditionPathExists=pending.json. Keep that journal until
         # the hold is gone; persist the rollback floor before any seller can call.
         if 'market_final' not in j:
+            if name == j['new']:
+                self.check_market_hold(j)
             j['market_final'] = name
             self.phase(j, 'market-final')
         if j['market_final'] != name:
