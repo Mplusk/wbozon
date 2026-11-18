@@ -1,4 +1,4 @@
-import hashlib, io, json, secrets, sqlite3, tempfile, unittest
+import gc, hashlib, io, json, secrets, sqlite3, tempfile, unittest
 from urllib.parse import urlencode
 from app import LoginApp
 from portal import Portal, Vault
@@ -13,7 +13,9 @@ class Tests(unittest.TestCase):
         self.app=Portal(self.login,self.vault,hashlib.sha256(self.token.encode()).hexdigest(),gateway)
         self.sid=secrets.token_urlsafe(32);self.csrf=secrets.token_urlsafe(24)
         with self.login.connect() as c:c.execute('INSERT INTO sessions VALUES (?,?,?)',(self.login.digest(self.sid),self.now+43200,self.csrf))
-    def tearDown(self): self.tmp.cleanup()
+    def tearDown(self):
+        gc.collect()
+        self.tmp.cleanup()
     def request(self,path='/settings',method='GET',data=None,cookie=True,origin=True,auth=None,headers=None):
         kind='application/json' if path=='/api/read' else 'application/x-www-form-urlencoded'
         raw=(json.dumps(data) if kind=='application/json' else urlencode(data or {})).encode()
@@ -112,3 +114,4 @@ class FactoryTests(unittest.TestCase):
                 with self.assertRaises(FileNotFoundError):create_portal()
             with patch.dict(os.environ,{'SESSION_SECRET':'not-used'},clear=True):
                 with self.assertRaises(KeyError):create_portal()
+            gc.collect()

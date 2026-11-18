@@ -115,7 +115,7 @@ class OzonFinanceReportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ozon_mcp.project_response('ozon_accrual_day',{**DAY_ARGS,'last_id':'next'},data,CREDS)
 
-    def test_daily_filter_keeps_only_exact_posting_and_reports_unattributed_rows(self):
+    def test_daily_filter_matches_only_the_unit_reference_and_keeps_posting_unconfirmed(self):
         data=daily_payload()
         other={**data['accruals'][0], 'accrual_id':103, 'unit_number':'A-10'}
         data['accruals'].append(other)
@@ -123,12 +123,29 @@ class OzonFinanceReportTests(unittest.TestCase):
         request=ozon_mcp.build_request('ozon_accrual_day',args,CREDS)
         self.assertEqual(json.loads(request.data),{'date':'2026-11-15','last_id':''})
         result=ozon_mcp.project_response('ozon_accrual_day',args,data,CREDS)
-        self.assertEqual([r['posting_number'] for r in result['matching_rows']],['A-1'])
+        self.assertEqual([(r['unit_number'],r['posting_number_candidate'],r['posting_number'])
+                          for r in result['matching_rows']], [('A-1','A-1',None)])
         self.assertEqual(result['other_posting_entries_excluded'],1)
         self.assertEqual(result['non_posting_category_entries_excluded'],2)
         self.assertEqual(result['posting_filter'],'A-1')
         self.assertEqual(result['period_completeness'],'not_verified')
-        self.assertIn('не полный',result['posting_filter_note'])
+        self.assertEqual(result['posting_link'],'not_independently_verified')
+        self.assertEqual(result['posting_filter_basis'],'exact_unit_number_in_posting_category')
+
+    def test_missing_daily_reference_retains_the_charge_and_explicit_uncertainty(self):
+        data = daily_payload()
+        del data['accruals'][0]['unit_number']
+        result = ozon_mcp.project_response('ozon_accrual_day', {**DAY_ARGS,'view':'details'}, data, CREDS)
+        row = result['matching_rows'][0]
+        self.assertEqual((row['accrual_id'],row['sku']),('100','10'))
+        self.assertIsNone(row['posting_number_candidate'])
+        self.assertIsNone(row['posting_number'])
+        self.assertEqual(result['posting_entries_missing_unit_number'],1)
+        filtered = ozon_mcp.project_response('ozon_accrual_day', {**DAY_ARGS,'posting_number':'A-1','view':'details'}, data, CREDS)
+        self.assertEqual(filtered['matching_rows'],[])
+        self.assertEqual(filtered['posting_entries_missing_unit_number'],1)
+        self.assertEqual(filtered['different_unit_number_entries_excluded'],0)
+        self.assertEqual(filtered['other_posting_entries_excluded'],0)
 
     def test_daily_filter_rejects_secret_reflection(self):
         with self.assertRaises(ValueError):
@@ -169,7 +186,49 @@ class OzonFinanceReportTests(unittest.TestCase):
                           for row in result['by_sku']],[('10',2,None),('11',None,-1)])
         self.assertEqual(result['by_sku'][0]['names'],['Пример'])
         self.assertEqual(result['quantity_additivity'],'not_verified')
-        self.assertIn('не рассчитаны',result['summary_note'])
+        self.assertIn('total',result['summary_note'])
+
+    def test_reported_unit_rates_separate_delivery_and_return_and_keep_money_signs(self):
+        data = monthly_payload()
+        base = data['rows'][0]
+        data['rows'] = [
+            {**base, 'delivery_commission':{'quantity':2,'total':'10.25','standard_fee':'2.00'},
+             'return_commission':{'quantity':-1,'total':'-5.00','standard_fee':'-1.00'}},
+            {**base,'row_number':2,'order':{'posting_number':'B-2'},
+             'delivery_commission':{'quantity':1,'total':'3.75','standard_fee':'0.00'}}]
+        result = ozon_mcp.project_response('ozon_realization_article_month',MONTH_ARGS,data,CREDS)
+        group, = result['by_sku']
+        rates = group['observed_unit_rates']
+        self.assertEqual(rates['delivery']['total'],{'reported_quantity':3,'amount_per_unit':{'numerator':'14','denominator':'3'},'issues':[]})
+        self.assertEqual(rates['return']['total']['amount_per_unit'],{'numerator':'-5','denominator':'1'})
+        self.assertEqual(rates['delivery']['standard_fee']['amount_per_unit'],{'numerator':'2','denominator':'3'})
+        self.assertEqual(rates['return']['standard_fee']['amount_per_unit'],{'numerator':'-1','denominator':'1'})
+        self.assertEqual((group['observed_delivery_units'],group['observed_return_units_signed']),(3,-1))
+        self.assertEqual(result['period_basis'],'realization_report_month')
+        extra = {**base,'row_number':3,'item':{**base['item'],'sku':11},
+                 'delivery_commission':{'quantity':1,'total':'6.00','standard_fee':'1.00'}}
+        result = ozon_mcp.project_response('ozon_realization_article_month',MONTH_ARGS,
+            {**data,'rows':[*data['rows'],extra]},CREDS)
+        self.assertEqual(result['observed_article_unit_rates']['delivery']['total']['amount_per_unit'],
+                         {'numerator':'5','denominator':'1'})
+
+    def test_monthly_missing_quantity_currency_and_repeated_postings_withhold_rates(self):
+        data = monthly_payload()
+        base = {**data['rows'][0], 'delivery_commission': {'quantity':2,'total':'9.00'}}
+        for rows, currency, issue in [
+            ([base],None,'missing_report_currency'),
+            ([base,{**base,'row_number':2}],'RUB','missing_or_repeated_posting_for_sku'),
+            ([{**base,'delivery_commission':{'total':'9.00'}}],'RUB','missing_or_zero_quantity'),
+            ([{**base,'delivery_commission':{'quantity':2}}],'RUB','missing_amount')]:
+            with self.subTest(issue=issue):
+                wire = {**data,'header':{**data['header'],'currency_sys_name':currency},'rows':rows}
+                result = ozon_mcp.project_response('ozon_realization_article_month',MONTH_ARGS,wire,CREDS)
+                rates = result['by_sku'][0]['observed_unit_rates']
+                self.assertIn(issue,rates['delivery']['total']['issues'])
+                self.assertIsNone(rates['delivery']['total']['amount_per_unit'])
+                self.assertIn('no_reported_rows',rates['return']['total']['issues'])
+                if issue == 'missing_or_zero_quantity':
+                    self.assertIsNone(result['observed_delivery_units'])
         self.assertEqual(result['status'],'partial')
         self.assertEqual(result['identity_conflicts'],[])
         self.assertEqual(result['identity_scan']['source_completeness'],'not_verified')
