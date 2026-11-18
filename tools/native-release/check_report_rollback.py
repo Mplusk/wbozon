@@ -13,9 +13,8 @@ import tarfile
 from tempfile import TemporaryDirectory
 
 HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[1]
 sys.path.insert(0, str(HERE))
-from check_finance_transition import exercise, PROBE
-from release_host import service_digest
 
 BASE = "c8b2257cdd11bb539d3705d269fda6b23c0bde99"
 REPORTS = "bed0c74cdbc320ceaf3763f596c260ae998f5530"
@@ -25,7 +24,7 @@ HOST_POLICY = "4c9d8de80ad612f5ab226dcd8619391407dfffc9f83aca21b91d1cf7bb14dadd"
 
 
 def git(*args):
-    return subprocess.check_output(["git", "-C", str(HERE), "-c", "core.autocrlf=false", *args])
+    return subprocess.check_output(["git", "-C", str(REPO), "-c", "core.autocrlf=false", *args])
 
 
 def export_service(revision, destination):
@@ -35,14 +34,20 @@ def export_service(revision, destination):
 
 
 def rollout_check(temp, python, packaged):
+    from check_finance_transition import exercise, PROBE
+    from release_host import service_digest
+
     old, new = temp / "baseline", temp / "candidate"
     export_service(BASE, old / "service")
     if packaged:
         shutil.copytree(packaged, new / "service")
     else:
         export_service(REPORTS, new / "service")
-    if (service_digest(old), service_digest(new)) != (BASE_INVENTORY, REPORT_INVENTORY):
-        raise ValueError("Service contents differ from the pinned release pair")
+    baseline_digest, candidate_digest = service_digest(old), service_digest(new)
+    if (baseline_digest, candidate_digest) != (BASE_INVENTORY, REPORT_INVENTORY):
+        raise ValueError(
+            f"Unexpected service inventories. Baseline {baseline_digest}, candidate {candidate_digest}"
+        )
 
     source = git("show", BASE + ":tools/native-release/release_host.py")
     if hashlib.sha256(source).hexdigest() != HOST_POLICY:
@@ -110,7 +115,7 @@ def main():
     )
     args = parser.parse_args()
     with TemporaryDirectory() as temp:
-        report = rollout_check(Path(temp), args.python.resolve(), args.packaged_service)
+        report = rollout_check(Path(temp), args.python.absolute(), args.packaged_service)
     print(json.dumps(report, indent=2))
     return 0 if args.evidence_only or report["eligibility"] == "ready" else 2
 
