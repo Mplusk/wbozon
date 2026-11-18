@@ -1,5 +1,7 @@
 import gc, hashlib, io, json, secrets, sqlite3, tempfile, unittest
+import time
 from urllib.parse import urlencode
+import market_transport
 from app import LoginApp
 from portal import Portal, Vault
 
@@ -33,6 +35,22 @@ class Tests(unittest.TestCase):
         self.assertEqual(self.vault.read('wb')['api_token'],'test-secret-value')
         with open(self.vault.path,'rb') as f:self.assertNotIn(b'test-secret-value',f.read())
         self.assertNotIn('test-secret-value',self.request()['body'])
+    def test_feed_interval_follows_the_key_selected_from_a_fallback_category(self):
+        def save_fallback(token):
+            response = self.request(method='POST', data={'csrf':self.csrf,'provider':'wb_content','api_token':token})
+            self.assertTrue(response['status'].startswith('200'), response['status'])
+            return market_transport.Wire('wb', {'api_token':token}, self.app.finance_gate_dir, time.monotonic()+5)
+
+        old = save_fallback('synthetic-category-first')
+        def legacy_slot(wire):
+            return market_transport._id([wire.scope, market_transport.WB_FEED_HOST, market_transport.WB_FEED_PATH])
+        expiry = time.time()+300
+        with old.db() as db:
+            db.execute("UPDATE quota SET until_at=? WHERE k=?", (expiry,legacy_slot(old)))
+        new = save_fallback('synthetic-category-next')
+        with new.db() as db:
+            migrated, = db.execute("SELECT until_at FROM quota WHERE k=?", (legacy_slot(new),)).fetchone()
+        self.assertEqual(migrated, expiry)
     def test_csrf_and_origin(self):
         self.assertTrue(self.save(origin=False)['status'].startswith('403'))
         self.csrf='é'*32;self.assertTrue(self.save()['status'].startswith('403'))

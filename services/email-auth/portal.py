@@ -937,7 +937,7 @@ class Portal:
                 values={k:form[k] for k in fields}
                 if any(not re.fullmatch(r'[!-~]{1,2048}',v) for v in values.values()): raise ValueError()
                 if provider=='ozon' and not re.fullmatch(r'[0-9]{1,32}',values['client_id']): raise ValueError()
-                if provider in ('wb', 'wb_analytics'):
+                if provider == 'wb' or provider in market_health.WB_CATEGORIES:
                     from market_transport import remember_wb_feed_credentials
                     remember_wb_feed_credentials(self.finance_gate_dir,self.vault.read(provider),values)
                 self.vault.save(provider,values)
