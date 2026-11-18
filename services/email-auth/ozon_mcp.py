@@ -15,14 +15,10 @@ import ozon_article_summary
 import ozon_realization
 import ozon_accrual_day
 import ozon_return_events
-import ozon_fbo
-import ozon_supply_allocation
-import ozon_unallocated
 
 OPERATIONS = frozenset({'ozon_products', 'ozon_prices', 'ozon_orders_analytics', 'ozon_posting_status', 'ozon_posting_candidates',
                         ozon_article_summary.OPERATION, ozon_realization.OPERATION,
-                        ozon_accrual_day.OPERATION, ozon_return_events.OPERATION, ozon_unallocated.OPERATION,
-                        ozon_supply_allocation.OPERATION, *ozon_fbo.ENDPOINTS}) | ozon_details.OPERATIONS
+                        ozon_accrual_day.OPERATION, ozon_return_events.OPERATION}) | ozon_details.OPERATIONS
 PRICE_FIELDS = ('auto_action_enabled', 'currency_code', 'marketing_seller_price',
                 'min_price', 'net_price', 'old_price', 'price', 'retail_price',
                 'vat')
@@ -142,12 +138,6 @@ def _page_identity(items):
 def validate_args(operation, args):
     """Reject unexpected keys and types. One request reads at most 100 rows."""
     if operation not in OPERATIONS or not isinstance(args, dict): raise ValueError('Invalid Ozon operation')
-    if operation in ozon_fbo.ENDPOINTS:
-        return ozon_fbo.validate_args(operation, args)
-    if operation == ozon_supply_allocation.OPERATION:
-        return ozon_supply_allocation.validate_args(args)
-    if operation == ozon_unallocated.OPERATION:
-        return ozon_unallocated.validate_args(args)
     if operation == ozon_article_summary.OPERATION:
         return ozon_article_summary.validate_args(args)
     if operation == ozon_realization.OPERATION:
@@ -186,11 +176,7 @@ def validate_args(operation, args):
 def build_request(operation, args, creds):
     """Construct a request to a fixed Ozon endpoint with credentials in headers."""
     validate_args(operation, args)
-    if operation in ozon_fbo.ENDPOINTS:
-        return ozon_fbo.build_request(operation, args, creds)
-    if operation == ozon_unallocated.OPERATION:
-        return ozon_unallocated.build_request(args, creds)
-    if operation in (ozon_article_summary.OPERATION, ozon_supply_allocation.OPERATION):
+    if operation == ozon_article_summary.OPERATION:
         raise ValueError('Composite operation has no single request')
     if operation == ozon_realization.OPERATION:
         return ozon_realization.build_request(args, creds)
@@ -225,11 +211,7 @@ def project_response(operation, args, data, creds):
     """Return allowlisted fields and an intact next-page cursor without secrets."""
     validate_args(operation, args)
     if not isinstance(data, dict): raise ValueError('Invalid provider response')
-    if operation in ozon_fbo.ENDPOINTS:
-        return ozon_fbo.project_response(operation, args, data)
-    if operation == ozon_unallocated.OPERATION:
-        return ozon_unallocated.project_response(args, data, creds)
-    if operation in (ozon_article_summary.OPERATION, ozon_supply_allocation.OPERATION):
+    if operation == ozon_article_summary.OPERATION:
         raise ValueError('Composite operation has no single response')
     if operation == ozon_realization.OPERATION:
         return ozon_realization.project_response(args, data, creds)

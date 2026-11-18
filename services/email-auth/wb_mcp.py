@@ -10,6 +10,7 @@ import ssl
 import urllib.request
 from datetime import date, datetime
 from urllib.parse import urlencode
+import market_cooldown
 
 OPERATIONS = frozenset(('wb_products', 'wb_prices', 'wb_commissions', 'wb_box_tariffs', 'wb_sales_summary'))
 MAX_ROW_BODY = 512000
@@ -130,7 +131,7 @@ def read(operation, args, creds):
     # bound that raw envelope separately from our much smaller projected output.
     cap = MAX_TABLE_BODY if operation in ('wb_commissions','wb_box_tariffs','wb_sales_summary') else MAX_ROW_BODY
     opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
-    with opener.open(req, timeout=15) as response:
+    with market_cooldown.legacy_open(opener, req, 15) as response:
         raw = response.read(cap + 1)
     if len(raw) > cap: raise ValueError('Response too large')
     data = _decode(raw)

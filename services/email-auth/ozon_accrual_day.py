@@ -61,7 +61,7 @@ def project_response(args, data, creds):
     requested = {ozon_details._id(sku) for sku in args['skus']}
     rows = ozon_details._items(data.get('accruals'), 5000)
     ids, selected, other_sku, unallocated = set(), [], 0, 0
-    other_postings, without_posting, missing_reference = 0, 0, 0
+    other_postings, without_posting = 0, 0
     posting_filter = args.get('posting_number')
     if posting_filter is not None: ozon_details._text(posting_filter, 128, secret=secret)
     for row in rows:
@@ -74,14 +74,8 @@ def project_response(args, data, creds):
         if category == 'POSTING':
             posting = row.get('posting')
             if not isinstance(posting, dict): raise ValueError('Missing posting')
-            unit_number = row.get('unit_number')
-            if unit_number is not None:
-                unit_number = ozon_details._text(unit_number, 512, empty=True, secret=secret) or None
-            if unit_number is None:
-                missing_reference += 1
-                if posting_filter is not None:
-                    continue
-            elif posting_filter is not None and unit_number != posting_filter:
+            posting_number = ozon_details._text(row.get('unit_number'), 128, secret=secret)
+            if posting_filter is not None and posting_number != posting_filter:
                 other_postings += 1
                 continue
             for product in ozon_details._items(posting.get('products'), 1000):
@@ -96,8 +90,7 @@ def project_response(args, data, creds):
                 commission = product.get('commission')
                 if commission is not None and not isinstance(commission, dict): raise ValueError('Invalid commission')
                 amount_fields = ('seller_price','sale_price','sale_commission','commission','sale_amount','coinvestment','bonus')
-                selected.append({'accrual_id': accrual_id, 'category': category, 'unit_number': unit_number,
-                    'posting_number_candidate': unit_number, 'posting_number': None,
+                selected.append({'accrual_id': accrual_id, 'category': category, 'posting_number': posting_number,
                     'sku': sku, 'quantity': _quantity(product.get('quantity')),
                     'delivery_total_accrued': ozon_details._money(delivery.get('total_accrued'),secret) if delivery else None,
                     'delivery_services': _fees(delivery.get('services'),secret) if delivery and delivery.get('services') is not None else None,
@@ -130,11 +123,7 @@ def project_response(args, data, creds):
             'other_sku_products_excluded': other_sku,
             'unallocated_entries_excluded': unallocated, 'period_completeness': 'not_verified',
             'posting_filter': posting_filter,
-            'posting_filter_basis': 'exact_unit_number_in_posting_category',
-            'posting_link': 'not_independently_verified',
-            'posting_entries_missing_unit_number': missing_reference,
             'other_posting_entries_excluded': other_postings,
-            'different_unit_number_entries_excluded': other_postings,
             'non_posting_category_entries_excluded': without_posting,
             'row_identity': 'not_verified',
             'note': ('Одна страница начислений за дату. Получите справочник типов; объединяйте страницы '
@@ -145,11 +134,9 @@ def project_response(args, data, creds):
                      'Расходы без SKU не распределяются. Поле commission_ratio не возвращается.'),
             'read_only': True, 'untrusted_data': True}
     if posting_filter is not None:
-        result['posting_filter_note'] = ('Точное совпадение с unit_number в строках POSTING за дату начисления. '
-            'Ozon использует это поле для заказов и услуг. Начисления отправления можно посмотреть '
-            'отдельно через /v1/finance/accrual/postings. В этом ответе нет общего accrual_id для сверки '
-            'конкретной дневной строки. Счётчик other_posting_entries_excluded сохраняет прежнее имя '
-            'для числа непустых несовпавших unit_number. Остальные категории исключены. Проверьте все страницы.')
+        result['posting_filter_note'] = ('Показаны только строки POSTING с этим номером за дату начисления. '
+            'Начисления ITEM и прочие строки без подтверждённого номера отправления исключены; '
+            'это не полный отчёт по отправлению. Проверьте все страницы.')
     if args.get('view','summary') == 'details':
         result['matching_rows'] = selected
     else:

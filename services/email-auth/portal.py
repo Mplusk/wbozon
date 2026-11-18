@@ -1,5 +1,7 @@
 """Local integration prototype. Browser sessions never authenticate the read API."""
 from ui import document, CSP
+import contextvars
+import market_cooldown
 import hashlib, hmac, html, json, math, os, re, secrets, sqlite3, ssl, subprocess, sys, urllib.request, urllib.error, smtplib
 import threading, time
 from datetime import datetime, timezone
@@ -9,8 +11,6 @@ from urllib.parse import parse_qs, urlsplit
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from app import LoginApp, smtp_mailer
 import ozon_mcp, ozon_details, ozon_article_summary, wb_mcp, external_keys, external_mcp, oauth_mcp, finance_gate
-import market_specs
-import expansion_gateway
 
 FIELDS = {'ozon': ('client_id', 'api_key'), 'wb': ('api_token',)}
 CHECK_OPERATIONS = {'ozon':'ozon_products', 'wb':'wb_prices'}
@@ -23,7 +23,6 @@ CHECK_MESSAGES = {
     'unavailable':'Маркетплейс временно недоступен. Повторите проверку позже.',
     'failed':'Не удалось подтвердить соединение. Проверьте настройки и повторите позже.',
 }
-# Stored in SQLite and read by the previous release after a rollback.
 BRIDGE_OPERATIONS = {'unknown':'операция не определена', 'ozon_products':'товары Ozon',
     'ozon_prices':'цены Ozon', 'ozon_orders_analytics':'заказы Ozon', 'ozon_posting_status':'статусы отправлений Ozon', 'wb_products':'товары Wildberries',
     'ozon_product_info':'идентификаторы товаров Ozon', 'ozon_accrual_types':'виды начислений Ozon',
@@ -44,9 +43,7 @@ def public_retry_delay(delay, creds):
     """Do not reproduce a seller secret through a numeric retry interval."""
     if type(delay) is not int or not 0 <= delay <= finance_gate.MAX_RETRY_SECONDS:
         return None
-    if isinstance(creds,dict) and any(public_retry_delay(delay,value) is None for value in creds.values() if isinstance(value,dict)):
-        return None
-    for field in ('api_key','api_token','client_secret'):
+    for field in ('api_key','api_token'):
         secret=creds.get(field) if isinstance(creds,dict) else None
         if isinstance(secret,str) and secret and secret in str(delay):
             return None
@@ -61,9 +58,7 @@ def finance_request_preflight(operation, args, creds):
     if (not isinstance(client_id,str) or not re.fullmatch(r'[0-9]{1,32}',client_id) or
             not isinstance(api_key,str) or not re.fullmatch(r'[!-~]{1,2048}',api_key)):
         raise ValueError('Invalid financial credentials')
-    if operation == 'ozon_cash_flow':
-        market_specs.validate(operation,args)
-    elif operation == ozon_article_summary.OPERATION:
+    if operation == ozon_article_summary.OPERATION:
         ozon_article_summary.validate_args(args)
         ozon_details.build_request('ozon_product_info',{'offer_ids':[args['offer_id']]},creds)
         ozon_details.build_request('ozon_posting_accruals',{
@@ -177,12 +172,6 @@ def _provider_read(operation, args, creds, *, request_timeout=15, absolute_deadl
         return wb_mcp.read(operation, args, creds)
     if operation not in ozon_mcp.OPERATIONS:
         raise ValueError('Unknown operation')
-    if operation == ozon_mcp.ozon_supply_allocation.OPERATION:
-        deadline = started + PROVIDER_DEADLINE_SECONDS - 2 if absolute_deadline is None else absolute_deadline
-        def read_supply(name, arguments):
-            return _provider_read(name, arguments, creds, request_timeout=request_timeout, absolute_deadline=deadline)
-        result = ozon_mcp.ozon_supply_allocation.calculate(args, read_supply)
-        return _guard_ozon_result(result, creds)
     if operation == ozon_article_summary.OPERATION:
         deadline=(started+max(0,PROVIDER_DEADLINE_SECONDS-2)
                   if absolute_deadline is None else absolute_deadline)
@@ -197,12 +186,12 @@ def _provider_read(operation, args, creds, *, request_timeout=15, absolute_deadl
         if remaining <= 0.2:
             raise finance_gate.LocalPreparationTimeout('Summary deadline reached before request')
         request_timeout=min(request_timeout,remaining)
-    with opener.open(req,timeout=request_timeout) as resp:
+    with market_cooldown.legacy_open(opener, req, request_timeout) as resp:
         try:
             raw=resp.read(512001)
             if len(raw)>512000: raise finance_gate.ProviderResponseTooLarge('Provider response too large')
-            data=decode_provider_payload(raw,preserve_decimal=operation in ('ozon_orders_analytics','ozon_realization_article_month',ozon_mcp.ozon_fbo.BUNDLE),
-                                         reject_duplicates=operation in ('ozon_products','ozon_posting_status','ozon_posting_candidates','ozon_realization_article_month','ozon_accrual_day','ozon_return_events',ozon_mcp.ozon_unallocated.OPERATION) or operation in ozon_mcp.ozon_details.OPERATIONS or operation in ozon_mcp.ozon_fbo.ENDPOINTS)
+            data=decode_provider_payload(raw,preserve_decimal=operation in ('ozon_orders_analytics','ozon_realization_article_month'),
+                                         reject_duplicates=operation in ('ozon_products','ozon_posting_status','ozon_posting_candidates','ozon_realization_article_month','ozon_accrual_day','ozon_return_events') or operation in ozon_mcp.ozon_details.OPERATIONS)
         except (finance_gate.ProviderResponseTooLarge, urllib.error.HTTPError): raise
         except TimeoutError: raise finance_gate.ProviderBodyTimeout('Provider response timed out') from None
         except urllib.error.URLError as exc:
@@ -214,17 +203,6 @@ def _provider_read(operation, args, creds, *, request_timeout=15, absolute_deadl
         except Exception: raise finance_gate.ProviderResponseInvalid('Invalid provider response') from None
     try: result=ozon_mcp.project_response(operation,args,data,creds)
     except Exception: raise finance_gate.ProviderResponseInvalid('Invalid provider response') from None
-    if operation == ozon_mcp.ozon_unallocated.OPERATION and args.get('include_types', True):
-        deadline = started + PROVIDER_DEADLINE_SECONDS - 2 if absolute_deadline is None else absolute_deadline
-        try:
-            types = _provider_read('ozon_accrual_types', {}, creds, request_timeout=request_timeout, absolute_deadline=deadline)
-        except urllib.error.HTTPError as exc:
-            if exc.code != 403:
-                raise
-            exc.close()
-            result['type_dictionary_status'] = 'provider_access_denied'
-        else:
-            result = ozon_mcp.ozon_unallocated.attach_types(result, types)
     if operation=='ozon_products' and args.get('include_identity',True):
         # A single page is enriched by product ID and exact offer_id; neither
         # SKU ordering nor a successful catalog lookup proves historical coverage.
@@ -264,7 +242,8 @@ def _provider_read(operation, args, creds, *, request_timeout=15, absolute_deadl
             def read_company_currency():
                 try:
                     profile=ozon_mcp.build_seller_info_request(creds)
-                    with urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context())).open(profile,timeout=remaining) as response:
+                    profile_opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+                    with market_cooldown.legacy_open(profile_opener, profile, remaining) as response:
                         raw_profile=response.read(65537)
                     if len(raw_profile)>65536: return
                     currency=ozon_mcp.project_company_currency(decode_provider_payload(raw_profile),creds)
@@ -274,7 +253,7 @@ def _provider_read(operation, args, creds, *, request_timeout=15, absolute_deadl
                 except Exception:
                     # This optional lookup never logs an upstream error or credentials.
                     pass
-            worker=threading.Thread(target=read_company_currency,daemon=True)
+            worker=threading.Thread(target=contextvars.copy_context().run,args=(read_company_currency,),daemon=True)
             worker.start(); worker.join(remaining)
             if not worker.is_alive() and found:
                 result['company_currency']=found[0]
@@ -424,15 +403,13 @@ def _provider_worker():
             if type(deadline) not in (int,float) or not math.isfinite(deadline) or deadline < 0:
                 raise ValueError('Invalid provider deadline')
         def read():
-            if request['operation'] in market_specs.TOOLS:
-                return expansion_gateway.execute(request['operation'],request['args'],request['creds'],
-                    request['finance_gate_dir'],request['deadline_monotonic'])
-            if is_finance:
-                return _provider_read(request['operation'],request['args'],request['creds'],absolute_deadline=deadline)
-            return _provider_read(request['operation'],request['args'],request['creds'])
+            with market_cooldown.worker(request.get('finance_gate_dir'), request['creds']):
+                if is_finance:
+                    return _provider_read(request['operation'],request['args'],request['creds'],absolute_deadline=deadline)
+                return _provider_read(request['operation'],request['args'],request['creds'])
         value = (_finance_read_with_retry(request.get('finance_gate_dir'),request['creds'],read,deadline,
                   allow_retry=(request['operation'] != ozon_article_summary.OPERATION and
-                    (request['operation'] not in ('ozon_posting_accruals',ozon_mcp.ozon_unallocated.OPERATION) or
+                    (request['operation'] != 'ozon_posting_accruals' or
                      not request['args'].get('include_types',True))))
                  if is_finance else read())
         result={'kind':'ok', 'result':value}
@@ -550,7 +527,7 @@ class Portal:
         self.oauth=oauth_store if oauth_store is not None else oauth_mcp.OAuthStore(vault.path,signing_secret=login.secret,clock=login.clock)
     def read_gateway(self, operation, args, creds):
         if operation not in finance_gate.FINANCE_OPERATIONS:
-            if operation in market_specs.TOOLS and self.gateway is provider_read:
+            if self.gateway is provider_read:
                 return provider_read(operation,args,creds,finance_gate_dir=self.finance_gate_dir)
             return self.gateway(operation,args,creds)
         finance_request_preflight(operation,args,creds)
@@ -604,7 +581,7 @@ class Portal:
                 try:
                     if not self.login.permit('external-mcp:'+key_id,30,60) or not self.login.permit('api',30,60):
                         raise external_mcp.MCPToolError('rate_limited')
-                    creds=expansion_gateway.credentials(self.vault,operation) if operation in market_specs.TOOLS else self.vault.read('ozon' if operation in ozon_mcp.OPERATIONS else 'wb')
+                    creds=self.vault.read('ozon' if operation in ozon_mcp.OPERATIONS else 'wb')
                     if not creds: raise external_mcp.MCPToolError('not_configured')
                     return self.read_gateway(operation,args,creds)
                 except urllib.error.HTTPError as exc:
@@ -660,8 +637,7 @@ class Portal:
             source='mcp' if self.mcp_token_hash is not None and mcp_authorized else 'bridge'
             def record_bridge(operation,outcome):
                 # Observability must not change the response of an authorised read.
-                stored_operation = operation if operation in BRIDGE_OPERATIONS else 'unknown'
-                try: self.vault.record_bridge_activity(source,stored_operation,outcome,self.login.clock())
+                try: self.vault.record_bridge_activity(source,operation,outcome,self.login.clock())
                 except Exception: pass
             if not self.login.permit('api',30,60):
                 # The body has not been validated, so do not trust or record its operation.
@@ -671,8 +647,7 @@ class Portal:
                 data=json.loads(body('application/json'))
                 if not isinstance(data,dict) or set(data)!={'operation','arguments'}: raise ValueError()
                 op=data['operation']; args=data['arguments']
-                if op in market_specs.TOOLS: market_specs.validate(op,args)
-                elif op in ozon_mcp.OPERATIONS: ozon_mcp.validate_args(op,args)
+                if op in ozon_mcp.OPERATIONS: ozon_mcp.validate_args(op,args)
                 elif op in wb_mcp.OPERATIONS:
                     wb_mcp.validate_args(op,args)
                     # Exact-article lookup is reserved for the browser flow.
@@ -680,14 +655,11 @@ class Portal:
                 else: raise ValueError()
             except (ValueError,TypeError,UnicodeError): return reply({'error':'invalid_request'},'400 Bad Request',True)
             try:
-                creds=expansion_gateway.credentials(self.vault,op) if op in market_specs.TOOLS else self.vault.read('ozon' if op in ozon_mcp.OPERATIONS else 'wb')
+                creds=self.vault.read('ozon' if op in ozon_mcp.OPERATIONS else 'wb')
                 if not creds:
                     record_bridge(op,'not_configured')
                     return reply({'error':'not_configured'},'409 Conflict',True)
                 result=self.read_gateway(op,args,creds)
-                if op in market_specs.TOOLS and result.get('status')=='provider_access_denied':
-                    record_bridge(op,'failed')
-                    return reply(result,'403 Forbidden',True)
                 record_bridge(op,'ok')
                 return reply(result,json_response=True)
             except urllib.error.HTTPError as exc:
@@ -789,7 +761,7 @@ class Portal:
                 arguments={'limit':20 if path=='/settings/preview' else 1}
                 if provider=='ozon' and path=='/settings/check': arguments['include_identity']=False
                 if lookup: arguments['nm_id']=nm_id
-                result=self.gateway(CHECK_OPERATIONS[provider],arguments,creds)
+                result=self.read_gateway(CHECK_OPERATIONS[provider],arguments,creds)
                 if not isinstance(result,dict) or not isinstance(result.get('items'),list): raise ValueError('Invalid response')
                 if lookup and (len(result['items'])>1 or any(not isinstance(row,dict) or type(row.get('nmID')) is not int or row['nmID']!=nm_id for row in result['items'])):
                     raise ValueError('Unexpected article response')
@@ -832,9 +804,8 @@ class Portal:
                 form={k:v[0] for k,v in form.items()}
                 csrf=form.get('csrf',''); provider=form.get('provider','')
                 if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
-                fields=('client_id','client_secret') if provider=='performance' else FIELDS.get(provider)
-                if not fields or set(form)!=set(fields)|{'csrf','provider'}: raise ValueError()
-                values={k:form[k] for k in fields}
+                if provider not in FIELDS or set(form)!=set(FIELDS[provider])|{'csrf','provider'}: raise ValueError()
+                values={k:form[k] for k in FIELDS[provider]}
                 if any(not re.fullmatch(r'[!-~]{1,2048}',v) for v in values.values()): raise ValueError()
                 if provider=='ozon' and not re.fullmatch(r'[0-9]{1,32}',values['client_id']): raise ValueError()
                 self.vault.save(provider,values)
@@ -893,20 +864,13 @@ class Portal:
                 if provider=='wb':
                     content+='<form class="save-form" method="post" action="/settings/wb-lookup"><input type="hidden" name="csrf" value="'+html.escape(session[1],quote=True)+'"><label for="wb-lookup-id">Артикул Wildberries (nmID), не артикул продавца</label><input id="wb-lookup-id" type="text" name="nm_id" inputmode="numeric" pattern="[1-9][0-9]{0,18}" maxlength="19" required><button>Показать цены этого товара</button></form><p>Поиск читает до одного товара по точному артикулу и использует тот же общий лимит проверки и просмотра. Товары, цены и заказы не изменяются.</p>'
             if provider=='ozon': content+='<p>Введите Client ID и API-ключ из кабинета продавца Ozon. Оба значения нужно сохранить вместе.</p>'
-            else: content+='<p>Введите API-токен из кабинета продавца Wildberries с правами чтения цен и скидок.</p><p>Для инструментов MCP выберите нужные категории доступа WB: Поставки, Статистика, Аналитика, Финансы, Продвижение, Вопросы и отзывы. Категория Контент нужна для поиска по артикулу.</p>'
+            else: content+='<p>Введите API-токен из кабинета продавца Wildberries с правами чтения цен и скидок.</p>'
             content+='<form class="save-form" method="post" action="/settings"><input type="hidden" name="provider" value="'+provider+'"><input type="hidden" name="csrf" value="'+html.escape(session[1],quote=True)+'">'
             for field in fields:
                 ident=provider+'-'+field
                 content+=f'<p class="field"><label for="{ident}">{labels[field]}</label><input id="{ident}" type="password" name="{field}" autocomplete="off" required maxlength="2048"></p>'
             content+='<button>'+('Заменить сохранённый ключ' if saved else 'Сохранить ключ')+'</button></form></section>'
-        content+='</div><section class="mcp-card"><h2>Реклама Ozon Performance</h2>'
-        content+='<p>'+('Рекламные ключи сохранены.' if 'performance' in configured else 'Для статистики рекламы нужны отдельные Client ID и Client Secret Ozon Performance.')+'</p>'
-        if session[0]-43200 >= now-300:
-            content+='<form class="save-form" method="post" action="/settings"><input type="hidden" name="provider" value="performance"><input type="hidden" name="csrf" value="'+html.escape(session[1],quote=True)+'">'
-            for key,label in (('client_id','Client ID Performance'),('client_secret','Client Secret Performance')):
-                content+='<label for="performance-'+key+'">'+label+'</label><input id="performance-'+key+'" name="'+key+'" type="password" autocomplete="off" required maxlength="2048">'
-            content+='<button>Сохранить рекламные ключи</button></form>'
-        content+='</section><section class="mcp-card" aria-labelledby="mcp-title"><h2 id="mcp-title">Связь с MCP</h2><div>'
+        content+='</div><section class="mcp-card" aria-labelledby="mcp-title"><h2 id="mcp-title">Связь с MCP</h2><div>'
         try:
             for source,label in (('mcp','MCP'),('bridge','другого подключённого клиента')):
                 activity=self.vault.bridge_activity(source)

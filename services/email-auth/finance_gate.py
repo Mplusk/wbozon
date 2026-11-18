@@ -21,8 +21,7 @@ import urllib.error
 from datetime import timezone
 
 FINANCE_OPERATIONS = frozenset(('ozon_accrual_types', 'ozon_posting_accruals', 'ozon_article_summary',
-                                'ozon_realization_article_month', 'ozon_accrual_day', 'ozon_return_events',
-                                'ozon_unallocated_accruals','ozon_cash_flow'))
+                                'ozon_realization_article_month', 'ozon_accrual_day', 'ozon_return_events'))
 MAX_RETRY_SECONDS = 2147483647
 
 
@@ -431,7 +430,7 @@ def schedule_verified_recovery(root, client_id, wait_seconds):
                                'source':'verified_recovery','boot':boot})
 
 
-def run(root, client_id, callback, secret_values=()):
+def run(root, client_id, callback, secret_values=(), *, before_send=None):
     """Execute one request or fail closed; never sleep or retry the provider."""
     key = _key(client_id)
     root = _root(root)
@@ -444,6 +443,10 @@ def run(root, client_id, callback, secret_values=()):
         if state['status'] == 'retry':
             remaining = _remaining(state, time.time(), time.monotonic(), boot)
             if remaining: raise GateError('cooldown', remaining)
+        # Local quotas and report reservations can reject without sending any HTTP.
+        # A crash after a successful reservation still leaves its durable job marker.
+        if before_send is not None:
+            before_send()
         _write_client_state(root, key, {'version': 1, 'status': 'in_flight'})
         try:
             result = callback()
