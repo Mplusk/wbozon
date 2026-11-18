@@ -132,6 +132,8 @@ def _child():
         stack.enter_context(patch.object(portal.finance_gate, 'time', Clock))
         stack.enter_context(patch.object(portal.finance_gate, '_boot_identity', return_value=spec['boot']))
         if spec['mode'] == 'legacy':
+            # The outer worker deadline and the inner provider both use monotonic time.
+            stack.enter_context(patch.object(portal, 'time', Clock))
             envelope = {'operation': operation, 'args': arguments, 'creds': creds,
                         'finance_gate_dir': gate, 'deadline_monotonic': spec['tick'] + 18}
             output = io.StringIO()
