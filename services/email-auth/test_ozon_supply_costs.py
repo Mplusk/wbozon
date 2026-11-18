@@ -146,6 +146,18 @@ class SupplyCostTests(unittest.TestCase):
         self.assertEqual(result['type_dictionary_status'], 'incomplete')
         self.assertTrue(all(row['name'] is None for row in result['type_dictionary']))
 
+    def test_large_ids_and_equal_signed_fees_keep_their_source_identity(self):
+        op_id, sku = 9007199254740993, 9007199254740995
+        operations = [accrual(op_id,'CONTAINER_FEES',container_fees={'fees':[fee(12,'-1.00'),fee(12,'-1.00')]}),
+                      accrual(op_id+1,'ITEM',item_fees={'fees':[{'sku':sku,'fees':[fee(12,'-1.00')]}]})]
+        result,_ = self.call(fees.OPERATION, {'date':DAY,'include_types':False},
+                             [('/v1/finance/accrual/by-day',{'accruals':operations,'last_id':''})])
+        rows = result['unallocated_fees']
+        self.assertEqual([r['accrual_id'] for r in rows],[str(op_id)]*2)
+        self.assertEqual([r['fee_path'] for r in rows],['container_fees.fees[0]','container_fees.fees[1]'])
+        self.assertTrue(all(r['sku'] is None and r['supply_id'] is None for r in rows))
+        self.assertEqual([r['sku'] for r in result['fees_with_explicit_sku']],[str(sku)])
+
     def test_cost_model_uses_exact_selected_supply_and_all_skus_and_reconciles(self):
         result, calls = self.model([page([item(13),item(11)], 3, more=True, cursor='A'),
                                     page([item(12)], 3)])

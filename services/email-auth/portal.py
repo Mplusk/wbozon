@@ -21,6 +21,7 @@ CHECK_MESSAGES = {
     'unavailable':'Маркетплейс временно недоступен. Повторите проверку позже.',
     'failed':'Не удалось подтвердить соединение. Проверьте настройки и повторите позже.',
 }
+# Stored in SQLite and read by the previous release after a rollback.
 BRIDGE_OPERATIONS = {'unknown':'операция не определена', 'ozon_products':'товары Ozon',
     'ozon_prices':'цены Ozon', 'ozon_orders_analytics':'заказы Ozon', 'ozon_posting_status':'статусы отправлений Ozon', 'wb_products':'товары Wildberries',
     'ozon_product_info':'идентификаторы товаров Ozon', 'ozon_accrual_types':'виды начислений Ozon',
@@ -29,9 +30,6 @@ BRIDGE_OPERATIONS = {'unknown':'операция не определена', 'oz
     'ozon_posting_candidates':'номера отправлений Ozon',
     'ozon_realization_article_month':'месячный отчёт реализации артикула Ozon',
     'ozon_accrual_day':'начисления Ozon за день по SKU',
-    'ozon_unallocated_accruals':'нераспределённые начисления Ozon',
-    'ozon_fbo_supply_orders':'заявки FBO Ozon', 'ozon_fbo_supply_details':'поставки FBO Ozon',
-    'ozon_fbo_supply_items':'состав поставки FBO Ozon', 'ozon_fbo_volume_allocation':'затраты поставки FBO по объёму',
     'ozon_return_events':'события возвратов Ozon',
     'wb_prices':'цены Wildberries', 'wb_commissions':'комиссии Wildberries',
     'wb_box_tariffs':'тарифы Wildberries', 'wb_sales_summary':'заказы и выкупы Wildberries'}
@@ -651,7 +649,8 @@ class Portal:
             source='mcp' if self.mcp_token_hash is not None and mcp_authorized else 'bridge'
             def record_bridge(operation,outcome):
                 # Observability must not change the response of an authorised read.
-                try: self.vault.record_bridge_activity(source,operation,outcome,self.login.clock())
+                stored_operation = operation if operation in BRIDGE_OPERATIONS else 'unknown'
+                try: self.vault.record_bridge_activity(source,stored_operation,outcome,self.login.clock())
                 except Exception: pass
             if not self.login.permit('api',30,60):
                 # The body has not been validated, so do not trust or record its operation.
