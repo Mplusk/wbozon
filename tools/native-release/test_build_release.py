@@ -4,7 +4,7 @@ from pathlib import Path
 import build_release
 from release_host import ReleaseError, compatible, database_access
 from cd import Transaction
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 class BuildInputTests(unittest.TestCase):
@@ -18,6 +18,20 @@ class BuildInputTests(unittest.TestCase):
                      'wheelhouse/../../wheel.whl', 'service/./file', 'bootstrap/not-a-wheel'):
             with self.subTest(name=name), self.assertRaises(build_release.BuildError):
                 build_release._validate_files({**self.files, name: b'bad'})
+
+    def test_client_waits_for_the_bounded_isolated_test_unit(self):
+        release = Path('/opt/test-release')
+        collected = Mock(returncode=0, stdout='not-found\n')
+        for seconds in (300, 720):
+            with self.subTest(seconds=seconds), patch.object(build_release, '_command') as run, \
+                    patch.object(build_release.subprocess, 'run', return_value=collected):
+                build_release._sandbox(release, 'wbozon-test', ['python', '-m', 'unittest'], release,
+                                       runtime_seconds=seconds)
+                args = run.call_args.args[0]
+                self.assertIn('--property=RuntimeMaxSec=' + str(seconds), args)
+                self.assertIn('--property=PrivateNetwork=yes', args)
+                self.assertIn('--property=CPUWeight=20', args)
+                self.assertGreater(run.call_args.kwargs['timeout'], seconds)
 
     def test_missing_service_or_nonbinary_content_refused_before_writes(self):
         with self.assertRaises(build_release.BuildError):

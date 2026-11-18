@@ -427,7 +427,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [native-candidate, native-stage]
     runs-on: ubuntu-24.04
-    timeout-minutes: 18
+    timeout-minutes: 30
     concurrency:
       group: wbozon-production
       cancel-in-progress: false

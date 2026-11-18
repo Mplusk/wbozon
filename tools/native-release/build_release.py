@@ -100,7 +100,7 @@ def _command(argv, *, cwd=None, timeout=120):
         raise BuildError('candidate preparation or isolated tests failed')
 
 
-def _sandbox(release, unit, args, cwd):
+def _sandbox(release, unit, args, cwd, *, runtime_seconds):
     properties = ['--property=User=wbozon-test', '--property=Group=wbozon-test', '--property=ProtectProc=invisible',
                   '--property=PrivateNetwork=yes', '--property=PrivateIPC=yes', '--property=PrivateDevices=yes',
                   '--property=ProtectSystem=strict', '--property=ProtectHome=yes', '--property=NoNewPrivileges=yes',
@@ -111,11 +111,12 @@ def _sandbox(release, unit, args, cwd):
                   '--property=TemporaryFileSystem=/var/tmp:rw,nosuid,nodev,noexec,size=64M,mode=1777',
                   '--property=BindReadOnlyPaths=' + str(release) + ':' + str(release),
                   '--property=MemoryMax=512M', '--property=CPUQuota=150%', '--property=TasksMax=100',
-                  '--property=RuntimeMaxSec=300']
+                  '--property=CPUWeight=20', '--property=IOWeight=20',
+                  '--property=RuntimeMaxSec=' + str(runtime_seconds)]
     clean = ['/usr/bin/env', '-i', 'HOME=/tmp', 'PATH=/usr/bin:/bin', 'LC_ALL=C.UTF-8',
              'PYTHONDONTWRITEBYTECODE=1']
     _command(['/usr/bin/systemd-run', '--quiet', '--wait', '--pipe', '--collect', '--unit=' + unit,
-              '--working-directory=' + str(cwd), *properties, *clean, *args], timeout=320)
+              '--working-directory=' + str(cwd), *properties, *clean, *args], timeout=runtime_seconds + 30)
     try:
         status = subprocess.run(['/usr/bin/systemctl', 'show', unit, '--property=LoadState', '--value'],
                                 capture_output=True, text=True, timeout=10, check=False)
@@ -168,8 +169,10 @@ def prepare(files, release, work, *, run_id, attempt, release_gid):
         os.chmod(path, 0o750 if stat.S_ISDIR(info.st_mode) or info.st_mode & 0o111 else 0o640)
     before = inventory(release)
     prefix = 'wbozon-test-' + run_id + '-' + attempt
-    _sandbox(release, prefix + '-unit', [str(python), '-m', 'unittest', '-q'], release / 'service')
-    _sandbox(release, prefix + '-smoke', [str(python), str(release / 'test_native.py')], '/tmp')
+    _sandbox(release, prefix + '-unit', [str(python), '-m', 'unittest', '-q'], release / 'service',
+             runtime_seconds=720)
+    _sandbox(release, prefix + '-smoke', [str(python), str(release / 'test_native.py')], '/tmp',
+             runtime_seconds=300)
     if inventory(release) != before:
         raise BuildError('candidate changed during isolated tests')
     for path in [release, *release.rglob('*')]:
