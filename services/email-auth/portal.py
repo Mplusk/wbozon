@@ -317,6 +317,10 @@ def provider_read(operation, args, creds, finance_gate_dir=None):
     Credentials go over a private stdin pipe, never argv or the environment.
     Killing the subprocess on timeout also stops a stuck resolver/socket call.
     """
+    if finance_gate_dir is None and operation not in finance_gate.FINANCE_OPERATIONS:
+        finance_gate_dir = os.environ.get('OZON_FINANCE_GATE_DIR')
+        if finance_gate_dir is None and os.environ.get('VAULT_PATH'):
+            finance_gate_dir = os.path.join(os.path.dirname(os.path.abspath(os.environ['VAULT_PATH'])), '.ozon-finance-gates')
     if operation in finance_gate.FINANCE_OPERATIONS and (not isinstance(finance_gate_dir,str) or not os.path.isabs(finance_gate_dir)):
         raise finance_gate.GateError('storage_unavailable')
     if operation in finance_gate.FINANCE_OPERATIONS:

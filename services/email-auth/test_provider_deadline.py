@@ -39,7 +39,12 @@ portal._provider_worker()
             for scenario in ('ok', 'unsafe_identifier', 401, 403, 429, 503, 'timeout', 'wrapped_timeout', 'network', 'invalid'):
                 with self.subTest(scenario=scenario):
                     worker.write_text(template.format(source_dir=source_dir, scenario=scenario), encoding='utf-8')
-                    with patch('portal.PROVIDER_WORKER', str(worker)):
+                    # Each synthetic outcome represents a distinct installation.
+                    # A preceding unknown 429 must not make the next scenario unreachable.
+                    state = Path(tmp) / str(scenario)
+                    state.mkdir()
+                    with patch('portal.PROVIDER_WORKER', str(worker)), patch.dict(
+                            os.environ, {'OZON_FINANCE_GATE_DIR': str(state / 'gate')}):
                         if scenario == 'ok':
                             item = provider_read('wb_prices', {'limit':1}, {'api_token':'synthetic-secret'})['items'][0]
                             self.assertEqual(item['vendorCode'], 'safe-code')

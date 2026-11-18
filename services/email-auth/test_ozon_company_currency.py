@@ -85,7 +85,7 @@ portal._provider_worker()
             worker=Path(tmp)/'worker.py'; worker.write_text(code,encoding='utf-8')
             started=time.monotonic()
             with patch('portal.PROVIDER_WORKER',str(worker)), patch('portal.PROVIDER_DEADLINE_SECONDS',30):
-                result=portal.provider_read('ozon_orders_analytics',ARGS,CREDS)
+                result=portal.provider_read('ozon_orders_analytics',ARGS,CREDS,finance_gate_dir=str(Path(tmp)/'gate'))
             self.assertLess(time.monotonic()-started,25)
             self.assertEqual(result['ordered_amount'],'123.45')
             self.assertNotIn('company_currency',result)
