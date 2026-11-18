@@ -101,7 +101,7 @@ jobs:
         if: github.event_name == 'push'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: email-auth-tested-${{ github.sha }}
+          name: email-auth-tested-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: image-artifact/
           if-no-files-found: error
           retention-days: 3
@@ -351,6 +351,10 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$BUILD_ARTIFACT_ID" =~ ^[1-9][0-9]*$ && "$BUILD_ATTEMPT" =~ ^[1-9][0-9]*$ && "$BUILD_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          if [[ "$BUILD_ATTEMPT" != "$GITHUB_RUN_ATTEMPT" ]]; then
+            echo "::error::Production verifies build and staging in the same attempt. Select Re-run all jobs to build and deliver a fresh artifact."
+            exit 1
+          fi
       - name: Download exact artifact from this run
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -392,7 +396,7 @@ jobs:
             if LC_ALL=C timeout --kill-after=5s 150s ssh -T -i "$private_dir/key" -o IdentitiesOnly=yes -o BatchMode=yes \
               -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$private_dir/known_hosts" \
               -o GlobalKnownHostsFile=/dev/null -o ClearAllForwardings=yes \
-              -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=6 \
+              -o ConnectTimeout=60 -o ServerAliveInterval=15 -o ServerAliveCountMax=6 \
               staging-account@portal.example.invalid "stage $GITHUB_SHA $GITHUB_RUN_ID $BUILD_ATTEMPT $digest $bytes" \
               < "$artifact" 2>"$private_dir/ssh-error"; then
               exit 0
@@ -454,7 +458,7 @@ jobs:
               env -u GH_TOKEN LC_ALL=C ssh -T -i "$keys/id" -o IdentitiesOnly=yes -o BatchMode=yes \
                 -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$keys/known_hosts" \
                 -o GlobalKnownHostsFile=/dev/null -o ClearAllForwardings=yes \
-                -o ConnectTimeout=30 -o ServerAliveInterval=10 -o ServerAliveCountMax=4 \
+                -o ConnectTimeout=60 -o ServerAliveInterval=10 -o ServerAliveCountMax=4 \
                 deploy-user@portal.example.invalid deploy 2>"$keys/ssh-error"; then
               exit 0
             else

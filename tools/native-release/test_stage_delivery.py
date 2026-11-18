@@ -16,6 +16,26 @@ COMMIT = "a" * 40
 
 
 class StagingDeliveryTests(unittest.TestCase):
+    def test_staging_verifies_the_build_attempt_before_transferring(self):
+        preflight = (
+            WORKFLOW.read_text(encoding="utf-8")
+            .split("  native-stage:\n", 1)[1]
+            .split("      - name: Verify artifact identity", 1)[1]
+            .split("        run: |\n", 1)[1]
+            .split("      - name:", 1)[0]
+        )
+        bash = os.environ.get("WBOZON_TEST_BASH") or shutil.which("bash")
+        self.assertIsNotNone(bash)
+        for attempt, expected in (("7", 0), ("8", 1)):
+            with self.subTest(attempt=attempt):
+                env = dict(os.environ, BUILD_ARTIFACT_ID="381", BUILD_ATTEMPT="7",
+                           BUILD_SHA256="a" * 64, GITHUB_RUN_ATTEMPT=attempt)
+                run = subprocess.run([bash, "-s"], input=textwrap.dedent(preflight),
+                                     env=env, text=True, capture_output=True, timeout=5)
+                self.assertEqual(run.returncode, expected)
+                if expected:
+                    self.assertIn("Re-run all jobs", run.stdout)
+
     def run_transfer(self, outcomes):
         loop = (
             WORKFLOW.read_text(encoding="utf-8")
