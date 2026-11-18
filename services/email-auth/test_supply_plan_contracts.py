@@ -293,6 +293,91 @@ class SupplyPlanContracts(unittest.TestCase):
         self.assertIsNone(unknown['recommended_quantity'])
         self.assertEqual(unknown['ordered_units']['30'], 12)
 
+    def test_no_warehouse_observation_does_not_confirm_a_zero_plan(self):
+        wb = FixtureWire([('GET', WB_REPORT, {'data': {'taskId': TASK_ID}}),
+                          ('GET', WB_TASK + '/status', {'data': {'id': TASK_ID, 'status': 'done'}}),
+                          ('GET', WB_TASK + '/download', []), ('GET', WB_ORDERS, [])])
+        platform = supply_plan.read(ARGS, {'wb': wb}, MAPPING)['items'][1]
+        self.assertTrue(all(platform['source_complete'].values()))
+        self.assertFalse(platform['complete'])
+        self.assertFalse(platform['recommendations_complete'])
+        self.assertIn('no_warehouse_stock_observed', platform['issues'])
+        self.assertIsNone(platform['marketplace_total']['available_units'])
+        self.assertIsNone(platform['marketplace_total']['recommended_quantity'])
+
+    def test_conflicting_cluster_assignments_never_use_the_last_row_as_authoritative(self):
+        for reverse in (False, True):
+            wire = ozon_wire()
+            stock = wire.exchanges[1][2]['items']
+            stock[1]['cluster_id'] = 53
+            if reverse:
+                stock.reverse()
+            platform = supply_plan.read(ARGS, {'ozon': wire}, MAPPING)['items'][0]
+            self.assertFalse(platform['cluster_coverage_complete'])
+            self.assertIn('711', platform['unassigned_warehouse_ids'])
+            warehouse = next(r for r in platform['locations'] if r['warehouse_id'] == '711')
+            self.assertIsNone(warehouse['cluster_id'])
+            self.assertEqual(warehouse['available_units'], 4)
+            for cluster in platform['clusters']:
+                self.assertFalse(cluster['coverage_complete'])
+                self.assertIsNone(cluster['recommended_quantity'])
+            self.assertIsNone(platform['marketplace_total']['ship_without_transfers_without_inbound'])
+
+    def test_fbo_missing_article_or_sku_cannot_silently_reduce_demand(self):
+        for missing in ('offer_id', 'sku'):
+            wire = ozon_wire()
+            products = wire.exchanges[2][2]['postings'][0]['products']
+            if missing == 'offer_id':
+                wire.exchanges.append(copy.deepcopy(wire.exchanges[0]))
+            for product in products[:2]:
+                product[missing] = None
+                product['quantity'] = 1
+            platform = supply_plan.read(ARGS, {'ozon': wire}, MAPPING)['items'][0]
+            if platform['complete']:
+                self.assertEqual(platform['marketplace_total']['ordered_units']['30'], 14)
+            else:
+                self.assertIsNone(platform['marketplace_total']['ordered_units'])
+
+    def test_undated_wb_inbound_only_completes_the_no_inbound_scenario(self):
+        wire = FixtureWire([('GET', WB_REPORT, {'data': {'taskId': TASK_ID}})]
+                           + wb_stock_download() + wb_orders())
+        platform = supply_plan.read(ARGS, {'wb': wire}, MAPPING)['items'][1]
+        self.assertTrue(platform['scenario_recommendations_complete'])
+        self.assertFalse(platform['recommendations_complete'])
+        self.assertEqual(platform['statistics_status'], 'preliminary')
+        self.assertIsNone(platform['marketplace_total']['confirmed_recommended_quantity'])
+        empty_orders = FixtureWire([('GET', WB_REPORT, {'data': {'taskId': TASK_ID}})]
+                                   + wb_stock_download() + [('GET', WB_ORDERS, [])])
+        provisional = supply_plan.read(ARGS, {'wb': empty_orders}, MAPPING)['items'][1]
+        self.assertEqual(provisional['marketplace_total']['recommendation_without_inbound'], 0)
+        self.assertIsNone(provisional['marketplace_total']['confirmed_recommended_quantity'])
+
+    def test_two_product_rows_with_the_same_sku_in_one_fbo_posting_are_not_silently_collapsed(self):
+        wire = ozon_wire()
+        products = wire.exchanges[-1][2]['postings'][0]['products']
+        products.append(copy.deepcopy(products[0]))
+        platform = supply_plan.read(ARGS, {'ozon': wire}, MAPPING)['items'][0]
+        self.assertFalse(platform['complete'])
+        self.assertIn('duplicate_posting_sku', platform['pending'][0]['issues'])
+        self.assertIsNone(platform['marketplace_total']['ordered_units'])
+        self.assertIsNone(platform['unmapped_cluster_order_units_90d'])
+        self.assertIsNone(platform['excluded_seller_warehouse_units'])
+
+    def test_only_catalog_confirmed_fbs_skus_can_be_absent_from_an_fbo_plan(self):
+        for scheme, complete in (('FBS', True), ('SDS', False), ('unrecognized', False)):
+            with self.subTest(scheme=scheme):
+                wire = ozon_wire()
+                wire.exchanges[0][2]['items'][0]['sources'][1]['source'] = scheme
+                stocks = wire.exchanges[1][2]['items']
+                stocks[:] = [s for s in stocks if s['sku'] == 101]
+                products = wire.exchanges[2][2]['postings'][0]['products']
+                products[:] = [p for p in products if p['sku'] != 102]
+                platform = supply_plan.read(ARGS, {'ozon': wire}, MAPPING)['items'][0]
+                self.assertEqual(platform['complete'], complete)
+                self.assertEqual(platform['marketplace_total']['ordered_units']['30'], 15)
+                if complete:
+                    self.assertEqual(platform['marketplace_total']['recommendation_without_inbound'], 2)
+
     def test_pending_wb_report_resumes_without_recounting_orders_or_recreating_task(self):
         wb = FixtureWire([('GET', WB_REPORT, {'data': {'taskId': TASK_ID}}),
                           ('GET', WB_TASK + '/status', {'data': {'id': TASK_ID, 'status': 'processing'}})]

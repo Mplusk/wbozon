@@ -131,6 +131,8 @@ class WBExpansionContracts(unittest.TestCase):
         self.assertEqual((first['quantity'], first['accepted_quantity'], first['ready_for_sale_quantity']), (5, 3, 2))
         self.assertIsNone(second['accepted_quantity'])
         self.assertEqual(second['ready_for_sale_quantity'], 0)
+        self.assertFalse(result['complete'])
+        self.assertIn('unreported_receipt_quantity', result['issues'])
         package, = result['packages']
         self.assertEqual(package['package_code'], 'box-1')
         self.assertEqual(package['barcodes'], packages[0]['barcodes'])
@@ -232,6 +234,15 @@ class WBExpansionContracts(unittest.TestCase):
         self.assertEqual(ready['items'], [])
         self.assertTrue(ready['complete'])
 
+    def test_stock_matching_nmid_with_missing_vendor_code_is_not_a_final_empty_report(self):
+        task = ANALYTICS + '/api/v1/warehouse_remains/tasks/' + TASK_ID
+        rows = [{'nmId': NM, 'barcode': BARCODE, 'warehouses': [{'warehouseName':'W','quantity':9}]}]
+        wire = Wire(('GET', task + '/status', {'data': {'id': TASK_ID, 'status': 'done'}}),
+                    ('GET', task + '/download', rows))
+        report = self.read('wb_stocks', {'article':ARTICLE, 'nm_id':NM, 'task_id':TASK_ID}, wire)
+        self.assertFalse(report['complete'])
+        self.assertIn('stock_identity_unconfirmed', report['issues'])
+
     def test_report_worker_rejects_status_for_another_task_before_download(self):
         endpoint = ANALYTICS + '/api/v1/warehouse_remains/tasks/' + TASK_ID + '/status'
         wire = Wire(('GET', endpoint, {'data': {'id': 'd84def8c-dd62-4ed9-ab27-36a60bee0322', 'status': 'done'}}))
@@ -324,6 +335,24 @@ class WBExpansionContracts(unittest.TestCase):
                          [(r['date'][:10], '42', 'Тестовый склад') for r in raw])
         self.assertEqual([Decimal(str(r['coefficient'])) for r in observed], [-1, 0, 0, 2])
         self.assertEqual([r['available'] for r in observed], [False, False, True, True])
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['missing_dates_by_warehouse']['42'],
+                         [(today + timedelta(days=i)).isoformat() for i in range(3, 13)])
+
+    def test_fourteen_known_slot_dates_are_complete_for_the_selected_warehouse(self):
+        today = datetime.now(timezone(timedelta(hours=3))).date()
+        raw = [{'date': (today + timedelta(days=i)).isoformat(), 'warehouseID': 42,
+                'warehouseName': 'W', 'boxTypeID': 2, 'coefficient': 0, 'allowUnload': True}
+               for i in range(14)]
+        result = self.read('wb_acceptance_slots', {'warehouse_id': 42}, Wire(('GET', SLOTS, raw)))
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['missing_dates_by_warehouse'], {})
+        raw[-1]['boxTypeID'] = 5
+        split = self.read('wb_acceptance_slots', {'warehouse_id': 42}, Wire(('GET', SLOTS, raw)))
+        self.assertFalse(split['complete'])
+        boxes = split['missing_dates_by_box_type']['42']
+        self.assertEqual(boxes['2'], [raw[-1]['date']])
+        self.assertEqual(len(boxes['5']), 13)
 
     def test_slots_preserve_authorization_errors(self):
         wire = Wire(('GET', SLOTS, HTTPError(SLOTS, 403, 'forbidden', {}, None)))

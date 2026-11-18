@@ -227,6 +227,8 @@ def validate(name, args):
         raise ValueError("Invalid tool arguments")
     if not all(_valid(value, props[k]) for k, value in args.items()):
         raise ValueError("Invalid parameter value")
+    if "sku" in args and "skus" in args and {str(args["sku"])} != set(map(str, args["skus"])):
+        raise ValueError("Conflicting SKU selectors")
     if ("date_from" in args) != ("date_to" in args):
         raise ValueError("Both dates required")
     if "date_from" in args:

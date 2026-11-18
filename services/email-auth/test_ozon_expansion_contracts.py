@@ -149,6 +149,12 @@ class OzonExpansionContracts(unittest.TestCase):
                           by_warehouse['501']['transit_stock_count']), (3, 1, 2))
         self.assertEqual(by_warehouse['502']['available_stock_count'], 5)
 
+    def test_contradictory_sku_selectors_are_rejected_before_any_read(self):
+        provider = SellerFixture({'/v1/analytics/stocks': {'items': []}})
+        with self.assertRaises(ValueError):
+            ozon_expansion.read('ozon_stocks_by_cluster', {'sku':103, 'skus':[101,102]}, provider)
+        self.assertEqual(provider.calls, [])
+
     def test_article_lookup_includes_sku_found_only_in_stock_sources(self):
         info = '/v3/product/info/list'
         stocks = '/v1/analytics/stocks'
@@ -183,6 +189,7 @@ class OzonExpansionContracts(unittest.TestCase):
         self.addCleanup(db.close)
         db.execute('CREATE TABLE stock_history(series TEXT NOT NULL, day TEXT NOT NULL, observed TEXT NOT NULL, '
                    'blob BLOB NOT NULL, PRIMARY KEY (series, day))')
+        db.execute('CREATE TABLE stock_coverage(series TEXT, day TEXT, observed TEXT, PRIMARY KEY (series, day))')
         def wire(secret):
             w = market_transport.Wire.__new__(market_transport.Wire)
             w.provider, w.creds = 'ozon', {'client_id': 'synthetic-client', 'api_key': secret}
@@ -317,6 +324,18 @@ class OzonExpansionContracts(unittest.TestCase):
         self.assertFalse(out['complete'])
         self.assertNotEqual(out.get('acceptance_status'), 'complete')
         self.assertTrue(out.get('issues') or out.get('acceptance_status') != 'observed_acts')
+
+    def test_unagreed_receipt_does_not_confirm_the_final_quantity(self):
+        item = {'sku_info': {'sku': 101, 'offer_id': 'A'}, 'declared_quantity': 10,
+                'fact_quantity': 8, 'approved_quantity': 7}
+        wire = one_supply_wire(act_item=item)
+        summary = wire['/v1/supply-order/act/summary/get']['supplies_acts'][0]
+        summary['is_agreement_completed'] = False
+        summary['supply_acts'][0]['act_state'] = 'AWAITING_APPROVAL_BY_SELLER'
+        out, _ = self.read('ozon_supply_items', {'bundle_id':'B','supply_id':77,'order_id':42}, wire)
+        self.assertFalse(out['complete'])
+        self.assertEqual(out['acceptance_status'], 'agreement_pending')
+        self.assertEqual(out['acts'][0]['fact_quantity'], 8)
 
     def test_supply_act_missing_identity_is_not_a_complete_article_result(self):
         data = one_supply_wire(act_item={'sku_info': None, 'declared_quantity': 10,

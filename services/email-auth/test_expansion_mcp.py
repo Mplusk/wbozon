@@ -18,6 +18,7 @@ import expansion_gateway
 import market_transport
 import ozon_expansion
 import portal
+import wb_expansion
 import test_external_mcp_integration as integration
 import test_market_ads_contracts as ads
 import test_ozon_expansion_contracts as seller
@@ -336,6 +337,136 @@ class ExpansionMCPTests(unittest.TestCase):
 
 
 class ReportHistoryTests(unittest.TestCase):
+    def test_omitted_sku_does_not_become_an_observed_empty_stock_snapshot(self):
+        with TemporaryDirectory() as directory:
+            wire = market_transport.Wire(
+                "ozon", ACCOUNT["ozon"], Path(directory) / "gate", time.monotonic() + 5
+            )
+            path = "/v1/analytics/stocks"
+            info = "/v3/product/info/list"
+            article = "TEST-PAIR"
+            fixture = seller.SellerFixture(
+                {
+                    info: {
+                        "items": [
+                            {
+                                "id": 1,
+                                "offer_id": article,
+                                "name": article,
+                                "sku": 101,
+                                "sources": [{"source": "fbo", "sku": 102}],
+                            }
+                        ]
+                    },
+                    path: {
+                        "items": [
+                            {
+                                "sku": 101,
+                                "offer_id": article,
+                                "warehouse_id": 7,
+                                "cluster_id": 1,
+                                "available_stock_count": 0,
+                            }
+                        ]
+                    },
+                }
+            )
+            with patch.object(market_transport.Wire, "__call__", side_effect=fixture):
+                current = ozon_expansion.read("ozon_stocks_by_cluster", {"article": article}, wire)
+            day = current["observed_at"][:10]
+            period = {"date_from": day, "date_to": day}
+            self.assertFalse(current["complete"])
+            self.assertEqual(list(map(str, current["missing_skus"])), ["102"])
+            self.assertEqual(current["items"][0]["available_stock_count"], 0)
+            for selection in ({"sku": 102}, {"skus": [101, 102]}, {"article": article}):
+                with self.subTest(selection=selection):
+                    history = wire.stock_history({**period, **selection})
+                    self.assertFalse(history["complete"])
+                    self.assertEqual(history["missing_or_partial_dates"], [day])
+            known = wire.stock_history({**period, "sku": 101})
+            self.assertTrue(known["complete"])
+            self.assertEqual(known["items"][0]["available_stock_count"], 0)
+            for selection in ({"sku": 101, "article": "OTHER"}, {"sku": 101, "warehouse_id": 8}):
+                narrowed = wire.stock_history({**period, **selection})
+                self.assertFalse(narrowed["complete"])
+                self.assertEqual(narrowed["missing_or_partial_dates"], [day])
+
+    def test_legacy_unverified_daily_article_preserves_rows_without_claiming_full_coverage(self):
+        with TemporaryDirectory() as directory:
+            wire = market_transport.Wire(
+                "ozon", ACCOUNT["ozon"], Path(directory) / "gate", time.monotonic() + 5
+            )
+            day, stamp = "2026-10-10", "2026-10-10T12:00:00+00:00"
+            key = market_transport._id([wire.scope, "stock-history-v1", "article", "A"])
+            rows = [{"sku": 101, "article": "A", "warehouse_id": 7, "available_stock_count": 2}]
+            nonce = os.urandom(12)
+            blob = nonce + wire.aead.encrypt(nonce, json.dumps(rows).encode(), (key + day + stamp).encode())
+            with wire.db() as db:
+                db.execute("INSERT INTO stock_history VALUES(?,?,?,?)", (key, day, stamp, blob))
+            older = wire.stock_history({"article": "A", "date_from": day, "date_to": day})
+            self.assertEqual(older["items"][0]["available_stock_count"], 2)
+            self.assertFalse(older["complete"])
+            self.assertEqual(older["missing_or_partial_dates"], [day])
+
+    def test_same_timestamp_disagreement_requires_a_later_stock_observation(self):
+        with TemporaryDirectory() as directory:
+            wire = market_transport.Wire(
+                "ozon", ACCOUNT["ozon"], Path(directory) / "gate", time.monotonic() + 5
+            )
+            day = "2026-10-10"
+            args = {"sku": 101, "date_from": day, "date_to": day}
+            for quantity, second, complete in [(1, 0, True), (2, 0, False), (1, 0, False), (3, 1, True)]:
+                stamp = day + f"T12:00:0{second}+00:00"
+                rows = [{"sku": 101, "article": "A", "warehouse_id": 7, "available_stock_count": quantity}]
+                wire.record_stocks([101], "A", rows, stamp)
+                self.assertEqual(wire.stock_history(args)["complete"], complete)
+                self.assertEqual(
+                    wire.stock_history({**args, "sku": 101, "article": "A"})["complete"], complete
+                )
+
+    def test_wb_http_null_cannot_end_a_report_like_http_204(self):
+        with TemporaryDirectory() as directory:
+            wire = market_transport.Wire(
+                "wb", ACCOUNT["wb"], Path(directory) / "gate", time.monotonic() + 5
+            )
+            endpoint = wb_expansion.FINANCE
+            args = {"date_from": "2026-10-01", "date_to": "2026-10-02"}
+            query = {
+                "dateFrom": args["date_from"],
+                "dateTo": args["date_to"],
+                "period": "weekly",
+                "limit": 100,
+                "rrdId": 0,
+            }
+            wire.store(wire._key("POST", endpoint, None, query), b"null", 300)
+            with patch.object(wire, "_admit"), patch.object(wire.opener, "open") as call:
+                response = call.return_value.__enter__.return_value
+                response.status = 200
+                response.read.return_value = b"null"
+                with self.assertRaises(ValueError):
+                    wb_expansion.read("wb_finance_report", args, wire)
+                response.status = 204
+                response.read.return_value = b""
+                end = wb_expansion.read("wb_finance_report", args, wire)
+                self.assertTrue(end["complete"])
+                self.assertEqual(end["status"], "end_of_report")
+                self.assertEqual(call.call_count, 2)
+
+    def test_wb_legacy_end_marker_does_not_finish_new_finance_summary(self):
+        with TemporaryDirectory() as directory:
+            wire = market_transport.Wire(
+                "wb", ACCOUNT["wb"], Path(directory) / "gate", time.monotonic() + 5
+            )
+            query = {"date_from": "2026-10-01", "date_to": "2026-10-02"}
+            with wire.progress("wb-finance-v1", query) as (_, save):
+                save({"cursor": None, "rows": [], "unallocated": 0, "done": True}, 1800)
+            cooldown = urllib.error.HTTPError("", 429, "cooldown", {"Retry-After": "60"}, None)
+            with patch.object(market_transport.Wire, "__call__", side_effect=cooldown) as read:
+                result = expansion_gateway._finance_period(query, wire)
+            self.assertFalse(result["complete"])
+            self.assertEqual(result["status"], "pending")
+            self.assertEqual(read.call_count, 1)
+
     def test_stock_history_is_account_scoped_and_handles_missing_days_without_current_stock(self):
         with TemporaryDirectory() as directory:
 

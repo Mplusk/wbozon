@@ -162,9 +162,16 @@ def _goods(args, request):
                     "barcodes": [select(x, "barcode quantity") for x in rows(p.get("barcodes", []))],
                 }
             )
+    selected = [r for r in items if matches(r, args)]
+    known = all(
+        type(r[k]) is int and r[k] >= 0 for r in selected for k in ("quantity", "accepted_quantity")
+    )
+    cursor = offset + limit if len(page) == limit else None
     return result(
-        [r for r in items if matches(r, args)],
-        offset + limit if len(page) == limit else None,
+        selected,
+        cursor,
+        complete=cursor is None and known,
+        issues=[] if known else ["unreported_receipt_quantity"],
         packages=packs,
         package_scope="whole_supply" if not args.get("is_preorder") else "unavailable_for_preorder",
     )
@@ -340,13 +347,18 @@ def _report(name, args, request):
             task_id=task,
             retry_after_seconds=int(delay) if delay and delay.isdigit() else None,
         )
-    if hasattr(request, "finish_job"):
-        request.finish_job(base, query, task)
     items = []
+    issues = set()
     for r in rows([] if downloaded is None else downloaded):
         if name == "wb_stocks":
             ident = _item(r)
             if not matches(ident, args):
+                if not any(
+                    ident[k] is not None and str(ident[k]) != str(args[k])
+                    for k in ("nm_id", "article")
+                    if k in args
+                ):
+                    issues.add("stock_identity_unconfirmed")
                 continue
             kinds = {
                 "Всего находится на складах": "provider_total",
@@ -357,6 +369,8 @@ def _report(name, args, request):
                 warehouse = w.get("warehouseName")
                 if not warehouse:
                     raise ValueError("Missing warehouse")
+                if type(w.get("quantity")) is not int or w["quantity"] < 0:
+                    issues.add("unreported_stock_quantity")
                 items.append(
                     dict(
                         ident,
@@ -398,7 +412,12 @@ def _report(name, args, request):
                 items.append(item)
     if name == "wb_acceptance_report" and "article" in args and "nm_id" not in args:
         return result([], complete=False, status="exact_nm_id_required", task_id=task)
-    return _slice(items, args, status="ready", task_id=task, quantity_unit="pcs")
+    if hasattr(request, "finish_job"):
+        request.finish_job(base, query, task)
+    report = _slice(items, args, status="ready", task_id=task, quantity_unit="pcs")
+    if issues:
+        report.update(complete=False, status="partial_report", issues=sorted(issues))
+    return report
 
 
 FIN_FIELDS = {
@@ -730,11 +749,49 @@ def _slots(args, request):
                 else c >= 0 and r["allowUnload"],
             }
         )
-    return _warehouse_directory(
+    data = _warehouse_directory(
         args,
         request,
         result(items, horizon_days=14, status="reported", coverage="published_warehouse_dates_only"),
     )
+    dates = [(today + timedelta(days=i)).isoformat() for i in range(14)]
+    warehouses = {
+        str(r["warehouse_id"]) for r in items + data.get("warehouses", []) if r["warehouse_id"] is not None
+    }
+    if "warehouse_id" in args:
+        warehouses.add(str(args["warehouse_id"]))
+    published = defaultdict(set)
+    by_box = defaultdict(set)
+    unknown = False
+    for row in items:
+        if row["available"] is None or row["box_type_id"] is None or row["warehouse_id"] is None:
+            unknown = True
+        else:
+            warehouse = str(row["warehouse_id"])
+            published[warehouse].add(row["date"])
+            by_box[warehouse, str(row["box_type_id"])].add(row["date"])
+    missing = {
+        w: [d for d in dates if d not in published[w]]
+        for w in sorted(warehouses)
+        if len(published[w]) != len(dates)
+    }
+    missing_boxes = {}
+    for (warehouse, box), available_dates in sorted(by_box.items()):
+        if len(available_dates) != len(dates):
+            missing_boxes.setdefault(warehouse, {})[box] = [d for d in dates if d not in available_dates]
+    data.update(
+        complete=data["complete"]
+        and bool(warehouses)
+        and not missing
+        and not missing_boxes
+        and not unknown,
+        date_from=dates[0],
+        date_to=dates[-1],
+        missing_dates_by_warehouse=missing,
+        missing_dates_by_box_type=missing_boxes,
+        incomplete_slot_fields=unknown,
+    )
+    return data
 
 
 def _warehouse_directory(args, request, data):

@@ -35,7 +35,7 @@ def _range(args):
     return args["date_from"] + "T00:00:00Z", args["date_to"] + "T23:59:59.999999Z"
 
 
-def lookup(article, request):
+def _article_card(article, request):
     raw = request("POST", BASE + "/v3/product/info/list", body={"offer_id": [article]}, ttl=1800)
     identity = ozon_details._products({"offer_ids": [article]}, raw, None)
     cards = identity["items"]
@@ -45,10 +45,15 @@ def lookup(article, request):
         or identity["unmatched_identifiers"]
         or identity["unmatched_row_indices"]
     ):
-        return []
+        return None
     if set(cards[0]["incomplete_fields"]) & {"sku", "sources", "stock_sources"}:
-        return []
-    return [int(v) for v in cards[0]["sku_candidates"]]
+        return None
+    return cards[0]
+
+
+def lookup(article, request):
+    card = _article_card(article, request)
+    return [int(v) for v in card["sku_candidates"]] if card else []
 
 
 def _report_skus(args, request):
@@ -181,6 +186,13 @@ def _items(args, request):
     if len(observed) != 1 or set(states) != seen or any(r["act_state"] is None for r in output["acts"]):
         output.update(complete=False, acceptance_status="act_status_incomplete")
         output["issues"].append("unmatched_act_summary")
+    elif (
+        output["agreement_completed"] is not True
+        or not states
+        or any(state != "ACCEPTED" for state, _ in states.values())
+    ):
+        output.update(complete=False, acceptance_status="agreement_pending")
+        output["issues"].append("receipt_agreement_unconfirmed")
     if output["issues"]:
         output["complete"] = False
         output["issues"] = sorted(set(output["issues"]))
@@ -223,8 +235,15 @@ def _stocks(name, args, request):
     if "date_from" in args:
         return request.stock_history(args)
     skus = args.get("skus", [args["sku"]] if "sku" in args else [])
+    fbs_only = set()
     if not skus and "article" in args:
-        skus = lookup(args["article"], request)
+        card = _article_card(args["article"], request)
+        if card:
+            skus = card["sku_candidates"]
+            schemes = defaultdict(set)
+            for source in card["sources"] + card["stock_sources"]:
+                schemes[str(source["sku"])].add(source["source"].upper())
+            fbs_only = {sku for sku, sources in schemes.items() if sources == {"FBS"}}
     if not skus:
         return result([], complete=False, issues=["sku_identity_required"])
     params = {"skus": [int(s) for s in skus]}
@@ -235,18 +254,48 @@ def _stocks(name, args, request):
     data = request("POST", BASE + "/v1/analytics/stocks", body=params)
     fields = "warehouse_id warehouse_name cluster_id cluster_name macrolocal_cluster_id available_stock_count valid_stock_count transit_stock_count inbound_replenishment return_from_customer_stock_count ads ads_cluster idc idc_cluster"
     items = []
+    expected = set(map(str, skus))
+    seen_skus, invalid_skus, positions = set(), set(), set()
     for stock in rows(data.get("items")):
         row = dict(_identity(stock), **select(stock, fields))
-        if str(row["sku"]) not in set(map(str, skus)):
+        sku = str(row["sku"])
+        if sku not in expected:
             raise ValueError("Unexpected SKU in stock report")
+        if any(str(row[k]) != str(args[k]) for k in ("warehouse_id", "cluster_id") if k in args):
+            raise ValueError("Unexpected stock location")
+        position = (sku, str(row["warehouse_id"]))
+        quantity = row["available_stock_count"]
+        seen_skus.add(sku)
+        if (
+            row["warehouse_id"] is None
+            or position in positions
+            or type(quantity) is not int
+            or quantity < 0
+            or ("article" in args and row["article"] != args["article"])
+        ):
+            invalid_skus.add(sku)
+        positions.add(position)
         items.append(row)
+    missing_skus = sorted(expected - seen_skus - fbs_only, key=int)
+    complete = bool(seen_skus) and not missing_skus and not invalid_skus
     if not ("cluster_id" in args or "warehouse_id" in args) and hasattr(request, "record_stocks"):
-        article = args.get("article") if not ("sku" in args or "skus" in args) else None
-        if article is None or all(r["article"] == article for r in items):
-            request.record_stocks(skus, article, items, observed)
+        verified = seen_skus - invalid_skus
+        article = args.get("article") if complete and not ("sku" in args or "skus" in args) else None
+        if verified:
+            request.record_stocks(
+                verified, article, [r for r in items if str(r["sku"]) in verified], observed
+            )
     items = [r for r in items if matches(r, args)]
     return result(
         items,
+        complete=complete,
+        fulfillment_scope="FBO",
+        excluded_fbs_skus=sorted(fbs_only - seen_skus, key=int),
+        missing_skus=missing_skus,
+        invalid_stock_skus=sorted(invalid_skus, key=int),
+        issues=(["stock_skus_not_observed"] if missing_skus else [])
+        + (["invalid_stock_positions"] if invalid_skus else [])
+        + (["article_only_has_fbs_skus"] if not seen_skus and expected == fbs_only else []),
         sales_window_days=28,
         quantity_unit="pcs",
         stock_observed_at=observed,
@@ -321,9 +370,11 @@ def _geo(args, request):
             "with": {"analytics_data": True, "financial_data": True, "legal_info": False},
         },
     )
-    items = []
+    items, issues = [], set()
+    article_skus = None
     for p in rows(raw.get("postings")):
         a, f = p.get("analytics_data") or {}, p.get("financial_data") or {}
+        posting_skus = set()
         for product in rows(p.get("products")):
             row = dict(
                 _identity(product),
@@ -335,10 +386,36 @@ def _geo(args, request):
                 created_at=iso(p.get("created_at")),
                 in_process_at=iso(p.get("in_process_at")),
             )
+            if "article" in args and not row["article"]:
+                if row["sku"] is None:
+                    issues.add("posting_product_identity_unknown")
+                    continue
+                if article_skus is None:
+                    article_skus = set(map(str, lookup(args["article"], request)))
+                if not article_skus:
+                    issues.add("posting_product_identity_unknown")
+                    continue
+                if str(row["sku"]) in article_skus:
+                    row.update(
+                        article=args["article"], offer_id=args["article"], article_basis="catalog_sku"
+                    )
+            if row["sku"] is None and ("article" not in args or row["article"] == args["article"]):
+                issues.add("posting_product_identity_unknown")
             if matches(row, args):
+                sku = str(row["sku"])
+                if sku in posting_skus:
+                    issues.add("duplicate_posting_sku")
+                posting_skus.add(sku)
                 items.append(row)
     cursor, done = _page(raw, args.get("cursor"))
-    return result(items, cursor, complete=done, scope="FBO")
+    return result(
+        items,
+        cursor,
+        complete=done and not issues,
+        issues=sorted(issues),
+        scope="FBO",
+        period_basis="posting_creation_utc",
+    )
 
 
 def _cash_detail(value, shape):

@@ -162,6 +162,8 @@ class Wire:
             db.execute("""CREATE TABLE IF NOT EXISTS stock_history (
                 series TEXT NOT NULL, day TEXT NOT NULL, observed TEXT NOT NULL, blob BLOB NOT NULL,
                 PRIMARY KEY (series, day))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS stock_coverage (
+                series TEXT NOT NULL, day TEXT NOT NULL, observed TEXT NOT NULL, PRIMARY KEY (series, day))""")
 
     @contextlib.contextmanager
     def db(self):
@@ -267,8 +269,12 @@ class Wire:
         return self.aead.decrypt(row[0][:12], row[0][12:], key.encode())
 
     def cached_download(self, url):
-        raw = self.cached(self._key("GET", url, None, None))
-        return None if raw is None else json.loads(raw, parse_float=Decimal)
+        return self._http_cache(self._key("GET", url, None, None), binary=False)
+
+    def _http_cache(self, key, binary):
+        raw = self.cached(key)
+        # Older entries stored both HTTP 204 and a JSON null as b"null".
+        return raw if binary or raw is None else json.loads(raw, parse_float=Decimal)
 
     def _existing_job(self, key):
         with self.db() as db:
@@ -298,33 +304,53 @@ class Wire:
 
     def record_stocks(self, skus, article, observations, observed):
         """Store the latest complete, unfiltered warehouse observation per SKU and UTC day."""
-        series = {("sku", str(sku)): [] for sku in skus}
+        expected = {str(sku) for sku in skus}
+        series = {}
         for row in observations:
-            series[("sku", str(row["sku"]))].append(row)
-        if article is not None:
+            sku = str(row["sku"])
+            if sku not in expected:
+                raise ValueError("Unexpected SKU in stock observation")
+            series.setdefault(("sku", sku), []).append(row)
+        if not series:
+            return
+        if (
+            article is not None
+            and len(series) == len(expected)
+            and all(r.get("article") == article for r in observations)
+        ):
             series["article", article] = observations
         day = observed[:10]
         cutoff = (date.fromisoformat(day) - timedelta(days=365)).isoformat()
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("DELETE FROM stock_history WHERE day<?", (cutoff,))
+            db.execute("DELETE FROM stock_coverage WHERE day<?", (cutoff,))
             for (kind, value), items in series.items():
                 key = _id([self.scope, "stock-history-v1", kind, value])
+                prior = db.execute(
+                    "SELECT observed,blob FROM stock_history WHERE series=? AND day=?", (key, day)
+                ).fetchone()
+                identity = (key + day + observed).encode()
+                if prior and prior[0] >= observed:
+                    if prior[0] == observed:
+                        blob = prior[1]
+                        old = json.loads(self.aead.decrypt(blob[:12], blob[12:], identity))
+                        if sorted(map(_json, old)) != sorted(map(_json, items)):
+                            db.execute("DELETE FROM stock_coverage WHERE series=? AND day=?", (key, day))
+                    continue
                 nonce = os.urandom(12)
-                blob = nonce + self.aead.encrypt(
-                    nonce, _json(items).encode(), (key + day + observed).encode()
-                )
+                blob = nonce + self.aead.encrypt(nonce, _json(items).encode(), identity)
                 db.execute(
-                    """INSERT INTO stock_history VALUES(?,?,?,?) ON CONFLICT(series,day) DO UPDATE
-                    SET observed=excluded.observed, blob=excluded.blob WHERE excluded.observed>=stock_history.observed""",
-                    (key, day, observed, blob),
+                    "INSERT OR REPLACE INTO stock_history VALUES(?,?,?,?)", (key, day, observed, blob)
                 )
+                db.execute("INSERT OR REPLACE INTO stock_coverage VALUES(?,?,?)", (key, day, observed))
             size = db.execute("SELECT COALESCE(SUM(length(blob)),0) FROM stock_history").fetchone()[0]
             while size > MAX_CACHE_BYTES:
-                rid, length = db.execute(
-                    "SELECT rowid,length(blob) FROM stock_history ORDER BY day,observed LIMIT 1"
+                key, day, length = db.execute(
+                    "SELECT series,day,length(blob) FROM stock_history ORDER BY day,observed LIMIT 1"
                 ).fetchone()
-                db.execute("DELETE FROM stock_history WHERE rowid=?", (rid,))
+                db.execute("DELETE FROM stock_history WHERE series=? AND day=?", (key, day))
+                db.execute("DELETE FROM stock_coverage WHERE series=? AND day=?", (key, day))
                 size -= length
 
     def stock_history(self, args):
@@ -344,11 +370,16 @@ class Wire:
         params = (*keys, days[0], days[-1])
         matched = 0
         items = []
+        filtered_scope = "warehouse_id" in args or "cluster_id" in args or bool(skus and "article" in args)
+        observed_series = {}
         with self.db() as db:
             db.execute("BEGIN")
             coverage = dict(
                 db.execute(
-                    "SELECT day,COUNT(*) FROM stock_history WHERE " + where + " GROUP BY day", params
+                    "SELECT day,COUNT(*) FROM stock_history JOIN stock_coverage USING(series,day,observed) WHERE "
+                    + where
+                    + " GROUP BY day",
+                    params,
                 )
             )
             for key, day, stamp, blob in db.execute(
@@ -366,16 +397,23 @@ class Wire:
                     ):
                         continue
                     matched += 1
-                    if matched > offset:
+                    if filtered_scope:
+                        observed_series.setdefault(day, set()).add(key)
+                    if matched > offset and len(items) < limit:
                         items.append(dict(row, observation_date=day, stock_observed_at=stamp))
-                    if len(items) > limit:
+                    if matched > offset + limit and not filtered_scope:
                         break
-                if len(items) > limit:
+                if matched > offset + limit and not filtered_scope:
                     break
-        missing = [day for day in days if coverage.get(day, 0) != len(keys)]
-        more = len(items) > limit
+        missing = [
+            day
+            for day in days
+            if coverage.get(day, 0) != len(keys)
+            or (filtered_scope and len(observed_series.get(day, ())) != len(keys))
+        ]
+        more = matched > offset + limit
         return result(
-            items[:limit],
+            items,
             offset + limit if more else None,
             complete=not missing and not more,
             status="partial_history" if missing else "observed_history",
@@ -454,9 +492,9 @@ class Wire:
             if previous is not None:
                 return previous
         elif ttl:
-            hit = self.cached(key)
+            hit = self._http_cache(key, binary)
             if hit is not None:
-                return hit if binary else json.loads(hit, parse_float=Decimal)
+                return hit
         if self.provider == "wb" and basic_interval and not _wb_personal(self.creds["api_token"]):
             interval = basic_interval
         quota = _id([self.scope, parts.netloc, group or parts.path])
@@ -481,9 +519,9 @@ class Wire:
         for attempt in range(2):
             self._admit(quota, interval)
             if ttl and not job:
-                hit = self.cached(key)
+                hit = self._http_cache(key, binary)
                 if hit is not None:
-                    return hit if binary else json.loads(hit, parse_float=Decimal)
+                    return hit
             timeout = self.deadline - time.monotonic()
             if timeout < 0.3:
                 raise TimeoutError()
@@ -527,8 +565,11 @@ class Wire:
                     raw = response.read(MAX_REPORT + 1)
                     if len(raw) > MAX_REPORT:
                         raise finance_gate.ProviderResponseTooLarge("Report exceeds read bound")
-                    if response.status == 204:
-                        raw = b"null"
+                    no_content = response.status == 204
+                    if no_content:
+                        raw = (
+                            b"[]" if self.provider == "wb" and parts.path.endswith("/download") else b"null"
+                        )
                 value = (
                     raw
                     if binary
@@ -539,6 +580,8 @@ class Wire:
                         parse_constant=lambda _: (_ for _ in ()).throw(ValueError("Invalid JSON number")),
                     )
                 )
+                if value is None and not no_content:
+                    raise ValueError("Unexpected JSON null in marketplace response")
                 if token_request:
                     ttl = max(0, min(86400, int(value["expires_in"])) - 60)
                 if job:
@@ -551,7 +594,7 @@ class Wire:
                         raise ValueError("Provider did not confirm report identity")
                     with self.db() as db:
                         db.execute("UPDATE jobs SET binding=? WHERE k=?", ("id:" + task, key))
-                if ttl and not job:
+                if ttl and not job and value is not None:
                     self.store(key, raw, ttl)
                 return value
             except urllib.error.HTTPError as exc:

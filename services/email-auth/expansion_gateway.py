@@ -130,7 +130,7 @@ def _enrich(name, args, data, request):
 def _finance_period(args, wire):
     """Resume at the last confirmed rrdId; totals only become final after HTTP 204."""
     query = {k: v for k, v in args.items() if k not in ("mode", "cursor")}
-    with wire.progress("wb-finance-v1", query) as (state, save):
+    with wire.progress("wb-finance-v2", query) as (state, save):
         state = state or {"cursor": 0, "rows": [], "unallocated": 0, "done": False}
         issues = []
         for _ in range(12):

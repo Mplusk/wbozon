@@ -58,7 +58,15 @@ def _scan(state, section, page, provider, since, as_of):
             if str(key) in group["stock"]:
                 state["issues"].add("duplicate_stock_position")
             group["stock"][str(key)] = entry
-            group.update(cluster_id=item.get("cluster_id"), cluster=item.get("cluster_name"))
+            cluster_id = item.get("cluster_id")
+            if cluster_id is not None and not group.get("cluster_conflict"):
+                if group["cluster_id"] is not None and str(group["cluster_id"]) != str(cluster_id):
+                    group.update(cluster_id=None, cluster=None, cluster_conflict=True)
+                    state["issues"].add("conflicting_warehouse_cluster")
+                else:
+                    group.update(
+                        cluster_id=cluster_id, cluster=item.get("cluster_name") or group["cluster"]
+                    )
             continue
         when = item.get("created_at") if provider == "ozon" else item.get("date")
         if not when or type(item.get("quantity")) is not int or item["quantity"] < 0:
@@ -109,6 +117,7 @@ def _locations(state, horizon, as_of):
             "unknown_fulfillment_scheme",
             "pagination_did_not_finish",
             "order_volume_exceeds_planning_bound",
+            "incomplete_cluster_assignment",
         }
     )
     for key, g in state["locations"].items():
@@ -132,9 +141,7 @@ def _locations(state, horizon, as_of):
             known = demand_verified and not any(d >= first for d in g.get("unknown_cancellation_days", {}))
             cancelled[str(days)] = cancellations if known else None
             retained[str(days)] = units - cancellations if known else None
-            avg[str(days)] = (
-                str(Decimal(units) / days) if state["done"]["orders"] and not state["issues"] else None
-            )
+            avg[str(days)] = str(Decimal(units) / days) if demand_verified else None
         rate = Decimal(avg["30"]) if avg["30"] is not None else None
         complete = state["done"]["stock"] and state["done"]["orders"] and not state["issues"]
         gross = (
@@ -169,7 +176,9 @@ def _locations(state, horizon, as_of):
                 "recommended_quantity": net if net is not None else gross,
                 "recommendation_without_inbound": gross,
                 "recommendation_if_inbound_arrives": net,
-                "confirmed_recommended_quantity": gross if gross == 0 or inbound == 0 else None,
+                "confirmed_recommended_quantity": gross
+                if not state.get("orders_preliminary") and (gross == 0 or inbound == 0)
+                else None,
                 "recommendation_note": (
                     "Расчёт на валовых заказах с отменами. Количество к поставке предполагает, что весь указанный транзит поступит в пределах горизонта."
                     if net is not None
@@ -183,7 +192,7 @@ def _locations(state, horizon, as_of):
     return answer
 
 
-def _clusters(state, horizon, as_of):
+def _clusters(state, horizon, as_of, unmapped):
     groups = {}
     for warehouse, loc in state["locations"].items():
         cid = loc["cluster_id"]
@@ -205,9 +214,14 @@ def _clusters(state, horizon, as_of):
         _merge_cancellations(cluster, loc)
         for sku, entry in loc["stock"].items():
             cluster["stock"][warehouse + ":" + sku] = entry
-    output = _locations(dict(state, locations=groups), horizon, as_of)
+    issues = state["issues"] | ({"incomplete_cluster_assignment"} if unmapped else set())
+    output = _locations(dict(state, locations=groups, issues=issues), horizon, as_of)
     for row in output:
         del row["warehouse"], row["warehouse_id"]
+        row["coverage_complete"] = (
+            all(state["done"].values()) and not issues and row["available_units"] is not None
+        )
+        row["stock_scope"] = "mapped_warehouses_only" if unmapped else "reported_warehouses"
     return output
 
 
@@ -255,7 +269,7 @@ def _platform(provider, article, nm, wire, horizon, as_of):
     since = (as_of - timedelta(days=89)).isoformat()
     key = [provider, article, nm, as_of.isoformat()]
     context = (
-        wire.progress("supply-plan-v1", key)
+        wire.progress("supply-plan-v2", key)
         if hasattr(wire, "progress")
         else nullcontext(({}, lambda data, ttl: None))
     )
@@ -271,6 +285,7 @@ def _platform(provider, article, nm, wire, horizon, as_of):
             "stock_task_id": None,
         }
         state["issues"] = set(state["issues"])
+        state["orders_preliminary"] = provider == "wb"
 
         def checkpoint():
             save(
@@ -350,9 +365,14 @@ def _platform(provider, article, nm, wire, horizon, as_of):
                     checkpoint()
                     break
                 # Advance only once for a valid page. A failed final page remains available for inspection.
-                if not page["complete"] and page["next_cursor"] is None:
+                if page.get("issues") or (not page["complete"] and page["next_cursor"] is None):
                     pending.append(
-                        {"source": section, "status": "incomplete", "issues": page.get("issues")}
+                        {
+                            "source": section,
+                            "status": "incomplete",
+                            "issues": page.get("issues"),
+                            **{k: page[k] for k in ("missing_skus", "invalid_stock_skus") if page.get(k)},
+                        }
                     )
                     break
                 next_cursor = page["next_cursor"]
@@ -380,8 +400,8 @@ def _platform(provider, article, nm, wire, horizon, as_of):
             r["warehouse_id"] or r["warehouse"] for r in locations if r["available_units"] is None
         ]
         sources_complete = all(state["done"].values()) and not state["issues"]
-        complete = sources_complete and not missing_stock and not unmapped
-        clusters = _clusters(state, horizon, as_of) if provider == "ozon" else []
+        complete = sources_complete and bool(locations) and not missing_stock and not unmapped
+        clusters = _clusters(state, horizon, as_of, unmapped) if provider == "ozon" else []
         destinations = clusters if provider == "ozon" else locations
         total = _market_total(state, horizon, as_of, missing_stock)
         total["stock_pooling_assumption"] = (
@@ -404,10 +424,18 @@ def _platform(provider, article, nm, wire, horizon, as_of):
             "article": article,
             "complete": complete,
             "source_complete": state["done"],
-            "issues": sorted(state["issues"]),
+            "issues": sorted(
+                state["issues"]
+                | ({"no_warehouse_stock_observed"} if state["done"]["stock"] and not locations else set())
+            ),
             "pending": pending,
             "complete_scope": "marketplace_warehouse_plan_only",
             "fulfillment_scope": "Ozon FBO" if provider == "ozon" else "Wildberries FBW",
+            "orders_date_basis": "posting_creation_utc" if provider == "ozon" else "event_date_moscow",
+            "statistics_status": "reported_fbo_postings" if provider == "ozon" else "preliminary",
+            "statistics_limitations": []
+            if provider == "ozon"
+            else ["orders_without_confirmed_payment_may_be_absent", "rolling_90_day_retention"],
             "account_coverage": {
                 "status": "partial",
                 "excluded": ["FBS", "rFBS"]
@@ -416,12 +444,18 @@ def _platform(provider, article, nm, wire, horizon, as_of):
             },
             "unassigned_warehouse_ids": unmapped,
             "unknown_stock_warehouses": missing_stock,
-            "cluster_coverage_complete": sources_complete and not unmapped if provider == "ozon" else None,
+            "cluster_coverage_complete": complete if provider == "ozon" else None,
             "unmapped_cluster_order_units_90d": sum(
                 sum(state["locations"][k]["daily"].values()) for k in unmapped
-            ),
-            "recommendations_complete": complete,
-            "excluded_seller_warehouse_units": sum(state.get("seller_warehouse_orders", {}).values()),
+            )
+            if provider == "ozon" and total["ordered_units"] is not None and state["done"]["stock"]
+            else None,
+            "scenario_recommendations_complete": complete,
+            "recommendations_complete": complete
+            and all(row["confirmed_recommended_quantity"] is not None for row in destinations),
+            "excluded_seller_warehouse_units": sum(state.get("seller_warehouse_orders", {}).values())
+            if provider == "wb" and total["ordered_units"] is not None
+            else None,
             "locations": locations,
             "clusters": clusters,
             "marketplace_total": total,
