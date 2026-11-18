@@ -1,6 +1,7 @@
 """Contract regressions for the v2 provider projections using published response shapes."""
 
 import unittest
+from unittest.mock import patch
 from contextlib import contextmanager
 from types import SimpleNamespace
 from datetime import datetime, timedelta
@@ -10,6 +11,7 @@ import market_specs, ozon_expansion, wb_reports, wb_mcp
 import market_history
 import expansion_gateway
 import finance_gate
+import market_composites
 
 
 class Reports(unittest.TestCase):
@@ -107,6 +109,46 @@ class Reports(unittest.TestCase):
                              ('2026-11-16', '2026-11-18', len(covered), 3))
             self.assertEqual(row['observed_ordered_units'], 0)
 
+    def test_archive_article_keeps_known_rows_and_distinguishes_unmapped_skus_from_zero(self):
+        day = self.today
+        rows = [dict(article='A', sku='11', ordered_units=2), dict(article=None, sku='17', ordered_units=0)]
+        history = SimpleNamespace(read_days=lambda *_: {day: (day+'T12:00:00Z', rows)})
+
+        def read(**query):
+            return market_history.historical_read(history, 'owner', 'ozon_sku_daily', dict(self.dates, **query))
+
+        for article, observed in [('A', [rows[0]]), ('X', [])]:
+            report = read(article=article)
+            self.assertEqual(report['items'], observed)
+            self.assertEqual(report['unresolved_article_rows'], 1)
+            self.assertIn('archived_article_identity_missing', report['issues'])
+            self.assertFalse(report['complete'])
+        self.assertFalse(read(article='X', sku=17)['complete'])
+        self.assertTrue(read(article='X', sku=11)['complete'])
+        self.assertTrue(read(sku=17)['complete'])
+        self.assertEqual(read(sku=17)['items'], [rows[1]])
+
+    def test_comparison_uses_only_a_verified_exact_marketplace_when_the_other_catalog_fails(self):
+        args = {"article": "napkin"}
+        wires = {"ozon": object(), "wb": object(), "performance": object()}
+        mapping = {"wb_vendor_code": "WB-A", "ozon_offer_id": "O-A"}
+        failed = market_specs.result([], complete=False, status="retry_time_unknown", http_status=429,
+                                     retry_after_seconds=None)
+        wb = market_specs.result([{"article": "WB-A", "nm_id": 7}])
+        def identity(ozon, wildberries):
+            return market_specs.result([{"wb": wildberries, "ozon": ozon}], complete=False)
+
+        with patch.object(market_composites, "comparison", side_effect=lambda *a: market_specs.result([{"observed": 1}])) as compare:
+            result = market_composites.verified_comparison(args, wires, mapping, identity(failed, wb))
+            compare.assert_called_once_with(args, {"wb": wires["wb"]}, {"wb_vendor_code": "WB-A", "wb_nm_id": 7})
+            self.assertFalse(result["complete"])
+            self.assertEqual(result["unavailable_marketplaces"],
+                             {"ozon": {"status": "retry_time_unknown", "http_status": 429, "retry_after_seconds": None}})
+            compare.reset_mock()
+            unresolved = identity(failed, wb)
+            self.assertIs(market_composites.verified_comparison(args, wires, None, unresolved), unresolved)
+            compare.assert_not_called()
+
     def test_retention_both_fields_and_unallocated_account_row(self):
         raw = [
             {
@@ -170,6 +212,23 @@ class Reports(unittest.TestCase):
             "items"
         ]
         self.assertEqual((row["region"], row["units"], row["status"]), ("destination", 1, "return"))
+
+    def test_feed_keeps_a_short_final_page_with_empty_snapshot_and_never_pages_without_one(self):
+        raw = {'data': {'snapshotTime': '', 'currency': 'RUB', 'orders': [dict(
+            srid='one', nmId=1, destinationDistrict='region', status='ordered', sellerPrice=0,
+            updatedAt=self.today+'T01:00:00+03:00', createdAt=self.today+'T00:00:00+03:00')]}}
+        wire = lambda *a, **kw: raw
+        done = wb_reports.region(dict(self.dates, limit=2), wire)
+        self.assertTrue(done['complete'])
+        self.assertEqual(len(done['items']), 1)
+        self.assertNotIn('data_as_of', done)
+        partial = wb_reports.region(dict(self.dates, limit=1), wire)
+        self.assertFalse(partial['complete'])
+        self.assertIsNone(partial['next_cursor'])
+        self.assertEqual(partial['status'], 'snapshot_required_for_continuation')
+        later = wb_reports.region(dict(self.dates, limit=2, offset=1, snapshot_time=self.today+'T01:00:00Z'), wire)
+        self.assertFalse(later['complete'])
+        self.assertEqual(later['items'], [])
 
     def test_rating_accepts_single_localization_snapshot_and_history(self):
         index = {"calculation_date": "2026-10-01T00:00:00Z", "localization_percentage": 0}

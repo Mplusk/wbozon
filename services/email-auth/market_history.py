@@ -232,7 +232,17 @@ def historical_read(history, owner, name, args):
     days = days_between(args["date_from"], args["date_to"])
     missing = [d for d in days if d not in pages]
     offset, limit = args.get("offset", 0), args.get("limit", 100)
-    selected = [r for stamp, records in pages.values() for r in records if matches(r, args)]
+    selected = []
+    unresolved = 0
+    check_article = name == "ozon_sku_daily" and "article" in args
+    for _, records in pages.values():
+        for row in records:
+            if check_article and not row.get("article"):
+                sku = row.get("sku")
+                if "sku" not in args or sku is None or str(sku) == str(args["sku"]):
+                    unresolved += 1
+            elif matches(row, args):
+                selected.append(row)
     if name == "wb_orders" and "group_by" in args:
         events = ((r.get("article"), r["date"][:10], order_event(r.get("cancelled")), r["quantity"])
                   for r in selected)
@@ -256,11 +266,13 @@ def historical_read(history, owner, name, args):
     return result(
         selected[offset : offset + limit],
         offset + limit if more else None,
-        complete=not missing and not more,
+        complete=not missing and not more and not unresolved,
         source="daily_archive",
         missing_dates=missing,
         requested_days=len(days),
         archived_days=len(pages),
+        **({"issues": ["archived_article_identity_missing"], "unresolved_article_rows": unresolved}
+           if unresolved else {}),
         data_as_of=min((s for s, _ in pages.values()), default=None),
         provisional_dates=[d for d in pages if name.startswith("wb_") and d >= provisional],
     )

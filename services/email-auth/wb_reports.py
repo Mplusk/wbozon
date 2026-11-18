@@ -128,9 +128,9 @@ def region(args, request):
         "data"
     ]
     page = rows(data["orders"])
-    stamp = iso(data["snapshotTime"])
+    stamp = iso(data.get("snapshotTime") or None)
     if offset and stamp != iso(args["snapshot_time"]):
-        raise ValueError("Inconsistent order feed snapshot")
+        return result([], complete=False, status="snapshot_changed_or_missing", source=path)
     items, seen, groups = [], set(), {}
     for r in page:
         ident = r["srid"]
@@ -172,11 +172,15 @@ def region(args, request):
             group["amount"] + amount if amount is not None and group["amount"] is not None else None
         )
     more = len(page) == limit
+    can_continue = more and stamp is not None
     return result(
         list(groups.values()) if args.get("mode") == "summary" else items,
-        offset + limit if more else None,
+        offset + limit if can_continue else None,
+        complete=not more,
         snapshot_time=stamp,
-        data_as_of=stamp,
+        snapshot_status="reported" if stamp else "not_reported",
+        **({"data_as_of": stamp} if stamp else {}),
+        **({"status": "snapshot_required_for_continuation"} if more and not can_continue else {}),
         date_basis="latest_status_updated_at",
         source=path,
     )

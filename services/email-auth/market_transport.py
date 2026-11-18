@@ -461,17 +461,21 @@ class Wire:
             quantity_unit="pcs",
         )
 
-    def _admit(self, key, interval):
+    def _admit(self, key, interval, cabinet_key=None):
+        keys = (key, cabinet_key or key)
         while True:
             with self.db() as db:
                 db.execute("BEGIN IMMEDIATE")
                 now = time.time()
-                row = db.execute("SELECT until_at,unknown FROM quota WHERE k=?", (key,)).fetchone()
-                if row and row[1]:
+                until, unknown = db.execute(
+                    "SELECT MAX(until_at),MAX(unknown) FROM quota WHERE k IN (?,?)", keys
+                ).fetchone()
+                if unknown:
                     raise finance_gate.GateError("retry_time_unknown")
-                wait = max(0, (row[0] - now) if row else 0)
+                wait = max(0, (until or 0) - now)
                 if not wait:
-                    db.execute("INSERT OR REPLACE INTO quota VALUES(?,?,0)", (key, now + interval))
+                    db.executemany("INSERT OR REPLACE INTO quota VALUES(?,?,0)",
+                                   [(k, now + interval) for k in set(keys)])
                     return
             if wait>2 or not self.wait(wait):
                 delay = math.ceil(wait)
@@ -562,6 +566,10 @@ class Wire:
         if self.provider == "wb" and basic_interval and not _wb_personal(self.creds["api_token"]):
             interval = basic_interval
         quota = _id([self.scope, parts.netloc, group or parts.path])
+        # The WB order feed has one pacing interval per seller. Keep writing
+        # the old token slot too, as the preceding release reads it on rollback.
+        cabinet_quota = (_id(["wb-cabinet", parts.netloc, parts.path]) if self.provider == "wb" and
+                         parts.path == "/api/analytics/v1/order-feed" else None)
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if self.provider == "wb":
             headers["Authorization"] = self.creds["api_token"]
@@ -581,7 +589,7 @@ class Wire:
             data=_json(body).encode() if body is not None else None,
         )
         def prepare():
-            self._admit(quota, interval)
+            self._admit(quota, interval, cabinet_quota)
             if ttl and not job:
                 hit = self._http_cache(key, binary)
                 if hit is not None:
@@ -659,11 +667,11 @@ class Wire:
                 with self.db() as db:
                     if exc.code == 429:
                         if delay is None:
-                            db.execute("UPDATE quota SET unknown=1 WHERE k=?", (quota,))
+                            db.execute("UPDATE quota SET unknown=1 WHERE k IN (?,?)", (quota, cabinet_quota or quota))
                         else:
                             db.execute(
-                                "UPDATE quota SET until_at=MAX(until_at,?) WHERE k=?",
-                                (time.time() + max(1, delay), quota),
+                                "UPDATE quota SET until_at=MAX(until_at,?) WHERE k IN (?,?)",
+                                (time.time() + max(1, delay), quota, cabinet_quota or quota),
                             )
                     if rejected_job:
                         db.execute("DELETE FROM jobs WHERE k=? AND binding='awaiting_provider_id'", (key,))

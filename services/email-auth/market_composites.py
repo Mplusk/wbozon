@@ -457,6 +457,35 @@ def _comparison_extra(wire, read):
         wire.deadline = deadline
 
 
+def verified_comparison(args, wires, seller_mapping, identity_report):
+    if identity_report["complete"]:
+        return comparison(args, wires, identity_report["mapping"])
+
+    catalogs = identity_report["items"][0]
+    verified_wires, verified_ids, unavailable = {}, {}, {}
+    for provider, field in (("ozon", "ozon_offer_id"), ("wb", "wb_vendor_code")):
+        catalog = catalogs[provider]
+        rows = catalog["items"]
+        expected = (seller_mapping or {}).get(field, args["article"])
+        if not (catalog["complete"] and len(rows) == 1 and rows[0].get("article") == expected
+                and (provider != "wb" or rows[0].get("nm_id"))):
+            failure = {k: catalog[k] for k in ("http_status", "retry_after_seconds") if k in catalog}
+            failure["status"] = catalog.get("status") or "exact_catalog_match_unconfirmed"
+            unavailable[provider] = failure
+            continue
+        verified_wires[provider] = wires[provider]
+        verified_ids[field] = expected
+        if provider == "wb":
+            verified_ids["wb_nm_id"] = rows[0]["nm_id"]
+        elif "performance" in wires:
+            verified_wires["performance"] = wires["performance"]
+    if not verified_wires:
+        return identity_report
+    data = comparison(args, verified_wires, verified_ids)
+    data.update(complete=False, status="partial_catalog_identity", unavailable_marketplaces=unavailable)
+    return data
+
+
 def comparison(args, wires, mapping):
     data = []
     periods_by_market = {}

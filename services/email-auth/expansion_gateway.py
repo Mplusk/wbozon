@@ -568,14 +568,12 @@ def execute(name, args, creds, directory, deadline):
                 data=supply_plan.read(args,wires,mapping)
             else:
                 identity=market_composites.identity(args,wires,mapping)
-                if name=="article_map" or not identity["complete"]:
+                if name=="sales_drop_check":
+                    data=market_composites.verified_comparison(args,wires,mapping,identity)
+                elif name=="article_map" or not identity["complete"]:
                     data=identity
-                elif name=="supply_plan":
-                    data=supply_plan.read(args,wires,identity["mapping"])
-                elif name=="unit_economics":
-                    data=market_composites.accounting(args,wires,identity["mapping"],_finance_period,regulated_ozon)
                 else:
-                    data=market_composites.comparison(args,wires,identity["mapping"])
+                    data=market_composites.accounting(args,wires,identity["mapping"],_finance_period,regulated_ozon)
             used_wires=list(wires.values())
         else:
             p = provider(name)
