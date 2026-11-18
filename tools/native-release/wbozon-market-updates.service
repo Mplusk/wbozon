@@ -1,6 +1,7 @@
 [Unit]
 Description=Track changes to published marketplace API specifications
-After=network-online.target
+After=network-online.target marketplace-egress-tunnel.service
+Wants=marketplace-egress-tunnel.service
 
 [Service]
 Type=oneshot
@@ -13,5 +14,7 @@ ProtectHome=true
 ProtectSystem=strict
 NoNewPrivileges=true
 PrivateTmp=true
+Environment=HTTPS_PROXY=http://127.0.0.1:18761
+Environment=NO_PROXY=127.0.0.1,localhost
 ExecStart=/usr/bin/python3 -B -I /usr/local/libexec/wbozon-cd/market_updates.py
 TimeoutStartSec=150

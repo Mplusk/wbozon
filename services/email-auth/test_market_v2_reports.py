@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 import market_specs, ozon_expansion, wb_reports, wb_mcp
+import market_history
 
 
 class Reports(unittest.TestCase):
@@ -26,9 +27,38 @@ class Reports(unittest.TestCase):
                 "total": 1,
             }
 
-        (row,) = ozon_expansion.read("ozon_delivery_time", self.dates, provider)["items"]
+        (row,) = ozon_expansion.read("ozon_delivery_time", dict(self.dates, cluster_id=7), provider)["items"]
         self.assertEqual((row["article"], row["local_units"]), ("A", 2))
         self.assertIsNone(row["average_delivery_hours"])
+
+    def test_locality_by_sku_uses_the_product_first_contract(self):
+        def provider(method, url, *, body, ttl):
+            self.assertTrue(url.endswith("/items-clusters/info"))
+            self.assertEqual(body["filter"]["skus"], ["17"])
+            self.assertNotIn("macrolocal_cluster_to_ids", body["filter"])
+            return {"items": [{"sku": "17", "macrolocal_cluster_to_id": "7",
+                               "metrics": {"local_data": {"index": 67, "local_quantity": 2, "total_quantity": 3}}}],
+                    "total": 1}
+        (row,) = ozon_expansion.read("ozon_delivery_time", dict(self.dates, sku=17), provider)["items"]
+        self.assertEqual((row["sku"], row["cluster_id"], row["local_units"]), ("17", "7", 2))
+
+    def test_unfiltered_locality_returns_account_total_without_inventing_clusters(self):
+        def provider(method, url, *, body, ttl):
+            self.assertTrue(url.endswith("/local-sale/total"))
+            self.assertEqual(body, {"period": {"from": self.today, "to": self.today}})
+            return {"local_data": {"local_quantity": 3, "total_quantity": 4, "index": 75}}
+        answer = ozon_expansion.read("ozon_delivery_time", self.dates, provider)
+        self.assertFalse(answer["complete"])
+        self.assertEqual(answer["items"][0]["local_units"], 3)
+        self.assertIsNone(answer["items"][0]["cluster_id"])
+
+    def test_grouped_wb_orders_only_zero_fill_confirmed_days(self):
+        args = {"article": "A", "group_by": "day"}
+        events = [("A", "2026-11-01", "order", 3), ("A", "2026-11-01", "cancelled", 1)]
+        partial = market_history.grouped_orders(args, events, [])
+        self.assertEqual([(r["ordered_units"], r["cancelled_units"]) for r in partial], [(4, 1)])
+        full = market_history.grouped_orders(args, events, ["2026-11-01", "2026-11-02"])
+        self.assertEqual([(r["date"], r["ordered_units"]) for r in full], [("2026-11-01", 4), ("2026-11-02", 0)])
 
     def test_retention_both_fields_and_unallocated_account_row(self):
         raw = [

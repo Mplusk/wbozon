@@ -3,6 +3,7 @@
 import calendar
 from datetime import date, timedelta
 from decimal import Decimal, localcontext
+import time
 import urllib.error
 
 import finance_gate
@@ -29,6 +30,8 @@ def observed(fn):
         )
     except finance_gate.GateError as exc:
         return result([], complete=False, status=exc.reason, retry_after_seconds=exc.retry_after_seconds)
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return result([], complete=False, status="provider_response_invalid")
     except (
         urllib.error.URLError,
         TimeoutError,
@@ -371,34 +374,37 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
     )
 
 
-def _period_metrics(provider, args, wire):
+def _period_metrics(provider, args, page):
     wb = provider == "wb"
     name = "wb_funnel" if wb else "ozon_sku_daily"
-    page = (
-        wb_expansion.read(name, args, wire)
-        if wb
-        else ozon_expansion.read(name, dict(args, include_funnel=True), wire)
-    )
     if not page.get("complete") or page.get("issues"):
         return dict(
             complete=False,
             status=page.get("status", "incomplete"),
             next_cursor=page.get("next_cursor"),
+            issues=page.get("issues", []),
+            http_status=page.get("http_status"),
+            retry_after_seconds=page.get("retry_after_seconds"),
             source=name,
         )
-    items = page["items"]
+    items = [r for r in page["items"] if wb or args["date_from"] <= r["date"] <= args["date_to"]]
 
-    def total(field):
-        values = [money(r.get(field)) for r in items]
+    def total(field, *, count=False):
+        try:
+            values = [money(r.get(field)) for r in items]
+        except (ValueError, ArithmeticError):
+            return None
+        if any(v is not None and (v < 0 or (count and v != v.to_integral_value())) for v in values):
+            return None
         return sum(values) if values and all(v is not None for v in values) else None
 
-    orders = total("order_count" if wb else "ordered_units")
+    orders = total("order_count" if wb else "ordered_units", count=True)
     amount = total("order_sum" if wb else "revenue")
-    views = total("open_count" if wb else "hits_view_pdp")
-    carts = total("cart_count" if wb else "hits_tocart_pdp")
+    views = total("open_count" if wb else "hits_view_pdp", count=True)
+    carts = total("cart_count" if wb else "hits_tocart_pdp", count=True)
     currencies = {r.get("currency") for r in items}
     return dict(
-        complete=True,
+        complete=all(v is not None for v in (orders, amount, views, carts)),
         source=name,
         views=views,
         carts=carts,
@@ -407,44 +413,101 @@ def _period_metrics(provider, args, wire):
         cart_to_view_percent=100 * carts / views if carts is not None and views else None,
         ordered_amount_per_unit=amount / orders if amount is not None and orders else None,
         currency=currencies.pop() if len(currencies) == 1 else None,
+        funnel=page.get("funnel"),
         rows=len(items),
         **{k: args[k] for k in ("date_from", "date_to")},
     )
 
 
+def _ozon_comparison_page(query, wire):
+    if (date.fromisoformat(query["date_to"]) - date.fromisoformat(query["date_from"])).days >= 90:
+        return result([], complete=False, status="period_exceeds_analytics_window")
+    page = observed(lambda: ozon_expansion.read("ozon_sku_daily", query, wire))
+    if not page.get("complete") or not page.get("items"):
+        return page
+    # Every seller can read ordered_units and revenue. Keep that observation
+    # when Premium Plus metrics or the next API quota slot are unavailable.
+    funnel = _comparison_extra(wire, lambda: ozon_expansion.read("ozon_sku_daily", dict(query, include_funnel=True), wire))
+    page["funnel"] = {k: funnel.get(k) for k in ("complete", "status", "http_status", "retry_after_seconds")}
+    if funnel.get("complete"):
+        positions = {(str(r["sku"]), r["date"]): r for r in funnel["items"]}
+        if positions.keys() != {(str(r["sku"]), r["date"]) for r in page["items"]} or any(
+            any(positions[str(r["sku"]), r["date"]].get(k) != r.get(k) for k in ("ordered_units", "revenue"))
+            for r in page["items"]
+        ):
+            page["funnel"].update(complete=False, status="inconsistent_analytics_observations")
+            return page
+        for row in page["items"]:
+            extra = positions[str(row["sku"]), row["date"]]
+            row.update({k: extra.get(k) for k in ("hits_view_pdp", "hits_tocart_pdp")})
+    return page
+
+
+def _comparison_extra(wire, read):
+    deadline = getattr(wire, "deadline", None)
+    if deadline is None:
+        return observed(read)
+    now = time.monotonic()
+    if deadline - now <= 3:
+        return result([], complete=False, status="request_budget_exhausted")
+    try:
+        wire.deadline = min(deadline - 1.5, now + 4)
+        return observed(read)
+    finally:
+        wire.deadline = deadline
+
+
 def comparison(args, wires, mapping):
     data = []
-    for provider, wire in wires.items():
-        if provider not in ("ozon", "wb"):
+    periods_by_market = {}
+    for provider in ("ozon", "wb"):
+        if provider not in wires:
             continue
+        wire = wires[provider]
         identity = (
             {"article": mapping["wb_vendor_code"], "nm_id": mapping["wb_nm_id"]}
             if provider == "wb"
             else {"article": mapping["ozon_offer_id"]}
         )
+        queries = [dict(identity, date_from=args[a], date_to=args[b], limit=100)
+                   for a,b in (("previous_from","previous_to"),("date_from","date_to"))]
+        shared = None
+        if provider == "ozon":
+            first = min(q["date_from"] for q in queries)
+            last = max(q["date_to"] for q in queries)
+            if (date.fromisoformat(last) - date.fromisoformat(first)).days < 90:
+                shared = _ozon_comparison_page(dict(identity, date_from=first, date_to=last, limit=100), wire)
         periods = []
-        for a, b in (("previous_from", "previous_to"), ("date_from", "date_to")):
-            query = dict(identity, date_from=args[a], date_to=args[b], limit=100)
-            metrics = observed(lambda: _period_metrics(provider, query, wire))
-            ad = observed(
+        for q in queries:
+            page = shared
+            if page is None:
+                page = (_ozon_comparison_page(q, wire) if provider == "ozon"
+                        else observed(lambda: wb_expansion.read("wb_funnel", q, wire)))
+            periods.append(_period_metrics(provider, q, page))
+        periods_by_market[provider] = identity, queries, periods
+
+    for provider, (identity, queries, periods) in periods_by_market.items():
+        wire = wires[provider]
+        for query, metrics in zip(queries, periods):
+            ad = _comparison_extra(wires.get("performance", wire) if provider == "ozon" else wire,
                 lambda: advertising(
                     provider, {k: query[k] for k in ("date_from", "date_to")}, identity, wires
                 )
             )
-            review = observed(
+            review = _comparison_extra(wire,
                 lambda: wb_expansion._reviews(dict(query, report_scope="answered"), wire)
                 if provider == "wb"
                 else ozon_expansion.read("ozon_reviews", query, wire)
             )
-            metrics["ads"] = {k: ad.get(k) for k in ("status", "complete", "spend_by_currency", "task_id")}
+            metrics["ads"] = {k: ad.get(k) for k in ("status", "complete", "spend_by_currency", "task_id", "http_status", "retry_after_seconds")}
             metrics["reviews"] = {
                 k: review.get(k)
-                for k in ("complete", "mean_rating", "rating_scope", "status", "http_status")
+                for k in ("complete", "mean_rating", "rating_scope", "status", "http_status", "retry_after_seconds")
             }
             if hasattr(wire, "gate_dir"):
                 archive = market_history.History(wire.gate_dir)
                 hist = archive.verified_days(
-                    provider, wire.creds, provider + "_availability", args[a], args[b]
+                    provider, wire.creds, provider + "_availability", query["date_from"], query["date_to"]
                 )
                 metrics["stock_days_observed"] = len(hist)
                 metrics["stock_by_day"] = [
@@ -468,7 +531,10 @@ def comparison(args, wires, mapping):
                     }
                     for d, (_, records) in hist.items()
                 ]
-            periods.append(metrics)
+            metrics["metrics_complete"] = metrics["complete"]
+            metrics["complete"] = bool(metrics["metrics_complete"] and ad.get("complete") and review.get("complete")
+                                       and metrics.get("stock_days_observed", 0) ==
+                                       (date.fromisoformat(query["date_to"]) - date.fromisoformat(query["date_from"])).days+1)
         changes = {}
         for k in ("views", "carts", "ordered_units", "cart_to_view_percent", "ordered_amount_per_unit"):
             a, b = (r.get(k) for r in periods)

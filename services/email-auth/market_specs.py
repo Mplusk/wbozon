@@ -99,8 +99,8 @@ TOOLS = {
         "",
     ),
     "wb_orders": (
-        "Заказы по дате, складу и региону. Статистика WB за последние 90 дней, с курсором по изменениям.",
-        "date_from date_to article nm_id cursor limit offset archive",
+        "Заказы по дате, складу и региону. Для сводки по артикулу за 90 дней передайте group_by=day и limit=100.",
+        "date_from date_to article nm_id cursor limit offset archive group_by",
         "date_from date_to",
     ),
     "wb_sales": (
@@ -258,6 +258,9 @@ def validate(name, args):
         raise ValueError("Invalid tool arguments")
     if not all(_valid(value, props[k]) for k, value in args.items()):
         raise ValueError("Invalid parameter value")
+    if name == "wb_orders" and "group_by" in args:
+        if not ("article" in args or "nm_id" in args) or "cursor" in args or args.get("mode") == "details":
+            raise ValueError("Grouped orders require a product selector and summary pagination")
     if "sku" in args and "skus" in args and {str(args["sku"])} != set(map(str, args["skus"])):
         raise ValueError("Conflicting SKU selectors")
     if "nm_id" in args and "nm_ids" in args and {str(args["nm_id"])} != set(map(str,args["nm_ids"])):

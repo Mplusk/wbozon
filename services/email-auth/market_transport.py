@@ -55,6 +55,8 @@ SELLER_READS = frozenset(
         "/v1/analytics/stocks",
         "/v1/analytics/turnover/stocks",
         "/v1/analytics/local-sale/clusters-items/info",
+        "/v1/analytics/local-sale/items-clusters/info",
+        "/v1/analytics/local-sale/total",
         "/v1/analytics/data",
         "/v3/posting/fbo/list",
         "/v3/posting/fbs/list",

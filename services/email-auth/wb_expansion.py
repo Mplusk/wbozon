@@ -578,6 +578,8 @@ def _funnel(args, request):
     items = []
     for r in page:
         selected = r["statistic"]["selected"]
+        if selected.get("period") != body["selectedPeriod"]:
+            return result([], complete=False, issues=["unexpected_funnel_period"])
         row = dict(
             _item(r["product"]),
             open_count=selected.get("openCount"),

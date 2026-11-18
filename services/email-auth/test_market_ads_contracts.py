@@ -582,7 +582,8 @@ class OrderShareContracts(unittest.TestCase):
                                and body['nmIds'] == [71])
                 if not self_assert: raise AssertionError('unexpected synthetic funnel request')
                 return {'data': {'products': [{'product': {'nmId': 71, 'vendorCode': 'A'},
-                    'statistic': {'selected': {'orderCount': 10}, 'past': {'orderCount': 900}}}]}}
+                    'statistic': {'selected': {'period': body['selectedPeriod'], 'orderCount': 10},
+                                  'past': {'orderCount': 900}}}]}}
         data = {'direct_attribution': facts}
         expansion_gateway._order_share('wb_ads', dict(ARGS, nm_id=71), data, Wire())
         row, = data['order_share']['rows']

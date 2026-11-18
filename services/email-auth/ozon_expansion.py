@@ -330,6 +330,7 @@ def _daily(args, request):
     )
     values = rows(raw["result"].get("data"))
     items = []
+    positions = set()
     for r in values:
         dims = rows(r.get("dimensions"))
         if len(dims) != 2 or len(r["metrics"]) != len(metrics):
@@ -337,11 +338,16 @@ def _daily(args, request):
         sku = dims[0]["id"]
         if skus and str(sku) not in set(map(str, skus)):
             continue
+        day = dims[1]["id"]
+        position = str(sku), day
+        if not isinstance(day, str) or not args["date_from"] <= day <= args["date_to"] or position in positions:
+            return result([], complete=False, issues=["unexpected_or_duplicate_sku_day"])
+        positions.add(position)
         items.append(
             dict(
                 zip(metrics, r["metrics"]),
                 sku=sku,
-                date=dims[1]["id"],
+                date=day,
                 article=args.get("article"),
                 offer_id=args.get("article"),
                 nm_id=None,
@@ -660,19 +666,40 @@ def read(name, args, request):
         if "article" in args and not skus:
             return result([], complete=False, issues=["article_identity_unavailable"])
         filters = {"period":{"from":args["date_from"],"to":args["date_to"]}, "delivery_schema":"ALL"}
-        if skus:
-            filters["skus"] = list(map(str,skus))
+        selected_skus = {str(sku) for sku in skus}
+        if selected_skus:
+            filters["skus"] = sorted(selected_skus, key=int)
         if "cluster_id" in args:
             filters["macrolocal_cluster_to_ids"] = [str(args["cluster_id"])]
+            path = "/v1/analytics/local-sale/clusters-items/info"
+        elif selected_skus:
+            path = "/v1/analytics/local-sale/items-clusters/info"
+        else:
+            path = "/v1/analytics/local-sale/total"
+            raw = request("POST", BASE + path, body={"period": filters["period"]}, ttl=1800)
+            metrics = raw["local_data"]
+            return result([dict(article=None, sku=None, cluster_id=None, local_units=metrics.get("local_quantity"),
+                                total_units=metrics.get("total_quantity"), locality_index=metrics.get("index"),
+                                average_delivery_hours=None)], complete=False, source=path, scope="account_total",
+                          issues=["article_sku_or_cluster_required_for_breakdown"],
+                          time_coverage="actual_delivery_duration_unavailable_in_current_seller_schema")
         limit, offset = args.get("limit",100), args.get("offset",0)
-        path = "/v1/analytics/local-sale/clusters-items/info"
         raw = request("POST", BASE+path,body={"filter":filters,"limit":limit,"offset":offset,
                       "sort_by":"LOCALITY","sort_dir":"DESC"},ttl=1800)
         page = rows(raw.get("items"))
         items = []
         for row in page:
-            product, metrics = row["item"], row["metrics"]["local_data"]
-            items.append(dict(_identity(product), cluster_id=row.get("cluster_to_id"),
+            if "cluster_id" in args:
+                product, cluster = row["item"], row["cluster_to_id"]
+                if str(cluster) != str(args["cluster_id"]):
+                    raise ValueError("Unexpected Ozon locality cluster")
+            else:
+                product = {"sku": row["sku"], "offer_id": args.get("article")}
+                cluster = row["macrolocal_cluster_to_id"]
+            if selected_skus and str(product.get("sku")) not in selected_skus:
+                raise ValueError("Unexpected Ozon locality SKU")
+            metrics = row["metrics"]["local_data"]
+            items.append(dict(_identity(product), cluster_id=cluster,
                               local_units=metrics.get("local_quantity"), total_units=metrics.get("total_quantity"),
                               locality_index=metrics.get("index"), average_delivery_hours=None))
         total = raw.get("total")

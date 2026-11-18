@@ -86,6 +86,7 @@ class CategoryWire(Wire):
             if category not in self.sources:
                 self.sources[category]=Wire("wb",chosen,self.gate_dir,self.deadline)
                 self.sources[category].fetch_times=self.fetch_times
+            self.sources[category].deadline = self.deadline
             return self.sources[category](method,url,**params)
         return super().__call__(method,url,**params)
 
@@ -230,7 +231,7 @@ def _finance_period(args, wire):
 
 
 def _wb_daily_totals(name,args,wire):
-    query={k:v for k,v in args.items() if k not in ("limit","offset","mode","archive")}
+    query={k:v for k,v in args.items() if k not in ("limit","offset","mode","archive","group_by")}
     with wire.progress("wb-period-summary-v2",[name,query]) as (saved,save):
         state=saved or {"next":None,"events":{},"done":False,"seen":[]}
         status="pending"
@@ -263,11 +264,17 @@ def _wb_daily_totals(name,args,wire):
             state.update(next=marker,done=page["complete"])
             if marker is not None: state["seen"].append(marker)
             save(state,1800 if state["done"] else 86400)
-        groups={}
-        for article,day,warehouse,region,event,units,_ in state["events"].values():
-            key=article,day,warehouse,region,event
-            groups[key]=groups.get(key,0)+units
-        items=[{"article":a,"date":d,"warehouse":w,"region":r,"event":e,"units":q} for (a,d,w,r,e),q in sorted(groups.items(),key=str)]
+        if "group_by" in args:
+            events = ((a,d,e,q) for a,d,_,_,e,q,_ in state["events"].values())
+            through = min(datetime.now(market_specs.MOSCOW).date().isoformat(), args["date_to"])
+            days = market_history.days_between(args["date_from"], through) if state["done"] else []
+            items = market_history.grouped_orders(args, events, days)
+        else:
+            groups={}
+            for article,day,warehouse,region,event,units,_ in state["events"].values():
+                key=article,day,warehouse,region,event
+                groups[key]=groups.get(key,0)+units
+            items=[{"article":a,"date":d,"warehouse":w,"region":r,"event":e,"units":q} for (a,d,w,r,e),q in sorted(groups.items(),key=str)]
         offset,limit=args.get("offset",0),args.get("limit",100)
         more=offset+limit<len(items)
         return market_specs.result(items[offset:offset+limit],offset+limit if more else None,
@@ -588,7 +595,7 @@ def execute(name, args, creds, directory, deadline):
                                 [], complete=False, status="unverified_article_mapping"
                             )
                         args = dict(args, nm_id=exact["nm_id"])
-                    if name in ("wb_orders","wb_sales") and args.get("mode")=="summary" and "cursor" not in args and ("article" in args or "nm_id" in args):
+                    if name in ("wb_orders","wb_sales") and (args.get("mode")=="summary" or "group_by" in args) and "cursor" not in args and ("article" in args or "nm_id" in args):
                         data=_wb_daily_totals(name,args,wire)
                     elif (
                         name == "wb_finance_report"
@@ -679,7 +686,12 @@ def execute(name, args, creds, directory, deadline):
                 if start + limit < len(items):
                     data.update(complete=False, next_cursor=start + limit)
             if name == "ozon_sku_daily" and data.get("items"):
+                original_deadline = wire.deadline
                 try:
+                    now = time.monotonic()
+                    if original_deadline - now <= 3:
+                        raise TimeoutError()
+                    wire.deadline = min(original_deadline - 1.5, now + 3)
                     profile = wire("POST", ozon_expansion.BASE + "/v1/seller/info", body={}, ttl=1800)
                     data["company_currency"] = ozon_mcp.project_company_currency(profile, account)
                     data["company_currency_source"] = "/v1/seller/info company.currency"
@@ -691,11 +703,18 @@ def execute(name, args, creds, directory, deadline):
                     finance_gate.ProviderResponseTooLarge,
                 ):
                     data["company_currency"] = None
+                finally:
+                    wire.deadline = original_deadline
             if args.get("mode") == "summary" and data.get("summary_scope")!="observed_period":
                 _summary(name, data)
         stamps=[t for w in used_wires for t in getattr(w,"fetch_times",())]
         fetched=datetime.fromtimestamp(min(stamps),timezone.utc).isoformat() if stamps and None not in stamps else None
-        data.setdefault("data_as_of",data.get("report_timestamp") or fetched)
+        report_stamp = data.get("report_timestamp")
+        try:
+            reported = datetime.fromisoformat(report_stamp) if isinstance(report_stamp, str) else None
+        except ValueError:
+            reported = None
+        data.setdefault("data_as_of", reported.isoformat() if reported and reported.utcoffset() is not None else fetched)
         data.update(read_only=True, untrusted_data=True, tool=name)
         text = json.dumps(data, ensure_ascii=False, default=str, allow_nan=False)
 

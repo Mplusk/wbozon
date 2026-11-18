@@ -176,6 +176,32 @@ def days_between(start, end):
     return [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
 
 
+def grouped_orders(args, events, complete_days):
+    """Group reconciled order units, inserting zeroes only for days covered by the source."""
+    groups = {}
+    def bucket(article, day):
+        start = date.fromisoformat(day)
+        if args["group_by"] == "week":
+            start -= timedelta(days=start.weekday())
+        key = article, start.isoformat()
+        return groups.setdefault(key, dict(article=article, date=key[1], ordered_units=0, cancelled_units=0))
+
+    for article, day, event, units in events:
+        row = bucket(article, day)
+        row["ordered_units"] += units
+        if event == "cancelled":
+            row["cancelled_units"] += units
+    article = args.get("article")
+    if article is None:
+        articles = {a for a, _ in groups}
+        if len(articles) == 1:
+            article = articles.pop()
+    if article is not None:
+        for day in complete_days:
+            bucket(article, day)
+    return [groups[k] for k in sorted(groups, key=lambda k: (k[1], str(k[0])))]
+
+
 def historical_read(history, owner, name, args):
     from market_specs import MOSCOW, matches, result
 
@@ -184,7 +210,11 @@ def historical_read(history, owner, name, args):
     missing = [d for d in days if d not in pages]
     offset, limit = args.get("offset", 0), args.get("limit", 100)
     selected = [r for stamp, records in pages.values() for r in records if matches(r, args)]
-    if name in ("wb_orders", "wb_sales") and args.get("mode") == "summary":
+    if name == "wb_orders" and "group_by" in args:
+        events = ((r.get("article"), r["date"][:10], "cancelled" if r.get("cancelled") else "order", r["quantity"])
+                  for r in selected)
+        selected = grouped_orders(args, events, pages)
+    elif name in ("wb_orders", "wb_sales") and args.get("mode") == "summary":
         groups = {}
         for r in selected:
             key = (
