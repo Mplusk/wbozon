@@ -145,25 +145,53 @@ class Transaction:
             discard(self.permit)
 
     def ready(self, j, name, guard):
-        deadline = time.monotonic() + 18
+        # systemd reports the Gunicorn master started before its sync workers
+        # have imported the application. Keep ingress fenced during cold start.
+        deadline = time.monotonic() + 90
         while True:
             try:
+                checking = 'running process'
                 pid, generation, cgroup = self.host.process(name)
+                checking = 'worker startup'
                 if not self.host.workers_idle(pid, cgroup):
                     raise ReleaseError('workers not ready')
+                checking = 'marked health response'
                 self.host.health(j['mark'])
+                checking = 'listeners'
                 self.host.sockets()
                 # systemd may reassign its DynamicUser after a reboot. Revalidate the
                 # same pinned directories, lock inodes, epochs and bytes with the new UID.
+                checking = 'finance lock and cooldown state'
                 guard.uid = process_uid(pid)
                 guard.verify('/proc/' + str(pid) + '/root', '/proc/' + str(pid) + '/ns/time')
+                checking = 'worker generation'
                 if self.host.process(name) == (pid, generation, cgroup):
                     return
             except (OSError, ValueError, ReleaseError):
                 pass
             if time.monotonic() >= deadline:
-                raise ReleaseError('running release failed readiness')
+                raise ReleaseError('running release failed readiness at ' + checking)
             time.sleep(.3)
+
+    def drain(self, name, mark, *, require_healthy=False):
+        # A timed-out marked loopback probe is safe to repeat. Keep the same
+        # worker generation and require Host.drain to prove both workers idle.
+        identity = self.host.process(name)
+        deadline = time.monotonic() + (60 if require_healthy else 35)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ReleaseError('marked drain probe timed out')
+            try:
+                drained = self.host.drain(name, mark, seconds=remaining, require_healthy=require_healthy)
+            except TimeoutError:
+                if self.host.process(name) != identity:
+                    raise ReleaseError('portal changed during drain')
+                time.sleep(.25)
+                continue
+            if drained != identity:
+                raise ReleaseError('portal changed during drain')
+            return drained
 
     def complete(self, j, name, sha):
         if 'market_final' in j and j['market_final'] != name:
@@ -218,7 +246,7 @@ class Transaction:
         if j.get('market_bootstrap'):
             atomic_json(self.market_hold, {field: j[field] for field in ('txn', 'old', 'new')})
         h.barrier(j['txn'], j['mark'], True)
-        pid, generation, cg = h.drain(old, j['mark'], require_healthy=True)
+        pid, generation, cg = self.drain(old, j['mark'], require_healthy=True)
         with self.gate_lock() as guard:
             guard.verify('/proc/' + str(pid) + '/root', '/proc/' + str(pid) + '/ns/time')
             if h.sockets() or not h.workers_idle(pid, cg) or h.process(old) != (pid, generation, cg):
@@ -298,10 +326,10 @@ class Transaction:
         h.barrier(j['txn'], j['mark'], True)
         h.holder()
         if props['ActiveState'] == 'active':
-            h.drain(h.current(), j['mark'])
+            self.drain(h.current(), j['mark'])
         with self.gate_lock(recovery=True) as guard:
             if props['ActiveState'] == 'active':
-                p, _, _ = h.drain(h.current(), j['mark'])
+                p, _, _ = self.drain(h.current(), j['mark'])
                 guard.verify('/proc/' + str(p) + '/root', '/proc/' + str(p) + '/ns/time')
             if h.props()['ActiveState'] not in ('inactive', 'failed'):
                 h.stop()

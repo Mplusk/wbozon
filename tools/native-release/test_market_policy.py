@@ -23,6 +23,52 @@ def check_archives(base, bridge, reports):
 
 
 class CutoverRecovery(unittest.TestCase):
+    def test_cold_workers_still_require_marked_health_and_finance_verification(self):
+        host, guard = Mock(state=Path('state')), Mock()
+        txn = Transaction(host)
+        host.process.return_value = (123, 'generation', '/unit')
+        host.workers_idle.side_effect = [False, True, True]
+        host.health.side_effect = [TimeoutError(), None]
+        with patch('cd.time.monotonic', side_effect=[0, 20, 47]), patch('cd.time.sleep'), patch('cd.process_uid', return_value=400):
+            txn.ready({'mark': 7}, 'new', guard)
+        self.assertEqual(host.health.call_count, 2)
+        host.sockets.assert_called_once_with()
+        guard.verify.assert_called_once_with('/proc/123/root', '/proc/123/ns/time')
+        self.assertEqual(guard.uid, 400)
+
+    def test_cold_start_stops_if_marked_health_never_passes(self):
+        host, guard = Mock(state=Path('state')), Mock()
+        txn = Transaction(host)
+        host.process.return_value = (123, 'generation', '/unit')
+        host.health.side_effect = TimeoutError()
+        with patch('cd.time.monotonic', side_effect=[0, 90]):
+            with self.assertRaisesRegex(ReleaseError, 'marked health response'):
+                txn.ready({'mark': 7}, 'new', guard)
+        guard.verify.assert_not_called()
+
+    def test_only_repeat_a_timed_out_drain_for_the_same_workers_within_budget(self):
+        host = Mock(state=Path('state'))
+        txn = Transaction(host)
+        identity = (123, 'generation', '/unit')
+        host.process.return_value = identity
+        host.drain.side_effect = [TimeoutError(), identity]
+        with patch('cd.time.monotonic', side_effect=[0, 1, 24]), patch('cd.time.sleep'):
+            self.assertEqual(txn.drain('old', 7, require_healthy=True), identity)
+        self.assertEqual([c.kwargs['seconds'] for c in host.drain.call_args_list], [59, 36])
+        self.assertTrue(all(c.kwargs['require_healthy'] for c in host.drain.call_args_list))
+
+        host.drain.reset_mock()
+        host.drain.side_effect = TimeoutError()
+        host.process.side_effect = [identity, (124, 'restart', '/unit')]
+        with self.assertRaisesRegex(ReleaseError, 'portal changed'):
+            txn.drain('old', 7)
+        host.drain.assert_called_once()
+
+        host.process.side_effect = None
+        with patch('cd.time.monotonic', side_effect=[0, 1, 35]), patch('cd.time.sleep'):
+            with self.assertRaisesRegex(ReleaseError, 'drain probe timed out'):
+                txn.drain('old', 7)
+
     def test_cutover_journal_outlives_hold_and_cannot_recover_an_older_release(self):
         with TemporaryDirectory() as folder, patch('cd.secure', side_effect=lambda path: path):
             root = Path(folder)
