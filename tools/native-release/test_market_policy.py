@@ -38,6 +38,10 @@ class CutoverRecovery(unittest.TestCase):
                     txn.seal_market_decision(j, 'new')
             self.assertEqual(json.loads(txn.pending.read_bytes())['market_final'], 'new')
             self.assertTrue(txn.market_hold.exists())
+            with patch('cd.present', side_effect=OSError('cannot stat hold')):
+                with self.assertRaises(OSError):
+                    txn.seal_market_decision(j, 'new')
+            self.assertTrue(txn.pending.exists() and txn.market_hold.exists())
             txn.seal_market_decision(j, 'new')
             self.assertFalse(txn.market_hold.exists())
             self.assertTrue(txn.pending.exists())

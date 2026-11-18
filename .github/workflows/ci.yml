@@ -248,7 +248,7 @@ jobs:
           cutover="$RUNNER_TEMP/market-cutover"
           baseline=c8b2257cdd11bb539d3705d269fda6b23c0bde99
           bridge=6eccd5d159bd2957e6ff25b18783aa6e20e81ea2
-          reports=bf24f2c198bd67bfee5361006beedf9c19382700
+          reports=b863b6182b3188cf27982d128e6690f0fc580830
           for ref in "$baseline" "$bridge" "$reports"; do
             mkdir -p "$cutover/$ref/service"
             git -c core.autocrlf=false archive "$ref:services/email-auth" | tar -x -C "$cutover/$ref/service"
@@ -260,6 +260,9 @@ jobs:
           subtree="$(git rev-parse "$GITHUB_SHA:services/email-auth")"
           if [[ "$subtree" == "$(git rev-parse "$bridge:services/email-auth")" ]]; then bridge_dir="$packaged"; fi
           if [[ "$subtree" == "$(git rev-parse "$reports:services/email-auth")" ]]; then full_dir="$packaged"; fi
+          if [[ "$full_dir" != "$packaged" ]]; then
+            (cd "$full_dir/service" && PYTHONDONTWRITEBYTECODE=1 "$RUNNER_TEMP/native-candidate-venv/bin/python" -m unittest -q)
+          fi
           python3 -B tools/native-release/test_market_policy.py "$base_dir" "$bridge_dir" "$full_dir"
           python3 -B -I tools/native-release/check_market_cutover.py \
             --python "$RUNNER_TEMP/native-candidate-venv/bin/python" --baseline-service "$base_dir/service" \

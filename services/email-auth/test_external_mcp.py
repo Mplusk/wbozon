@@ -39,8 +39,7 @@ class ExternalMCPTests(unittest.TestCase):
     def test_read_only_tool_list_and_matching_validation(self):
         out=self.request(self.rpc('tools/list'),headers={'HTTP_MCP_PROTOCOL_VERSION':'2025-11-25'})
         tools=out['body']['result']['tools']
-        self.assertEqual({t['name'] for t in tools}, {'ozon_products','ozon_product_info','ozon_accrual_types','ozon_accrual_day','ozon_posting_accruals','ozon_article_summary','ozon_realization_article_month','ozon_return_events','ozon_prices','ozon_orders_analytics','ozon_posting_status','ozon_posting_candidates','wb_products','wb_prices','wb_commissions','wb_box_tariffs','wb_sales_summary',
-            'ozon_unallocated_accruals','ozon_fbo_supply_orders','ozon_fbo_supply_details','ozon_fbo_supply_items','ozon_fbo_volume_allocation'} | set(mcp.market_specs.TOOLS))
+        self.assertEqual({t['name'] for t in tools}, {'ozon_products','ozon_product_info','ozon_accrual_types','ozon_accrual_day','ozon_posting_accruals','ozon_article_summary','ozon_realization_article_month','ozon_return_events','ozon_prices','ozon_orders_analytics','ozon_posting_status','ozon_posting_candidates','wb_products','wb_prices','wb_commissions','wb_box_tariffs','wb_sales_summary'})
         self.assertTrue(all(t['annotations']['readOnlyHint'] and not t['annotations']['destructiveHint'] for t in tools))
         self.assertTrue(all(t['_meta']['securitySchemes']==[{'type':'oauth2','scopes':['mcp:read']}] for t in tools))
         self.assertTrue(all(t['securitySchemes']==t['_meta']['securitySchemes'] for t in tools))

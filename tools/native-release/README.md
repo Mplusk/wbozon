@@ -83,7 +83,7 @@ then clears the transaction. The recovery timer always sees a pending journal
 until outbound reads are enabled. After the final choice it can recover only
 the recorded release, including if the controller dies just after removing the hold.
 
-The second push activates the reports inventory from `bf24f2c`. Its automatic
+The second push activates the reports inventory from `b863b61`. Its automatic
 rollback target is the verified bridge. The two releases share per-method locks,
 boot identity, elapsed-time deadlines and unresolved outcomes. Both directions
 are tested with separate provider workers. A direct downgrade to the pre-guard
