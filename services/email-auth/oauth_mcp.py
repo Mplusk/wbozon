@@ -13,6 +13,7 @@ import logging
 import re
 import secrets
 import sqlite3
+import external_keys
 import threading
 import time
 from http.cookies import SimpleCookie
@@ -114,7 +115,7 @@ class OAuthStore:
             ''')
 
     def connect(self):
-        return sqlite3.connect(self.path,timeout=0.5)
+        return external_keys.key_connection(self.path)
 
     def client(self,c,client_id):
         if client_id in CIMD:
@@ -207,7 +208,7 @@ class OAuthStore:
         code=secrets.token_urlsafe(32);now=self.clock()
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
-            active=c.execute('SELECT 1 FROM external_mcp_keys WHERE public_id=? AND revoked_at IS NULL',(key_id,)).fetchone()
+            active=c.execute('SELECT 1 FROM mcp_keys_for_access WHERE public_id=? AND revoked_at IS NULL',(key_id,)).fetchone()
             if not active or not self.client(c,row[0]): raise OAuthError('invalid_request')
             c.execute('DELETE FROM oauth_pending_used WHERE expires<=?',(now,))
             try: c.execute('INSERT INTO oauth_pending_used VALUES(?,?)',(_hash(nonce),expires))
@@ -247,7 +248,7 @@ class OAuthStore:
                 if not requested or len(set(requested))!=len(requested) or SCOPE not in requested or not set(requested).issubset(set(scope.split())):
                     raise OAuthError('invalid_scope')
                 scope=' '.join(sorted(requested))
-        if not c.execute('SELECT 1 FROM external_mcp_keys WHERE public_id=? AND revoked_at IS NULL',(key_id,)).fetchone():
+        if not c.execute('SELECT 1 FROM mcp_keys_for_access WHERE public_id=? AND revoked_at IS NULL',(key_id,)).fetchone():
             raise OAuthError('invalid_grant')
         return client_id,client,key_id,scope,digest
 
@@ -274,7 +275,7 @@ class OAuthStore:
     def verify(self,token,resource):
         if not isinstance(token,str) or not TOKEN_RE.fullmatch(token): return None
         with self.connect() as c:
-            row=c.execute('''SELECT t.key_id FROM oauth_tokens t JOIN external_mcp_keys k ON k.public_id=t.key_id
+            row=c.execute('''SELECT t.key_id FROM oauth_tokens t JOIN mcp_keys_for_access k ON k.public_id=t.key_id
                              WHERE t.access_hash=? AND t.access_expires>? AND t.resource=? AND t.scope IN (?,?) AND k.revoked_at IS NULL''',(_hash(token),self.clock(),resource,SCOPE,SCOPE+' offline_access')).fetchone()
         return row[0] if row else None
 
@@ -326,7 +327,7 @@ def handle(environ,start,store,keys,origin):
             if not isinstance(raw,str) or len(raw)>4096: raise OAuthError('invalid_request')
             ticket,nonce,platform,name=store.begin(params(raw),resource)
             page=('<main id="content"><h1>Подключить '+html.escape(platform)+'</h1><p>Приложение '
-                +html.escape(name)+' запрашивает доступ к чтению ваших данных Ozon и Wildberries. '
+                +html.escape(name)+' запрашивает чтение площадок, выбранных для вашего ключа MCP. Для ключа Авито это объявления, заказы, статистика и переписка. '
                 'Оно не сможет изменять товары, цены или заказы.</p><form method="post" action="/oauth/authorize">'
                 '<input type="hidden" name="csrf" value="'+nonce+'"><input type="hidden" name="ticket" value="'+ticket+'"><label for="mcp-key">Ключ MCP из кабинета</label>'
                 '<input id="mcp-key" type="password" name="key" required autocomplete="off" maxlength="47">'

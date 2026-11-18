@@ -14,6 +14,7 @@ import secrets
 import shutil
 import signal
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -196,6 +197,19 @@ def suite(python, gate_source, baseline_service=None, candidate_service=None, ma
                   flush=True)
             return
         if market_reports:
+            scoped = data / 'vault.sqlite.avito-keys'
+            seeded_keys = (baseline_service / 'avito_mcp.py').is_file()
+            if seeded_keys:
+                assert scoped.stat().st_mode & 0o777 == 0o600
+                assert Path(str(scoped)+'-wal').stat().st_size > 0
+                master = host.process(old)[0]
+                scoped.chmod(0o644)
+                try:
+                    assert launch(new, 'none').wait(timeout=150) != 0
+                    until(lambda: checked(old), 140)
+                    assert host.process(old)[0] == master
+                finally:
+                    scoped.chmod(0o600)
             def finance_snapshot():
                 key = hashlib.sha256(b'7654321').hexdigest()
                 state = (host.gate / (key + '.json')).read_bytes()
@@ -223,6 +237,15 @@ def suite(python, gate_source, baseline_service=None, candidate_service=None, ma
                 assert request('/market-limit-' + provider) == b'held'
                 assert (data / ('attempts-' + provider)).read_text().splitlines() == ['attempt']
             print('PASS Ozon and WB deadlines survive a post-admission systemd rollback and redeployment', flush=True)
+            if seeded_keys:
+                snapshots = list((state/'backups').glob('*/vault.sqlite.avito-keys'))
+                assert snapshots
+                for path in snapshots:
+                    assert path.stat().st_mode & 0o777 == 0o600
+                    with contextlib.closing(sqlite3.connect(path.as_uri()+'?mode=ro', uri=True)) as db:
+                        assert db.execute('PRAGMA integrity_check').fetchone() == ('ok',)
+                        assert db.execute('SELECT name FROM external_mcp_keys').fetchall() == [('Avito fixture',)]
+                print('PASS private scoped keys and latest WAL commit included in rollout snapshots', flush=True)
             return
         (data / 'started').unlink()
         with concurrent.futures.ThreadPoolExecutor() as pool:

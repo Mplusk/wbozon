@@ -1,5 +1,6 @@
 """Verified native deployment, durable start interlock and crash recovery."""
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -7,6 +8,8 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import sqlite3
+import stat
 import sys
 import time
 
@@ -15,10 +18,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_release
 import github_artifact
 from finance_guard import FinanceGuard
-from native_release import secure
+from native_release import secure, syncdir
 from release_host import Host, ReleaseError, atomic_json, boot_id, command, compatible, discard, process_identity, process_uid
 
 CONFIG = '/etc/wbozon-cd.json'
+SCOPED_BACKUP_SECONDS = 5
 
 MARKET_BASE = 'b543e1568394095a20f14213feb3a194a456716c70d43b95c06b33c98cd32aed'
 MARKET_BRIDGE = '4fbd8858010f37f39b7676c4b34fede5526aa56623569bbc231e77524edce0cf'
@@ -30,7 +34,10 @@ MARKET_V2_NEXT = '0f009122b40353df9f0a65c8cd8b01b3efaf39703eaa5281349bd8c8183aae
 # Verified regional reports, cancellation coverage and seller rating, service tree 95a19af.
 MARKET_V2_REPORT_FIX = '85d5b8a840f480678fe83fbf3bbd301a8db75d0910b8dfb39dfdce5fbe63d41f'
 # SHA-256 inventories of subsequent reviewed services, in deployment order.
-MARKET_REPORT_SUCCESSORS = ('ea75c8c64e6a3295f2c3e4c8e483b15e7194e89bb300587ff9b936bf04e18dba',)
+MARKET_REPORT_SUCCESSORS = (
+    'ea75c8c64e6a3295f2c3e4c8e483b15e7194e89bb300587ff9b936bf04e18dba',
+    '06e0304dde40dc3358908eb36fa8811ef5d194aeddec0f7883f7c882aadd7952',
+)
 
 
 def present(path):
@@ -39,6 +46,44 @@ def present(path):
     except FileNotFoundError:
         return False
     return True
+
+
+def backup_scoped_keys(host, txn):
+    """Snapshot Avito-capable key grants while both portal workers are drained."""
+    source = Path(host.cfg['databases'][1] + '.avito-keys')
+    if not present(source):
+        return
+    info = source.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or info.st_uid != host.gate.parent.stat().st_uid or info.st_mode & 0o077):
+        raise ReleaseError('unexpected scoped key database')
+    directory = secure(host.state / 'backups' / txn, True)
+    snapshot = directory / source.name
+    partial = directory / (source.name + '.partial')
+    deadline = time.monotonic() + SCOPED_BACKUP_SECONDS
+
+    def progress(status, remaining, total):
+        if time.monotonic() >= deadline:
+            raise ReleaseError('scoped key database snapshot timed out')
+
+    with partial.open('xb') as stream:
+        os.fchmod(stream.fileno(), 0o600)
+    try:
+        with contextlib.closing(sqlite3.connect(source.as_uri() + '?mode=ro', uri=True, timeout=0.1)) as src:
+            src.execute('PRAGMA trusted_schema=OFF')
+            with contextlib.closing(sqlite3.connect(partial)) as dest:
+                src.backup(dest, pages=128, progress=progress, sleep=0.05)
+                dest.execute('PRAGMA trusted_schema=OFF')
+                dest.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+                tables = dest.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                if tables != [('external_mcp_keys',)] or dest.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+                    raise ReleaseError('scoped key snapshot verification failed')
+        with partial.open('rb') as stream:
+            os.fsync(stream.fileno())
+        os.replace(partial, snapshot)
+        syncdir(directory)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def market_inventory(release):
@@ -276,6 +321,7 @@ class Transaction:
             # Both sync workers have finished their handlers, the fence is closed
             # and finance is locked. A full backup disk must leave this master alive.
             j['schemas'] = h.backup(j['txn'])
+            backup_scoped_keys(h, j['txn'])
             self.phase(j, 'stopping')
             h.stop()
             h.release_group(old_dir)

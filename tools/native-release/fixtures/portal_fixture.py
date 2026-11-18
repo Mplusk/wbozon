@@ -1,6 +1,7 @@
 """Synthetic Gunicorn application for the systemd deployment acceptance test."""
 import os
 from pathlib import Path
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import finance_gate
 
 data = Path(os.environ['VAULT_PATH']).parent
 release_pair = os.environ.get('WBOZON_QA_RELEASE_PAIR') == '1'
+wal_reader = None
 
 
 def provider():
@@ -118,6 +120,15 @@ def application(env, start):
             with sqlite3.connect(data / name) as db:
                 for table in tables:
                     db.execute('CREATE TABLE IF NOT EXISTS ' + table + ' (id INTEGER PRIMARY KEY)')
+        if route == '/seed' and (Path.cwd() / 'avito_mcp.py').is_file():
+            from external_keys import KeyStore
+            global wal_reader
+            keys = KeyStore(data / 'vault.sqlite')
+            wal_reader = sqlite3.connect(data / 'vault.sqlite.avito-keys')
+            assert wal_reader.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
+            wal_reader.execute('BEGIN')
+            wal_reader.execute('SELECT COUNT(*) FROM external_mcp_keys').fetchone()
+            keys.create('Avito fixture', secrets.token_urlsafe(16), time.time(), 'avito')
     duration = {'/hold':'3','/rollback-hold':'6'}.get(route,'0')
     subprocess.run([sys.executable, __file__, '--provider-worker', duration, route.lstrip('/')], check=True)
     start('200 OK', [])

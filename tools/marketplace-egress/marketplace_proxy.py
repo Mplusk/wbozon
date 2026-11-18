@@ -17,7 +17,7 @@ ALLOWED = frozenset(('api-seller.ozon.ru', 'discounts-prices-api.wildberries.ru'
                      'seller-analytics-api.wildberries.ru','supplies-api.wildberries.ru',
                      'statistics-api.wildberries.ru','finance-api.wildberries.ru','feedbacks-api.wildberries.ru',
                      'advert-api.wildberries.ru','documents-api.wildberries.ru','api-performance.ozon.ru',
-                     'dev.wildberries.ru','docs.ozon.com'))
+                     'dev.wildberries.ru','docs.ozon.com','api.avito.ru'))
 MAX_CLIENTS = 8
 MAX_HEADERS = 8192
 HEADER_TIMEOUT = 5

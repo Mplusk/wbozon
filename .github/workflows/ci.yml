@@ -148,7 +148,7 @@ jobs:
     if: github.event_name == 'push'
     needs: [email-auth, marketplace-egress]
     runs-on: ubuntu-24.04
-    # Retain historical systemd acceptance and add separate D/E and E/E checks.
+    # Exercise each admitted transition and same-release recovery under systemd.
     timeout-minutes: 65
     outputs:
       artifact_id: ${{ steps.native_artifact.outputs.artifact-id }}
@@ -282,17 +282,21 @@ jobs:
           deployed="$RUNNER_TEMP/market-v2-deployed/service"
           reports="$RUNNER_TEMP/market-v2-reports/service"
           regional="$RUNNER_TEMP/market-v2-regional/service"
-          mkdir -p "$previous" "$deployed" "$reports" "$regional"
+          active="$RUNNER_TEMP/market-v2-active/service"
+          mkdir -p "$previous" "$deployed" "$reports" "$regional" "$active"
           git archive 08c6f9b3778a4ea039d8a0093623c815cc95ecc4:services/email-auth | tar -x -C "$previous"
           git archive 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09:services/email-auth | tar -x -C "$deployed"
           git archive e3c2823a8f6b4714eb53ac67f4f5d1dbb04dea21:services/email-auth | tar -x -C "$reports"
           git archive a51e1411d9b60bbdaa792e7d095e95d41ae8f2e1:services/email-auth | tar -x -C "$regional"
+          git archive 7c27cc2d0fdc8464c712f193310c2494df83366a:services/email-auth | tar -x -C "$active"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09 \
             --next-service "$reports" --next-commit e3c2823a8f6b4714eb53ac67f4f5d1dbb04dea21 \
             --latest-service "$regional" --latest-commit a51e1411d9b60bbdaa792e7d095e95d41ae8f2e1 \
+            --successor 7c27cc2d0fdc8464c712f193310c2494df83366a "$active" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
+          "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$packaged"
           sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports --interrupted-finance \
             --python /opt/staging-account-acceptance/venv/bin/python --baseline-service "$previous" --candidate-service "$deployed"
       - name: Verify next release rollback and same-release recovery under systemd
@@ -302,6 +306,7 @@ jobs:
           deployed="$RUNNER_TEMP/market-v2-deployed/service"
           reports="$RUNNER_TEMP/market-v2-reports/service"
           regional="$RUNNER_TEMP/market-v2-regional/service"
+          active="$RUNNER_TEMP/market-v2-active/service"
           packaged="$RUNNER_TEMP/native-candidate/service"
           check_pair() {
             sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports --interrupted-finance \
@@ -311,7 +316,9 @@ jobs:
           check_pair "$reports" "$reports"
           check_pair "$reports" "$regional"
           check_pair "$regional" "$regional"
-          check_pair "$regional" "$packaged"
+          check_pair "$regional" "$active"
+          check_pair "$active" "$active"
+          check_pair "$active" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

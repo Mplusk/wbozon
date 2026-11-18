@@ -12,6 +12,8 @@ import re
 import ozon_mcp
 import wb_mcp
 import market_specs
+import avito_mcp
+import external_keys
 
 SUPPORTED = ('2025-03-26', '2025-06-18', '2025-11-25')
 LATEST = SUPPORTED[-1]
@@ -219,6 +221,7 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
         return reply('503 Service Unavailable', {'error':'authentication_unavailable'})
     if not key_id:
         return reply('401 Unauthorized', {'error':'unauthorized'}, [('WWW-Authenticate','Bearer resource_metadata="'+expected_origin+'/.well-known/oauth-protected-resource/mcp"')])
+    access = external_keys.access_for_key(key_id)
     if environ.get('REQUEST_METHOD','GET') != 'POST':
         return reply('405 Method Not Allowed', {'error':'method_not_allowed'}, [('Allow','POST')])
     media_type = environ.get('CONTENT_TYPE','').split(';',1)[0].strip().lower()
@@ -292,15 +295,22 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
     elif method == 'tools/list':
         if params.get('cursor') not in (None,''):
             return rpc_error(-32602,'Invalid cursor',ident)
-        result = {'tools':TOOLS}
+        catalog = list(TOOLS) if access in ('marketplaces','all') else []
+        if access in ('avito','all'):
+            catalog.extend(_tool(name, op['description'], op['properties'], op.get('required', ()))
+                           for name, op in avito_mcp.CONTRACTS.items())
+        result = {'tools':catalog}
         if modern:
             result.update(ttlMs=0,cacheScope='private')
     elif method == 'tools/call':
         name, args = params.get('name'), params.get('arguments',{})
-        if not isinstance(name,str) or name not in TOOL_NAMES:
+        if not isinstance(name,str) or not (
+                (access in ('marketplaces','all') and name in TOOL_NAMES) or
+                (access in ('avito','all') and name in avito_mcp.CONTRACTS)):
             return rpc_error(-32602,'Unknown tool',ident)
         try:
-            if name in market_specs.TOOLS: market_specs.validate(name,args)
+            if name in avito_mcp.CONTRACTS: avito_mcp.validate(name,args)
+            elif name in market_specs.TOOLS: market_specs.validate(name,args)
             elif name in ozon_mcp.OPERATIONS: ozon_mcp.validate_args(name,args)
             else:
                 wb_mcp.validate_args(name,args)

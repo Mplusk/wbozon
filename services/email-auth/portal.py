@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from app import LoginApp, smtp_mailer
 import ozon_mcp, ozon_details, ozon_article_summary, wb_mcp, external_keys, external_mcp, oauth_mcp, finance_gate
 import market_specs
+import avito_mcp
 import expansion_gateway
 import market_health, market_history
 import market_archive
@@ -19,7 +20,7 @@ import posting_discovery
 import market_diagnostics
 
 FIELDS = {'ozon': ('client_id', 'api_key'), 'wb': ('api_token',)}
-CHECK_OPERATIONS = {'ozon':'ozon_products', 'wb':'wb_prices'}
+CHECK_OPERATIONS = {'ozon':'ozon_products', 'wb':'wb_prices', 'avito':'avito_get_user_info_self'}
 CHECK_PROVIDER_LIMIT, CHECK_PROVIDER_WINDOW = 1, 60
 CHECK_GLOBAL_LIMIT, CHECK_GLOBAL_WINDOW = 10, 3600
 CHECK_MESSAGES = {
@@ -445,6 +446,9 @@ def _provider_worker():
             if type(deadline) not in (int,float) or not math.isfinite(deadline) or deadline < 0:
                 raise ValueError('Invalid provider deadline')
         def read():
+            if request['operation'] in avito_mcp.CONTRACTS:
+                return avito_mcp.read(request['operation'], request['args'], request['creds'],
+                                      request['finance_gate_dir'], request['deadline_monotonic'])
             if (request['operation']=='wb_sales_summary' and 'group_by' in request['args'] or
                     request['operation']=='wb_prices' and 'vendor_code' in request['args']):
                 import wb_legacy_reports
@@ -698,7 +702,8 @@ class Portal:
                 try:
                     if not self.login.permit('external-mcp:'+key_id,30,60) or not self.login.permit('api',30,60):
                         raise external_mcp.MCPToolError('rate_limited')
-                    creds=expansion_gateway.credentials(self.vault,operation)
+                    creds=(self.vault.read('avito') if operation in avito_mcp.CONTRACTS else
+                           expansion_gateway.credentials(self.vault,operation))
                     if not creds and operation!='mcp_health': raise external_mcp.MCPToolError('not_configured')
                     return self.read_gateway(operation,args,creds)
                 except urllib.error.HTTPError as exc:
@@ -708,7 +713,8 @@ class Portal:
                     raw_delay=delay
                     delay=public_retry_delay(delay,creds)
                     exc.close()
-                    reason='retry_time_unknown' if exc.code==429 and delay is None and operation in finance_gate.FINANCE_OPERATIONS else None
+                    guarded=operation in finance_gate.FINANCE_OPERATIONS or operation in avito_mcp.CONTRACTS
+                    reason='retry_time_unknown' if exc.code==429 and delay is None and guarded else None
                     if raw_delay is not None and delay is None: reason='retry_interval_unavailable'
                     raise external_mcp.MCPToolError(code,retry_after_seconds=delay,reason=reason) from None
                 except finance_gate.GateError as exc:
@@ -838,22 +844,23 @@ class Portal:
             if method!='POST': return reply('Method not allowed','405 Method Not Allowed')
             if e.get('HTTP_ORIGIN')!=self.login.origin: return reply('Forbidden','403 Forbidden')
             try:
-                form=parse_qs(body('application/x-www-form-urlencoded'),max_num_fields=3,keep_blank_values=True,strict_parsing=True)
+                form=parse_qs(body('application/x-www-form-urlencoded'),max_num_fields=4,keep_blank_values=True,strict_parsing=True)
                 if any(len(v)!=1 for v in form.values()): raise ValueError()
                 form={k:v[0] for k,v in form.items()}
                 csrf=form.get('csrf','')
                 if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
                 if path=='/settings/mcp/create':
-                    if set(form)!={'csrf','request_id','name'}: raise ValueError()
+                    if set(form) not in ({'csrf','request_id','name'}, {'csrf','request_id','name','access'}): raise ValueError()
+                    access=form.get('access','marketplaces')
                     name=form['name'].strip()
-                    _,token=self.external_keys.create(name,form['request_id'],now)
-                    return reply(document('Ключ создан',external_keys.render_created(name,token,self.login.origin)))
+                    _,token=self.external_keys.create(name,form['request_id'],now,access)
+                    return reply(document('Ключ создан',external_keys.render_created(name,token,self.login.origin,access)))
                 if set(form)!={'csrf','key_id'}: raise ValueError()
                 if not self.external_keys.revoke(form['key_id'],now): return reply('Ключ уже отозван или не найден. <a href="/settings">Настройки</a>','409 Conflict')
             except external_keys.DuplicateRequestError:
                 return reply('Этот запрос уже выполнен. Создайте новый ключ в настройках.','409 Conflict')
             except external_keys.KeyLimitError:
-                return reply('Достигнут лимит активных ключей. Отзовите ненужный ключ.','409 Conflict')
+                return reply('Достигнут лимит активных ключей для этих площадок. Отзовите ненужный ключ.','409 Conflict')
             except (ValueError,TypeError,UnicodeError): return reply('Проверьте введённые значения.','400 Bad Request')
             except sqlite3.Error: return reply('Не удалось изменить ключ. Повторите позже.','503 Service Unavailable')
             start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]); return [b'']
@@ -870,7 +877,7 @@ class Portal:
                     if not re.fullmatch(r'[1-9][0-9]{0,18}',article) or int(article)>9223372036854775807: raise ValueError()
                     nm_id=int(article)
                 if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
-                if provider not in CHECK_OPERATIONS: raise ValueError()
+                if provider not in CHECK_OPERATIONS or (provider=='avito' and path!='/settings/check'): raise ValueError()
             except (ValueError,TypeError,UnicodeError): return reply('Некорректный запрос.','400 Bad Request')
             # Global owner-level buckets persist across workers/sessions and prevent click storms.
             try:
@@ -885,7 +892,7 @@ class Portal:
                 creds,version=snapshot
             except Exception: return reply('Не удалось прочитать настройки. <a href="/settings">Настройки</a>','503 Service Unavailable')
             try:
-                arguments={'limit':20 if path=='/settings/preview' else 1}
+                arguments={} if provider=='avito' else {'limit':20 if path=='/settings/preview' else 1}
                 if provider=='ozon' and path=='/settings/check': arguments['include_identity']=False
                 if lookup: arguments['nm_id']=nm_id
                 result=self.read_gateway(CHECK_OPERATIONS[provider],arguments,creds)
@@ -896,6 +903,8 @@ class Portal:
             except urllib.error.HTTPError as exc:
                 outcome='denied' if exc.code in (401,403) else 'rate_limited' if exc.code==429 else 'unavailable' if 500<=exc.code<=599 else 'failed'
                 exc.close()
+            except finance_gate.GateError as exc:
+                outcome='rate_limited' if exc.reason in ('busy','cooldown','retry_time_unknown') else 'unavailable'
             except (TimeoutError,urllib.error.URLError): outcome='unavailable'
             except Exception: outcome='failed'
             if path in ('/settings/preview','/settings/wb-lookup'):
@@ -931,12 +940,13 @@ class Portal:
                 form={k:v[0] for k,v in form.items()}
                 csrf=form.get('csrf',''); provider=form.get('provider','')
                 if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
-                fields=(('client_id','client_secret') if provider=='performance' else ('api_token',)
+                fields=(('client_id','client_secret') if provider in ('avito','performance') else ('api_token',)
                         if provider in market_health.WB_CATEGORIES else FIELDS.get(provider))
                 if not fields or set(form)!=set(fields)|{'csrf','provider'}: raise ValueError()
                 values={k:form[k] for k in fields}
                 if any(not re.fullmatch(r'[!-~]{1,2048}',v) for v in values.values()): raise ValueError()
                 if provider=='ozon' and not re.fullmatch(r'[0-9]{1,32}',values['client_id']): raise ValueError()
+                if provider=='avito' and len(values['client_id']) > 128: raise ValueError()
                 if provider == 'wb' or provider in market_health.WB_CATEGORIES:
                     from market_transport import remember_wb_feed_credentials
                     remember_wb_feed_credentials(self.finance_gate_dir,self.vault.read(provider),values)
@@ -949,10 +959,10 @@ class Portal:
         except sqlite3.Error:
             return reply('Настройки временно недоступны. Повторите позже.','503 Service Unavailable')
         content='<main id="content"><p class="eyebrow">Интеграции</p><h1>Подключение кабинетов</h1>'
-        content+='<p class="intro">Здесь можно сохранить ключи Wildberries и Ozon. Используйте отдельные ключи только с необходимыми правами чтения. Права на изменение товаров, цен и заказов не нужны.</p>'
+        content+='<p class="intro">Подключите кабинеты Ozon, Wildberries и Авито. Для каждого кабинета используйте ключ с нужными правами чтения.</p>'
         content+='<p>Ключи хранятся зашифрованно и не отображаются после сохранения. Сохранение ключа не подтверждает его действительность и не подключает MCP автоматически.</p>'
         content+='<div class="steps" aria-label="Порядок подключения"><div class="step"><b><span>01</span>Добавьте ключ</b>Доступ только на чтение</div><div class="step"><b><span>02</span>Проверьте связь</b>Один безопасный запрос</div><div class="step"><b><span>03</span>Откройте данные</b>Первые товары и цены</div></div>'
-        content+='<div class="session-note"><p>Сохранить или заменить ключи Ozon и Wildberries можно в течение первых 5 минут после входа по письму. Затем выйдите и запросите новую ссылку. Ключи для подключения ИИ можно создавать и отзывать в течение всего сеанса.</p>'
+        content+='<div class="session-note"><p>Сохранить или заменить ключи Ozon, Wildberries и Авито можно в течение первых 5 минут после входа по письму. Затем выйдите и запросите новую ссылку. Ключи для подключения ИИ можно создавать и отзывать в течение всего сеанса.</p>'
         content+='<form method="post" action="/logout"><input type="hidden" name="csrf" value="'+html.escape(session[1],quote=True)+'"><button>Выйти для повторного входа</button></form></div>'
         if session[0]-43200 < now-300:
             content+='<p role="status">Время для изменения ключей маркетплейсов истекло. Для их сохранения сначала выйдите и получите новую ссылку входа. Создание и отзыв ключей для ИИ по-прежнему доступны.</p>'
@@ -1009,6 +1019,23 @@ class Portal:
                 content+='<option value="'+key+'">'+label+(' (сохранён)' if key in configured else '')+'</option>'
             content+='</select><label for="category-token">Токен WB</label><input id="category-token" name="api_token" type="password" autocomplete="off" maxlength="2048" required><button>Сохранить токен категории</button></form>'
         else: content+='<p>Для сохранения отдельного токена войдите по новой ссылке из письма.</p>'
+        content+='</section><section class="market-card" aria-labelledby="avito-title"><h2 id="avito-title">Авито</h2>'
+        content+='<p>Объявления, заказы, переписка и статистика своего кабинета через Avito API.</p>'
+        csrf_value=html.escape(session[1], quote=True)
+        if 'avito' in configured:
+            check=self.vault.check_status('avito')
+            content+='<p class="status">Данные приложения сохранены зашифрованно.</p>'
+            if check:
+                content+='<p>Последняя проверка '+external_keys._stamp(check[1])+' — '+CHECK_MESSAGES[check[0]]+'</p>'
+            content+='<form method="post" action="/settings/check"><input type="hidden" name="provider" value="avito"><input type="hidden" name="csrf" value="'+csrf_value+'"><button>Проверить подключение Авито</button></form>'
+        else:
+            content+='<p>Для подключения нужны Client ID и Client Secret приложения Авито.</p>'
+        if session[0]-43200 >= now-300:
+            content+='<form class="save-form" method="post" action="/settings"><input type="hidden" name="provider" value="avito"><input type="hidden" name="csrf" value="'+csrf_value+'">'
+            content+='<label for="avito-client">Client ID Авито</label><input id="avito-client" name="client_id" type="text" autocomplete="off" maxlength="128" required>'
+            content+='<label for="avito-secret">Client Secret Авито</label><input id="avito-secret" name="client_secret" type="password" autocomplete="off" maxlength="2048" required><button>Сохранить данные Авито</button></form>'
+        else:
+            content+='<p>Для изменения данных Авито войдите по новой ссылке из письма.</p>'
         content+='</section><section class="mcp-card"><h2>Реклама Ozon Performance</h2>'
         content+='<p>'+('Рекламные ключи сохранены.' if 'performance' in configured else 'Для статистики рекламы нужны отдельные Client ID и Client Secret Ozon Performance.')+'</p>'
         if session[0]-43200 >= now-300:
