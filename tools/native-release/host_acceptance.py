@@ -287,7 +287,9 @@ def suite(python, gate_source, baseline_service=None, candidate_service=None, ma
             until(lambda: checked(old if phase == 'committed' else new), 140)
             print('PASS automatic recovery at', phase, flush=True)
         (data / ('fail-' + new)).touch()
-        assert launch(new, 'none').wait(timeout=150) != 0
+        # This fixture deliberately exhausts the controller's 180-second
+        # startup deadline before systemd can report the deployment failure.
+        assert launch(new, 'none').wait(timeout=240) != 0
         until(lambda: checked(old), 140)
         assert not (state / 'permit.json').exists()
         print('PASS failed candidate health restored prior release', flush=True)
