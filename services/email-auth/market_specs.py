@@ -163,10 +163,10 @@ TOOLS = {
         "date_from date_to sku article cursor limit",
         "date_from date_to",
     ),
-    "ozon_clusters": ("Кластеры и входящие в них склады Ozon.", "cluster_type cluster_id", ""),
+    "ozon_clusters": ("Кластеры Ozon. По умолчанию показывает количество складов. Для списка складов укажите cluster_id и mode=details.", "cluster_type cluster_id offset limit", ""),
     "wb_funnel": (
-        "Переходы, корзины, заказы и конверсии по выбранному периоду WB, до 365 дней.",
-        "date_from date_to article nm_id nm_ids group_by limit offset",
+        "Переходы, корзины, заказы и конверсии WB. group_by=week выдаёт одну календарную неделю в пределах периода. Для продолжения передайте next_cursor в cursor.",
+        "date_from date_to article nm_id nm_ids group_by limit offset cursor",
         "date_from date_to",
     ),
     "wb_ads": (
@@ -258,6 +258,8 @@ def validate(name, args):
         raise ValueError("Invalid tool arguments")
     if not all(_valid(value, props[k]) for k, value in args.items()):
         raise ValueError("Invalid parameter value")
+    if name == "wb_funnel" and "cursor" in args and (args.get("group_by") != "week" or "offset" in args):
+        raise ValueError("Use a weekly cursor without offset")
     if name == "wb_orders" and "group_by" in args:
         if not ("article" in args or "nm_id" in args) or "cursor" in args or args.get("mode") == "details":
             raise ValueError("Grouped orders require a product selector and summary pagination")

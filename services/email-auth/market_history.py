@@ -233,12 +233,13 @@ def historical_read(history, owner, name, args):
     offset, limit = args.get("offset", 0), args.get("limit", 100)
     selected = []
     unresolved = 0
-    check_article = name == "ozon_sku_daily" and "article" in args
+    check_article = name in ("ozon_sku_daily", "wb_orders") and "article" in args
     for _, records in pages.values():
         for row in records:
             if check_article and not row.get("article"):
-                sku = row.get("sku")
-                if "sku" not in args or sku is None or str(sku) == str(args["sku"]):
+                selector = "nm_id" if name == "wb_orders" else "sku"
+                identity = row.get(selector)
+                if selector not in args or identity is None or str(identity) == str(args[selector]):
                     unresolved += 1
             elif matches(row, args):
                 selected.append(row)

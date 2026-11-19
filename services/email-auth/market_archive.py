@@ -22,26 +22,46 @@ def target_day(history, owner, name, today):
     coverage = history.coverage(owner, name)
     if name.endswith("availability"):
         return today.isoformat() if today.isoformat() not in coverage else None
-    # Recheck preliminary days after they have matured, then backfill still available periods.
-    for n in (1, 3, 7, 14, *range(2, 90)):
+    for n in range(1, 90):
+        day = (today - timedelta(days=n)).isoformat()
+        if day not in coverage:
+            return day
+    for n in (3, 7, 14):
         day = today - timedelta(days=n)
         stamp = coverage.get(day.isoformat())
         mature = (today - timedelta(days=1)).isoformat()
-        if stamp is None or (n in (3, 7, 14) and stamp[:10] < mature):
+        if stamp[:10] < mature:
             return day.isoformat()
     return None
 
 
 def collect(wire, history, name, day):
     owner = market_history.scope(wire.provider, wire.creds)
-    with wire.progress("archive-v2", [name, day]) as (progress, save):
+    batch = name in ("wb_orders", "ozon_sku_daily")
+    week_start = (datetime.fromisoformat(day).date() - timedelta(days=6)).isoformat()
+    with wire.progress("archive-week-v1" if batch else "archive-v2", [name, day]) as (progress, save):
         state = progress or {"cursor": None, "offset": 0, "records": [], "seen": []}
         query = {"date_from": day, "date_to": day, "limit": 100}
         cursor = state["cursor"]
         if name in ("wb_orders", "wb_sales"):
             if cursor:
                 query["cursor"] = cursor
-            page = wb_expansion._stats(name, query, wire, exact_day=True)
+            if name == "wb_orders":
+                query["limit"] = 1000
+            page = wb_expansion._stats(name, query, wire, exact_day=True, feed_start=week_start if batch else None)
+            if page.get("source") == "/api/analytics/v1/order-feed":
+                query["date_from"] = page["coverage_from"]
+                page["complete"] = page.get("source_exhausted", False)
+                if hasattr(wire, "gate_dir"):
+                    from expansion_gateway import _seller_mappings
+                    by_nm = {}
+                    for mapping in _seller_mappings(wire.gate_dir).values():
+                        if mapping.get("wb_nm_id") and mapping.get("wb_vendor_code"):
+                            by_nm.setdefault(str(mapping["wb_nm_id"]), set()).add(mapping["wb_vendor_code"])
+                    for row in page["items"]:
+                        articles = by_nm.get(str(row["nm_id"]), set())
+                        if len(articles) == 1:
+                            row.update(article=next(iter(articles)), article_basis="seller_nm_id_mapping")
         elif name == "wb_finance_report":
             target = datetime.fromisoformat(day).date()
             monday = target - timedelta(days=target.weekday())
@@ -56,6 +76,7 @@ def collect(wire, history, name, day):
                 query["task_id"] = state["task_id"]
             page = wb_expansion.read("wb_stocks", query, wire)
         elif name == "ozon_sku_daily":
+            query.update(date_from=week_start, limit=1000)
             page = ozon_expansion._daily(dict(query, offset=state["offset"]), wire)
             if page["items"]:
                 import expansion_gateway
@@ -94,12 +115,12 @@ def collect(wire, history, name, day):
                 != datetime.now(timezone.utc if wire.provider == "ozon" else MOSCOW).date().isoformat()
             ):
                 return "snapshot_day_changed"
-            if name == "wb_finance_report":
+            if name == "wb_finance_report" or batch:
                 groups = {d: [] for d in market_history.days_between(query["date_from"], query["date_to"])}
                 for record in records:
                     group = str(record.get("date", ""))[:10]
                     if group not in groups:
-                        return "finance_date_outside_requested_week"
+                        return "date_outside_requested_archive_period"
                     groups[group].append(record)
                 stamp = market_history.utc()
                 for financial_day, items in groups.items():

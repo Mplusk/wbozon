@@ -103,8 +103,11 @@ def _supply(row):
     crossdock = row.get('is_crossdock')
     if crossdock is not None and type(crossdock) is not bool:
         raise ValueError('Invalid crossdock flag')
-    return {'supply_id': _id_or_none(row.get('supply_id')), 'bundle_id': _string(row.get('bundle_id')),
-            'state': _string(row.get('state')), 'is_crossdock': crossdock,
+    content = _object(row.get('content'))
+    if row.get('bundle_id') and content.get('bundle_id') and row['bundle_id'] != content['bundle_id']:
+        raise ValueError('Contradictory supply composition identifiers')
+    return {'supply_id': _id_or_none(row.get('supply_id')), 'bundle_id': _string(row.get('bundle_id') or content.get('bundle_id')),
+            'state': _string(row.get('state') or row.get('supply_state')), 'is_crossdock': crossdock,
             'macrolocal_cluster_id': _id_or_none(row.get('macrolocal_cluster_id')),
             'storage_warehouse_id': _id_or_none(warehouse.get('warehouse_id')),
             'storage_warehouse_name': _string(warehouse.get('name')), 'arrival_date': _string(warehouse.get('arrival_date'))}
@@ -141,7 +144,7 @@ def _orders(args, data, issues):
                        'data_filling_deadline_utc': _string(row.get('data_filling_deadline_utc')),
                        'original_supply_id': _id_or_none(tags.get('original_supply_id')),
                        'seller_warehouse_id': _id_or_none(tags.get('seller_warehouse_id')),
-                       'dropoff_warehouse_id': _id_or_none(dropoff.get('warehouse_id')),
+                       'dropoff_warehouse_id': _id_or_none(dropoff.get('warehouse_id') or row.get('dropoff_warehouse_id')),
                        'timeslot_from': _string(window.get('from')), 'timeslot_to': _string(window.get('to')),
                        'timezone': _string(tz.get('iana_name')), 'timezone_offset': _string(tz.get('offset')),
                        'supplies': supplies})

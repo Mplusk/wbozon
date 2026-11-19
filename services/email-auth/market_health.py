@@ -16,6 +16,9 @@ WB_CATEGORIES = {
     "wb_documents": "Документы",
     "wb_prices_key": "Цены и скидки",
 }
+# WB documents these zero-based positions in the access token's s claim.
+WB_CATEGORY_BITS = {"wb_content":1, "wb_analytics":2, "wb_prices_key":3, "wb_statistics":5,
+                    "wb_advert":6, "wb_feedback":7, "wb_supply":10, "wb_documents":12, "wb_finance":13}
 HOST_KEYS = {
     "supplies-api": "wb_supply",
     "statistics-api": "wb_statistics",
@@ -68,8 +71,12 @@ def read(vault, directory, args, names, credentials):
         "performance": "Ozon Performance",
         **WB_CATEGORIES,
     }.items():
-        acct = vault.read(key)
-        exp = market_history.claims(acct.get("api_token") if acct else None).get("exp")
+        dedicated = vault.read(key)
+        acct = dedicated or (vault.read("wb") if key in WB_CATEGORIES else None)
+        claims = market_history.claims(acct.get("api_token") if acct else None)
+        exp = claims.get("exp")
+        mask = claims.get("s")
+        permitted = bool(mask & (1 << WB_CATEGORY_BITS[key])) if key in WB_CATEGORY_BITS and type(mask) is int else None
         stamp = (
             datetime.fromtimestamp(exp, timezone.utc).isoformat()
             if type(exp) is int and 0 < exp < 253402300800
@@ -78,7 +85,9 @@ def read(vault, directory, args, names, credentials):
         tokens.append(
             dict(
                 category=label,
-                configured=bool(acct),
+                configured=bool(acct) and permitted is not False,
+                credential_source=key if dedicated else "wb" if acct else None,
+                category_allowed_by_token=permitted,
                 expires_at=stamp,
                 expiry_basis="token_claim" if stamp else None,
             )

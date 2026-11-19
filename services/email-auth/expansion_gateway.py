@@ -51,19 +51,23 @@ def credentials(vault, name):
     return creds
 
 
-def _mapping(args, directory):
-    if "mapping" in args:
-        return args["mapping"]
+def _seller_mappings(directory):
     # Alias to seller codes is private deployment data. MCP input cannot select a filename.
     file = Path(directory).parent / "supply-articles.json"
     try:
         with file.open("rb") as stream:
             raw = stream.read(65537)
     except FileNotFoundError:
-        return None
+        return {}
     if len(raw) > 65536:
         raise ValueError("Invalid mapping file")
-    mappings = json.loads(raw)
+    return json.loads(raw)
+
+
+def _mapping(args, directory):
+    if "mapping" in args:
+        return args["mapping"]
+    mappings = _seller_mappings(directory)
     needle=args["article"].casefold().strip()
     candidates=[v for k,v in mappings.items() if k.casefold().strip()==needle or
                 needle in (str(v.get("ozon_offer_id","")).casefold(),str(v.get("wb_vendor_code","")).casefold())]
@@ -161,13 +165,23 @@ def _enrich(name, args, data, request):
             if not unresolved:
                 return
             subset = unresolved[:100]
-            raw = request(
-                "POST", ozon_expansion.BASE + "/v3/product/info/list", body={"sku": subset}, ttl=1800
-            )
-            info = ozon_details._products({"skus": subset}, raw, None)
-            if info["conflicts"] or info["unmatched_row_indices"]:
-                return
-            mapping = {sku: card["offer_id"] for card in info["items"] for sku in card["sku_candidates"]}
+            try:
+                raw = request("POST", ozon_expansion.BASE + "/v3/product/info/list", body={"sku": subset}, ttl=1800)
+                info = ozon_details._products({"skus": subset}, raw, None)
+                if info["conflicts"] or info["unmatched_row_indices"]:
+                    return
+                mapping = {sku: card["offer_id"] for card in info["items"] for sku in card["sku_candidates"]}
+            except finance_gate.GateError as exc:
+                if exc.reason != "retry_time_unknown":
+                    raise
+                raw = request("POST", ozon_expansion.BASE + "/v4/product/info/attributes",
+                              body={"filter": {"sku": subset, "visibility": "ALL"}, "limit": 100}, ttl=1800)
+                mapping = {}
+                for card in market_specs.rows(raw.get("result")):
+                    sku, offer = str(card.get("sku")), card.get("offer_id")
+                    if sku not in subset or not offer or (sku in mapping and offer != mapping[sku]):
+                        return
+                    mapping[sku] = offer
             for row in data["items"]:
                 sku = str(row.get("sku"))
                 if not row.get("article") and sku in mapping:
@@ -184,6 +198,86 @@ def _enrich(name, args, data, request):
         data["identity_enrichment"] = "incomplete"
 
 
+def _finance_by_report(args, wire):
+    import market_catalog
+    creds = getattr(wire, "category_keys", {}).get("wb_finance", wire.creds)
+    src = Wire("wb", creds, wire.gate_dir, wire.deadline)
+    start, end = (date.fromisoformat(args[k]) for k in ("date_from", "date_to"))
+    monday = start - timedelta(days=start.weekday())
+    sunday = min(end + timedelta(days=6-end.weekday()), datetime.now(market_specs.MOSCOW).date())
+    def read(op, inputs):
+        return market_catalog.transfer("market_api_read", {"operation_id": op, "input": inputs},
+                                       creds, src.gate_dir, src.deadline)
+
+    with src.progress("wb-finance-by-report-v1", [args.get("article"), args.get("nm_id"),
+                                                  args.get("sku"), start.isoformat(), end.isoformat()]) as (previous, save):
+        state = previous or {"reports": None, "index": 0, "cursor": 0, "rows": [], "unallocated": 0}
+        if state["reports"] is None:
+            result = read("wb_post_api_finance_sales_reports_list", {"body": {"dateFrom": monday.isoformat(),
+                          "dateTo": sunday.isoformat(), "limit": 1000, "period": "weekly"}})
+            records = market_specs.rows(result["data"] or [])
+            if len(records) == 1000:
+                return market_specs.result([], complete=False, status="report_list_truncated")
+            reports = {}
+            for row in records:
+                rid = row.get("reportId")
+                lo, hi = (date.fromisoformat(row[k]) for k in ("dateFrom", "dateTo"))
+                if type(rid) is not int or rid <= 0 or hi < lo or rid in reports:
+                    raise ValueError("Invalid WB report identity or interval")
+                if hi >= start and lo <= end:
+                    reports[rid] = [rid, lo.isoformat(), hi.isoformat()]
+            state["reports"] = list(reports.values())
+            save(state, 1800)
+        failure = {}
+        for _ in range(8):
+            if state["index"] == len(state["reports"]) or time.monotonic() + 2 >= src.deadline:
+                break
+            rid, lo, hi = state["reports"][state["index"]]
+            result = market_composites.observed(lambda: read("wb_post_api_finance_sales_reports_detailed_reportid", {
+                "path": {"reportId": rid}, "body": {"rrdId": state["cursor"], "limit": 250,
+                "fields": sorted(set(wb_expansion.FIN_FIELDS.values()) | {"vendorCode", "sku", "nmId"})}}))
+            if result.get("http_status") == 204:
+                state.update(index=state["index"]+1, cursor=0)
+            elif result.get("http_status") == 200:
+                records = market_specs.rows(result["data"])
+                cursor = state["cursor"]
+                selected = []
+                for row in records:
+                    if row.get("reportId") != rid or type(row.get("rrdId")) is not int or row["rrdId"] <= cursor:
+                        raise ValueError("Unexpected or repeated WB financial row")
+                    cursor = row["rrdId"]
+                    if start <= date.fromisoformat(row["rrDate"][:10]) <= end:
+                        selected.append(row)
+                if not records:
+                    failure = {"status": "empty_page_without_end_marker"}
+                    break
+                items, unallocated = wb_expansion.finance_rows(selected, args)
+                state["rows"].extend(items)
+                state["unallocated"] += len(unallocated)
+                state["cursor"] = cursor
+            else:
+                failure = {k: result[k] for k in ("status", "http_status", "retry_after_seconds") if k in result}
+                break
+            if len(state["rows"]) > 20000:
+                return market_specs.result([], complete=False, status="narrow_period_or_select_article")
+            save(state, 86400)
+        covered = set()
+        for _, lo, hi in state["reports"][:state["index"]]:
+            covered.update(market_history.days_between(max(start.isoformat(),lo), min(end.isoformat(),hi)))
+        wanted = market_history.days_between(start.isoformat(), end.isoformat())
+        missing = [d for d in wanted if d not in covered]
+        done = state["index"] == len(state["reports"])
+        if done:
+            save(state, 1800)
+        complete = done and not missing
+        return market_specs.result(wb_expansion.finance_summary(state["rows"]), complete=complete,
+                    status="ready" if complete else failure.get("status", "partial_report_coverage" if done else "pending"),
+                    source="wb_financial_reports_by_id", summary_scope="requested_period" if complete else "observed_rows_only",
+                    rows_observed=len(state["rows"]), reports_completed=state["index"], reports_listed=len(state["reports"]),
+                    missing_dates=missing, unallocated_rows=state["unallocated"],
+                    retry_after_seconds=failure.get("retry_after_seconds"), period_from=start.isoformat(), period_to=end.isoformat())
+
+
 def _finance_period(args, wire):
     """Resume at the last confirmed rrdId; totals only become final after HTTP 204."""
     query = {k: v for k, v in args.items() if k not in ("mode", "cursor")}
@@ -195,6 +289,10 @@ def _finance_period(args, wire):
                 break
             try:
                 page = wb_expansion._finance(dict(query, cursor=state["cursor"],limit=5000), wire)
+            except finance_gate.GateError as exc:
+                if exc.reason != "retry_time_unknown":
+                    raise
+                return _finance_by_report(args, wire)
             except urllib.error.HTTPError as exc:
                 if exc.code != 429:
                     raise
@@ -281,6 +379,9 @@ def _wb_daily_totals(name,args,wire):
             state.update(next=marker,done=page["complete"])
             if marker is not None: state["seen"].append(marker)
             save(state,1800 if state["done"] else 86400)
+            if marker is None and not state["done"]:
+                status = page.get("status", "incomplete")
+                break
         def observed_events():
             for key, (article, day, warehouse, region, event, units, revision) in state['events'].items():
                 if name == 'wb_orders' and known_cancellations.get(key) != [revision, event]:
@@ -465,6 +566,8 @@ def _order_share(name, args, data, wire):
 
 def _summary(name, data):
     """Keep provider pagination visible in both representations; totals cover this page."""
+    if data.get("summary_scope") == "report_period":
+        return
     items = data.get("items", [])
     if not items:
         return
@@ -564,10 +667,14 @@ def execute(name, args, creds, directory, deadline):
                 identity=market_composites.identity(args,wires,mapping)
                 if name=="sales_drop_check":
                     data=market_composites.verified_comparison(args,wires,mapping,identity)
-                elif name=="article_map" or not identity["complete"]:
+                elif name=="article_map":
                     data=identity
                 else:
-                    data=market_composites.accounting(args,wires,identity["mapping"],_finance_period,regulated_ozon)
+                    verified, selectors, missing = market_composites.verified_accounts(args, wires, mapping, identity)
+                    data = market_composites.accounting(args, verified, selectors, _finance_period, regulated_ozon)
+                    data.update(report="unit_economics", mapping=selectors or None, unavailable_marketplaces=missing)
+                    if missing:
+                        data["status"] = "partial_catalog_identity" if verified else "catalog_identity_unavailable"
             used_wires=list(wires.values())
         else:
             p = provider(name)

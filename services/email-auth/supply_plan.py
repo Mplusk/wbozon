@@ -1,6 +1,7 @@
 """Resumable warehouse-level coverage from full order pages and reported stock."""
 
 from contextlib import nullcontext
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
 from hashlib import sha256
@@ -86,6 +87,8 @@ def _scan(state, section, page, provider, since, as_of):
             continue
         # Warehouse and date belong to the event, not the identity. WB cursors may include an earlier row.
         key = sha256(str((ident, item.get("sku") if provider == "ozon" else None)).encode()).hexdigest()
+        if provider == "ozon" and item.get("order_id"):
+            state.setdefault("order_groups", {})[key] = str(item["order_id"])
         cancelled = (
             (item["status"] == "cancelled" if item.get("status") else None)
             if provider == "ozon"
@@ -108,7 +111,7 @@ def _scan(state, section, page, provider, since, as_of):
 
 def _locations(state, horizon, as_of):
     answer = []
-    demand_verified = state["done"]["orders"] and not state["issues"].intersection(
+    demand_valid = not state["issues"].intersection(
         {
             "inconsistent_order_revision",
             "missing_order_id",
@@ -120,6 +123,11 @@ def _locations(state, horizon, as_of):
             "incomplete_cluster_assignment",
         }
     )
+    def verified_window(first):
+        coverage = state.get("order_coverage")
+        return demand_valid and (state["done"]["orders"] or bool(
+            coverage and coverage[0] <= first and coverage[1] >= as_of.isoformat()))
+
     for key, g in state["locations"].items():
         stock = list(g["stock"].values())
         available = (
@@ -135,15 +143,20 @@ def _locations(state, horizon, as_of):
         avg, counts, cancelled, retained = {}, {}, {}, {}
         for days in (7, 30, 90):
             first = (as_of - timedelta(days=days - 1)).isoformat()
+            demand_verified = verified_window(first)
+            if state.get("anonymous_wb_demand") and not g.get("marketplace_total") and key != "Склад WB":
+                demand_verified = False
             units = sum(v for d, v in g["daily"].items() if first<=d<=as_of.isoformat())
-            counts[str(days)] = units
+            counts[str(days)] = units if demand_verified else None
             cancellations = sum(v for d, v in g.get("days_with_cancellations", {}).items() if first<=d<=as_of.isoformat())
             known = demand_verified and not any(d >= first for d in g.get("unknown_cancellation_days", {}))
             cancelled[str(days)] = cancellations if known else None
             retained[str(days)] = units - cancellations if known else None
             avg[str(days)] = str(Decimal(units) / days) if demand_verified else None
         rate = Decimal(avg["30"]) if avg["30"] is not None else None
-        complete = state["done"]["stock"] and state["done"]["orders"] and not state["issues"]
+        complete = state["done"]["stock"] and avg["30"] is not None and not state["issues"]
+        if state.get("anonymous_wb_demand") and not g.get("marketplace_total"):
+            complete = False
         gross = (
             max(0, (counts["30"] * horizon + 29) // 30 - available)
             if complete and available is not None and rate is not None
@@ -157,6 +170,7 @@ def _locations(state, horizon, as_of):
             zero_days=set(g.get("stockout_days", [])) & known_days
             for days in (7,30,90):
                 dates={(as_of-timedelta(days=i)).isoformat() for i in range(days)}
+                demand_verified = counts[str(days)] is not None
                 observed=dates & known_days
                 unavailable=dates & zero_days
                 bulk=sum(g.get("wholesale_daily",{}).get(d,0) for d in dates-unavailable)
@@ -165,8 +179,8 @@ def _locations(state, horizon, as_of):
                 consistent=all(0<=g.get("wholesale_daily",{}).get(d,0)<=g["daily"].get(d,0) for d in dates)
                 avg[str(days)]=str(Decimal(ordinary)/denominator) if demand_verified and denominator and ordinary>=0 and consistent else None
                 coverage[str(days)]={"stock_observed_days":len(observed),"stockout_days":len(unavailable),
-                    "unknown_stock_days":days-len(observed),"excluded_wholesale_units":bulk,"demand_days":denominator,
-                    "ordinary_ordered_units":ordinary}
+                    "unknown_stock_days":days-len(observed),"excluded_wholesale_units":bulk if demand_verified else None,"demand_days":denominator,
+                    "ordinary_ordered_units":ordinary if demand_verified else None}
             rate=Decimal(avg["30"]) if avg["30"] is not None else None
             # Keep the unrounded rational until the final ceiling.
             window=coverage["30"]
@@ -183,7 +197,7 @@ def _locations(state, horizon, as_of):
                 "available_units": available,
                 "inbound_units": inbound,
                 "orders_per_day": avg,
-                "ordered_units": counts if demand_verified else None,
+                "ordered_units": counts if any(v is not None for v in counts.values()) else None,
                 "order_basis": "gross_ordered_units_including_cancellations",
                 "cancelled_units": cancelled,
                 "ordered_units_after_known_cancellations": retained,
@@ -252,6 +266,7 @@ def _clusters(state, horizon, as_of, unmapped):
 
 def _market_total(state, horizon, as_of, missing_stock):
     group = {
+        "marketplace_total": True,
         "warehouse": None,
         "warehouse_id": None,
         "cluster_id": None,
@@ -296,11 +311,48 @@ def _merge_cancellations(group, location):
     group.setdefault("unknown_cancellation_days", {}).update(location.get("unknown_cancellation_days", {}))
 
 
+def _assign_clusters(state, wire):
+    missing = {k: loc for k, loc in state["locations"].items()
+               if loc["cluster_id"] is None and not loc.get("cluster_conflict")}
+    if not missing:
+        return
+    directory = defaultdict(dict)
+    for cluster in ozon_expansion.cluster_directory(wire):
+        if cluster.get("id") is None:
+            continue
+        for w in cluster["warehouses"]:
+            directory[str(w.get("warehouse_id"))][str(cluster["id"])] = (cluster["id"], cluster.get("name"))
+    for ident, loc in missing.items():
+        choices = directory[ident]
+        if len(choices) == 1:
+            loc["cluster_id"], loc["cluster"] = next(iter(choices.values()))
+        elif len(choices) > 1:
+            state["issues"].add("conflicting_warehouse_cluster")
+
+
+def _wholesale(state, planning):
+    from statistics import median
+    grouped = defaultdict(list)
+    for key, event in state["orders"].items():
+        group_id = state.get("order_groups", {}).get(key)
+        grouped[("order", group_id) if group_id else ("line", key)].append(event)
+    totals = [sum(e[2] for e in events) for events in grouped.values()]
+    ordinary = median(totals) if len(totals) >= 5 else None
+    for events, units in zip(grouped.values(), totals):
+        if units < planning["bulk_order_min_units"]:
+            continue
+        if not planning.get("bulk_explicit") and (ordinary is None or units < 4 * ordinary):
+            continue
+        for loc, day, count, _ in events:
+            by_day = state["locations"][loc]["wholesale_daily"]
+            by_day[day] = by_day.get(day, 0) + count
+
+
 def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
     since = (as_of - timedelta(days=89)).isoformat()
     key = [provider, article, nm, as_of.isoformat()]
     context = (
-        wire.progress("supply-plan-v2", key)
+        wire.progress("supply-plan-v3", key)
         if hasattr(wire, "progress")
         else nullcontext(({}, lambda data, ttl: None))
     )
@@ -326,7 +378,7 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
         pending = []
         for section in ("stock", "orders"):
             for _ in range(10):
-                if state["done"][section] or "order_volume_exceeds_planning_bound" in state["issues"]:
+                if state["done"][section] or (section == "orders" and state.get("order_coverage")) or "order_volume_exceeds_planning_bound" in state["issues"]:
                     break
                 args = (
                     {"article": article, "limit": 100}
@@ -349,10 +401,10 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
                             args,
                             wire,
                         )
+                    elif section == "orders":
+                        page = wb_expansion._stats("wb_orders", dict(args, limit=1000), wire)
                     else:
-                        page = wb_expansion.read(
-                            "wb_stocks" if section == "stock" else "wb_orders", args, wire
-                        )
+                        page = wb_expansion.read("wb_stocks", args, wire)
                 except urllib.error.HTTPError as exc:
                     pending.append(
                         {
@@ -396,7 +448,7 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
                     checkpoint()
                     break
                 # Advance only once for a valid page. A failed final page remains available for inspection.
-                if page.get("issues") or (not page["complete"] and page["next_cursor"] is None):
+                if page.get("issues") or (not page["complete"] and page["next_cursor"] is None and not page.get("source_exhausted")):
                     pending.append(
                         {
                             "source": section,
@@ -412,6 +464,11 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
                     state["issues"].add("pagination_did_not_finish")
                     break
                 _scan(state, section, page, provider, since, as_of.isoformat())
+                if section == "orders" and page.get("source") == "/api/analytics/v1/order-feed":
+                    if any(r.get("warehouse") == "Склад WB" and r.get("warehouse_type") == "Склад WB" for r in page["items"]):
+                        state["anonymous_wb_demand"] = True
+                    if page.get("source_exhausted"):
+                        state["order_coverage"] = [page["coverage_from"], page["coverage_to"]]
                 state["done"][section] = page["complete"]
                 state["cursors"][section] = next_cursor
                 if next_cursor is not None:
@@ -425,14 +482,7 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
             state["planning"]=planning
             for loc in state["locations"].values():
                 loc.update(wholesale_daily={},known_stock_days=[],stockout_days=[])
-            from statistics import median
-            event_units=[event[2] for event in state["orders"].values() if event[2]>0]
-            ordinary_size=median(event_units) if len(event_units)>=5 else None
-            for loc,day,units,_ in state["orders"].values():
-                outlier=(planning.get("bulk_explicit") or (ordinary_size is not None and units>=4*ordinary_size))
-                if units >= planning["bulk_order_min_units"] and outlier and loc in state["locations"]:
-                    by_day=state["locations"][loc]["wholesale_daily"]
-                    by_day[day]=by_day.get(day,0)+units
+            _wholesale(state, planning)
             if hasattr(wire,"gate_dir"):
                 import market_history
                 records=market_history.History(wire.gate_dir).verified_days(provider,wire.creds,provider+"_availability",since,as_of.isoformat())
@@ -450,6 +500,12 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
                                 state["locations"][loc]["known_stock_days"].append(day)
                             if not any(values) and whole_day and not state["locations"][loc]["daily"].get(day):
                                 state["locations"][loc]["stockout_days"].append(day)
+        if provider == "ozon":
+            try:
+                _assign_clusters(state, wire)
+            except (finance_gate.GateError, TimeoutError, urllib.error.URLError, finance_gate.ProviderResponseTooLarge) as exc:
+                pending.append({"source": "cluster_directory", "status": exc.reason if isinstance(exc, finance_gate.GateError) else "unavailable"})
+            checkpoint()
         locations = _locations(state, horizon, as_of)
         unmapped = [
             key
@@ -463,7 +519,8 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
         complete = sources_complete and bool(locations) and not missing_stock and not unmapped
         clusters = _clusters(state, horizon, as_of, unmapped) if provider == "ozon" else []
         destinations = clusters if provider == "ozon" else locations
-        total = _market_total(state, horizon, as_of, missing_stock)
+        missing_total_stock = [k for k in missing_stock if not (state.get("anonymous_wb_demand") and k == "Склад WB")]
+        total = _market_total(state, horizon, as_of, missing_total_stock)
         if provider=="wb" and planning is not None and hasattr(wire,"deadline") and state["done"]["stock"]:
             import supply_history
             from market_composites import observed
@@ -512,6 +569,8 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
             "article": article,
             "complete": complete,
             "source_complete": state["done"],
+            "orders_coverage": state.get("order_coverage") or ([since, as_of.isoformat()] if state["done"]["orders"] else None),
+            "warehouse_demand_attribution": "marketplace_only" if state.get("anonymous_wb_demand") else "reported_warehouses",
             "issues": sorted(
                 state["issues"]
                 | ({"no_warehouse_stock_observed"} if state["done"]["stock"] and not locations else set())
@@ -581,6 +640,12 @@ def read(args, wires, mapping):
         except (ValueError, KeyError, TypeError):
             report = {"marketplace": provider, "complete": False, "status": "invalid_provider_report"}
         report["orders_through"] = as_of.isoformat()
+        for row in [*report.get("locations", []), *report.get("clusters", []), report.get("marketplace_total", {})]:
+            def display(value):
+                return format(Decimal(value), ".4f").rstrip("0").rstrip(".") if value is not None else None
+            if "days_of_cover" in row:
+                row["days_of_cover"] = display(row["days_of_cover"])
+                row["orders_per_day"] = {period: display(rate) for period, rate in row["orders_per_day"].items()}
         platforms.append(report)
     return result(
         platforms,

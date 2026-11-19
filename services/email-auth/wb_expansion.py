@@ -6,6 +6,7 @@ from decimal import Decimal
 import re
 import urllib.error
 
+import finance_gate
 from market_history import order_event
 from market_specs import MOSCOW, direct_attribution, iso, matches, money, result, rows, select, validate
 
@@ -60,72 +61,62 @@ def _slice(items, args, **metadata):
     )
 
 
-def _supplies(args, request):
+def supply_headers(args, request):
     limit, offset = args.get("limit", 10), args.get("offset", 0)
     params = {"dates": [{"from": args["date_from"], "till": args["date_to"], "type": "createDate"}]}
     if "status_ids" in args:
         params["statusIDs"] = args["status_ids"]
-    page = rows(
-        request(
-            "POST",
-            SUPPLIES,
-            query={"limit": limit, "offset": offset},
-            body=params,
-            interval=2,
-            basic_interval=1800,
-            ttl=1800,
-        )
-    )
+    page = rows(request("POST", SUPPLIES, query={"limit": limit, "offset": offset}, body=params,
+                        interval=2, basic_interval=1800, ttl=1800))
     items = []
-    for index, s in enumerate(page):
-        sid, pre = s.get("supplyID"), s.get("preorderID")
-        ident = sid or pre
-        if type(ident) is not int or ident <= 0:
+    for row in page:
+        sid, pre = row.get("supplyID"), row.get("preorderID")
+        if type(sid or pre) is not int or (sid or pre) <= 0:
             raise ValueError("Missing supply identity")
+        items.append(dict(supply_id=sid, preorder_id=pre, status_id=row.get("statusID"),
+                          created_at=iso(row.get("createDate"), MOSCOW), supply_date=iso(row.get("supplyDate"), MOSCOW),
+                          actual_shipment_at=iso(row.get("factDate"), MOSCOW)))
+    return result(items, offset + limit if len(page) == limit else None, period_basis="supply_creation_moscow")
+
+
+def supply_detail(parent, request):
+    sid = parent["supply_id"]
+    ident = sid or parent["preorder_id"]
+    data = request("GET", SUPPLIES + "/" + str(ident), query={"isPreorderID": "false" if sid else "true"},
+                   group="fbw-detail", interval=2, basic_interval=1800, ttl=1800)
+    planned, actual = data.get("warehouseName"), data.get("actualWarehouseName")
+    # The receiving warehouse may differ from the planned destination.
+    return dict(parent, status_id=data.get("statusID", parent.get("status_id")),
+                warehouse_id=data.get("warehouseID"), warehouse=planned or actual,
+                warehouse_basis="planned" if planned else "actual" if actual else "unreported",
+                actual_warehouse_id=data.get("actualWarehouseID"), actual_warehouse=actual,
+                transit_warehouse_id=data.get("transitWarehouseID"),
+                paid_acceptance_coefficient=data.get("paidAcceptanceCoefficient"), accepted_at=None,
+                quantity=data.get("quantity"), accepted_quantity=data.get("acceptedQuantity"),
+                ready_for_sale_quantity=data.get("readyForSaleQuantity"))
+
+
+def _supplies(args, request):
+    page = supply_headers(args, request)
+    items = []
+    for index, parent in enumerate(page["items"]):
         try:
-            d = request(
-                "GET",
-                SUPPLIES + "/" + str(ident),
-                query={"isPreorderID": "false" if sid else "true"},
-                group="fbw-detail",
-                interval=2,
-                basic_interval=1800,
-                ttl=1800,
-            )
-        except urllib.error.HTTPError as exc:
-            if exc.code != 429 or not items:
+            row = supply_detail(parent, request)
+        except (urllib.error.HTTPError, finance_gate.GateError) as exc:
+            if not items or (isinstance(exc, urllib.error.HTTPError) and exc.code != 429):
                 raise
-            exc.close()
-            return result(items, offset + index, complete=False, issues=["more_supply_details_pending"])
-        row = {
-            "supply_id": sid,
-            "preorder_id": pre,
-            "status_id": d.get("statusID", s.get("statusID")),
-            "warehouse_id": d.get("warehouseID"),
-            "warehouse": d.get("warehouseName"),
-            "actual_warehouse_id": d.get("actualWarehouseID"),
-            "actual_warehouse": d.get("actualWarehouseName"),
-            "transit_warehouse_id": d.get("transitWarehouseID"),
-            "paid_acceptance_coefficient": d.get("paidAcceptanceCoefficient"),
-            "created_at": iso(s.get("createDate"), MOSCOW),
-            "supply_date": iso(s.get("supplyDate"), MOSCOW),
-            "actual_shipment_at": iso(s.get("factDate"), MOSCOW),
-            "accepted_at": None,
-            "quantity": d.get("quantity"),
-            "accepted_quantity": d.get("acceptedQuantity"),
-            "ready_for_sale_quantity": d.get("readyForSaleQuantity"),
-        }
+            delay = exc.headers.get("Retry-After") if isinstance(exc, urllib.error.HTTPError) else exc.retry_after_seconds
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+            return result(items, args.get("offset", 0) + index, complete=False,
+                          issues=["more_supply_details_pending"], retry_after_seconds=delay)
         if "warehouse_id" not in args or str(args["warehouse_id"]) in (
-            str(row["warehouse_id"]),
-            str(row["actual_warehouse_id"]),
-        ):
+                str(row["warehouse_id"]), str(row["actual_warehouse_id"])):
             items.append(row)
-    return result(
-        items, offset + limit if len(page) == limit else None, period_basis="supply_creation_moscow"
-    )
+    return result(items, page["next_cursor"], period_basis="supply_creation_moscow")
 
 
-def _goods(args, request):
+def _goods(args, request, *, include_packages=True):
     limit, offset = args.get("limit", 100), args.get("offset", 0)
     base = SUPPLIES + "/" + str(args["supply_id"])
     page = rows(
@@ -154,7 +145,7 @@ def _goods(args, request):
         for r in page
     ]
     packs = []
-    if not args.get("is_preorder", False):
+    if include_packages and not args.get("is_preorder", False):
         for p in rows(
             request(
                 "GET", base + "/package", group="fbw-package", interval=2, basic_interval=1800, ttl=1800
@@ -183,7 +174,52 @@ def _goods(args, request):
     )
 
 
-def _stats(name, args, request, *, exact_day=False):
+def feed_orders(args, request):
+    from wb_reports import region
+    today = datetime.now(MOSCOW).date()
+    start = max(date.fromisoformat(args["date_from"]), today - timedelta(days=30))
+    if start.isoformat() > args["date_to"]:
+        return result([], complete=False, status="outside_provider_retention", retention_days=31)
+    query = {k: v for k, v in args.items() if k in ("article", "nm_id", "limit")}
+    if "article" in query and "nm_id" not in query:
+        if hasattr(request, "gate_dir"):
+            from expansion_gateway import _mapping
+            mapping = _mapping(args, request.gate_dir)
+            if mapping and mapping["wb_vendor_code"] == query["article"]:
+                query["nm_id"] = mapping.get("wb_nm_id")
+        if not query.get("nm_id"):
+            return result([], complete=False, status="exact_nm_id_required")
+    if "sku" in args:
+        return result([], complete=False, status="barcode_unavailable_in_order_feed")
+    # WB filters on the latest status change. Include all later changes for the creation cohort.
+    query.update(date_from=start.isoformat(), date_to=today.isoformat(), mode="details")
+    query["limit"] = min(query.get("limit", 100), 1000)
+    if args.get("cursor"):
+        tag, anchor, stamp, offset = args["cursor"].split("|")
+        if tag != "feed" or not offset.isascii() or not offset.isdecimal() or len(offset)>8:
+            raise ValueError("Invalid order feed cursor")
+        if anchor != today.isoformat():
+            return result([], complete=False, status="snapshot_period_expired")
+        query.update(snapshot_time=stamp, offset=int(offset))
+    page = region(query, request)
+    out = []
+    for r in page["items"]:
+        when = datetime.fromisoformat(r["created_at"]).astimezone(MOSCOW)
+        if not start.isoformat() <= when.date().isoformat() <= args["date_to"]:
+            continue
+        out.append(dict(r, date=when.isoformat(), quantity=r["units"], cancelled=r["status"]=="cancel",
+                        last_change=r["updated_at"], price_with_discount=r["amount"]))
+    next_page = page["next_cursor"]
+    if next_page is not None:
+        next_page = f"feed|{today.isoformat()}|{page['snapshot_time']}|{next_page}"
+    full_period = start.isoformat() == args["date_from"] and args["date_to"] < today.isoformat()
+    return result(out, next_page, complete=page["complete"] and full_period,
+                  status=page.get("status", "ready" if full_period else "partial_retention"),
+                  source="/api/analytics/v1/order-feed", coverage_from=start.isoformat(), coverage_to=args["date_to"],
+                  source_exhausted=page["complete"], date_basis="order_created_at_moscow")
+
+
+def _stats(name, args, request, *, exact_day=False, feed_start=None):
     sale = name == "wb_sales"
     start = date.fromisoformat(args["date_from"])
     if start < datetime.now(MOSCOW).date() - timedelta(days=90):
@@ -191,6 +227,9 @@ def _stats(name, args, request, *, exact_day=False):
     cursor = args.get("cursor", args["date_from"])
     if not isinstance(cursor, str):
         raise ValueError("Invalid statistics cursor")
+    feed_args = dict(args, date_from=feed_start) if feed_start else args
+    if not sale and cursor.startswith("feed|"):
+        return feed_orders(feed_args, request)
     stamp, _, offset = cursor.partition("|")
     if not re.fullmatch(r"[0-9T:+.Z-]{10,40}", stamp):
         raise ValueError("Invalid statistics cursor")
@@ -198,8 +237,8 @@ def _stats(name, args, request, *, exact_day=False):
     index = int(offset or 0)
     if index < 0:
         raise ValueError("Invalid row offset")
-    page = rows(
-        request(
+    try:
+        data = request(
             "GET",
             STAT + ("sales" if sale else "orders"),
             query={"dateFrom": stamp, "flag": int(exact_day)},
@@ -207,7 +246,14 @@ def _stats(name, args, request, *, exact_day=False):
             basic_interval=7200 if sale else 10800,
             ttl=1800,
         )
-    )
+    except finance_gate.GateError as exc:
+        if sale or exc.reason != "retry_time_unknown" or "cursor" in args:
+            raise
+        fallback = feed_orders(feed_args, request)
+        if fallback.get("status") in ("exact_nm_id_required", "barcode_unavailable_in_order_feed"):
+            fallback.update(fallback_status=fallback["status"], status=exc.reason)
+        return fallback
+    page = rows(data)
     limit = args.get("limit", 100)
     items = []
     for r in page[index : index + limit]:
@@ -395,8 +441,8 @@ def _report(name, args, request):
                 amount=r.get("warehousePrice"),
                 warehouse_price=r.get("warehousePrice"),
                 original_date=r.get("originalDate"),
-                currency=None,
-                currency_basis="not_in_storage_report",
+                currency=r.get("currency") or "RUB",
+                currency_basis="provider_row" if r.get("currency") else "documented_storage_report_rubles",
                 quantity=r.get("barcodesCount"),
                 delivery_id=r.get("giId"),
             )
@@ -421,6 +467,24 @@ def _report(name, args, request):
         return result([], complete=False, status="exact_nm_id_required", task_id=task)
     if hasattr(request, "finish_job"):
         request.finish_job(base, query, task)
+    if name == "wb_paid_storage" and args.get("mode") == "summary":
+        totals, counts = {}, {}
+        for item in items:
+            currency = item["currency"]
+            value = money(item["amount"])
+            counts[currency] = counts.get(currency, 0) + 1
+            if value is None:
+                issues.add("missing_storage_amount")
+                totals[currency] = None
+            elif totals.get(currency, 0) is not None:
+                totals[currency] = totals.get(currency, Decimal(0)) + value
+        if not items:
+            totals["RUB"], counts["RUB"] = Decimal(0), 0
+        summary = [{"currency": code, "amount": str(total) if total is not None else None,
+                    "source_rows": counts[code]} for code, total in sorted(totals.items())]
+        return result(summary, complete=not issues, issues=sorted(issues), status="partial_report" if issues else "ready",
+                      task_id=task, summary_scope="report_period", period=query,
+                      currency_documentation="https://seller.wildberries.ru/instructions/ru/ru/material/paid-storage-report")
     report = _slice(items, args, status="ready", task_id=task, quantity_unit="pcs")
     if issues:
         report.update(complete=False, status="partial_report", issues=sorted(issues))
@@ -511,6 +575,18 @@ def finance_summary(items):
     return summary
 
 
+def finance_rows(page, args):
+    items, unallocated = [], []
+    for r in page:
+        row = dict(_item(r), **{k: r.get(v) for k, v in FIN_FIELDS.items()})
+        row["barcode"] = row["sku"] = r.get("sku")
+        if not row["article"] and not row["nm_id"]:
+            unallocated.append(row)
+        elif matches(row, args):
+            items.append(row)
+    return items, unallocated
+
+
 def _finance(args, request):
     cursor = int(args.get("cursor", 0))
     if cursor < 0:
@@ -526,14 +602,7 @@ def _finance(args, request):
     if raw is None:
         return result([], summary=[], status="end_of_report")
     page = rows(raw)
-    items, unallocated = [], []
-    for r in page:
-        row = dict(_item(r), **{k: r.get(v) for k, v in FIN_FIELDS.items()})
-        row["barcode"] = row["sku"] = r.get("sku")
-        if not row["article"] and not row["nm_id"]:
-            unallocated.append(row)
-        elif matches(row, args):
-            items.append(row)
+    items, unallocated = finance_rows(page, args)
     ids = [r.get("rrdId") for r in page]
     if (
         not ids

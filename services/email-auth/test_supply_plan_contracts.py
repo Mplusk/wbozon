@@ -190,7 +190,7 @@ class SupplyPlanContracts(unittest.TestCase):
         wb_row, = platforms['wb']['locations']
         self.assertEqual(wb_row['available_units'], 3)
         self.assertIsNone(wb_row['inbound_units'])
-        self.assertEqual(Decimal(wb_row['orders_per_day']['30']), Decimal(8) / 30)
+        self.assertEqual(wb_row['orders_per_day']['30'], '0.2667')
         self.assertEqual(wb_row['recommended_quantity'], 3)
         transit = {row['kind']: row['quantity'] for row in platforms['wb']['reported_transit']}
         self.assertEqual(transit, {'in_transit_to_customer': 42, 'returning_from_customer': 9})
@@ -247,7 +247,7 @@ class SupplyPlanContracts(unittest.TestCase):
                         self.assertEqual(total['ordered_units'][days], gross)
                         self.assertEqual(total['cancelled_units'][days], cancelled)
                         self.assertEqual(total['ordered_units_after_known_cancellations'][days], gross - cancelled)
-                    self.assertEqual(Decimal(total['orders_per_day']['30']), Decimal(gross) / 30)
+                self.assertEqual(Decimal(total['orders_per_day']['30']), (Decimal(gross) / 30).quantize(Decimal('0.0001')))
         self.assertEqual(platforms['wb']['excluded_seller_warehouse_units'], 1)
 
     def test_missing_cancellation_status_only_affects_enclosing_windows(self):
@@ -284,6 +284,7 @@ class SupplyPlanContracts(unittest.TestCase):
         wire = ozon_wire()
         stock = wire.exchanges[1][2]['items']
         stock[:] = [s for s in stock if s['warehouse_id'] != 712]
+        wire.exchanges.append(('POST', OZON + '/v1/cluster/list', {'clusters': []}))
         result = supply_plan.read(ARGS, {'ozon': wire}, MAPPING)
         ozon, = (p for p in result['items'] if p['marketplace'] == 'ozon')
         self.assertFalse(ozon.get('cluster_coverage_complete', ozon['complete']))
@@ -372,6 +373,8 @@ class SupplyPlanContracts(unittest.TestCase):
                 stocks[:] = [s for s in stocks if s['sku'] == 101]
                 products = wire.exchanges[2][2]['postings'][0]['products']
                 products[:] = [p for p in products if p['sku'] != 102]
+                if not complete:
+                    wire.exchanges.append(('POST', OZON + '/v1/cluster/list', {'clusters': []}))
                 platform = supply_plan.read(ARGS, {'ozon': wire}, MAPPING)['items'][0]
                 self.assertEqual(platform['complete'], complete)
                 self.assertEqual(platform['marketplace_total']['ordered_units']['30'], 15)

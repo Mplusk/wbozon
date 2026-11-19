@@ -81,6 +81,7 @@ def identity(args, wires, mapping):
                     "product_id": card["product_id"],
                     "name": card["name"],
                     "skus": card["sku_candidates"],
+                    "source": card.get("identity_source", "/v3/product/info/list"),
                 }
             ]
             if card
@@ -236,6 +237,12 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
                 "complete",
                 "issues",
                 "unallocated_rows",
+                "source",
+                "summary_scope",
+                "rows_observed",
+                "reports_completed",
+                "reports_listed",
+                "missing_dates",
                 "http_status",
                 "retry_after_seconds",
             )
@@ -250,6 +257,11 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
         sources["wb"]["advertising"] = {
             k: ad.get(k) for k in ("status", "complete", "scope", "http_status")
         }
+        if not data.get("items"):
+            row = unit_row("wb", article, None, None, None, {})
+            row.update(source_period_complete=bool(data.get("complete")),
+                       status="no_attributed_financial_rows" if data.get("complete") else data.get("status", "pending"))
+            items.append(row)
         for row in data.get("items", []):
             a = row["amounts"]
 
@@ -279,6 +291,7 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
                     args.get("currency"),
                 )
             )
+            items[-1]["source_period_complete"] = bool(data.get("complete"))
     if "ozon" in wires:
         article = mapping["ozon_offer_id"]
         data = observed(
@@ -457,10 +470,7 @@ def _comparison_extra(wire, read):
         wire.deadline = deadline
 
 
-def verified_comparison(args, wires, seller_mapping, identity_report):
-    if identity_report["complete"]:
-        return comparison(args, wires, identity_report["mapping"])
-
+def verified_accounts(args, wires, seller_mapping, identity_report):
     catalogs = identity_report["items"][0]
     verified_wires, verified_ids, unavailable = {}, {}, {}
     for provider, field in (("ozon", "ozon_offer_id"), ("wb", "wb_vendor_code")):
@@ -479,6 +489,13 @@ def verified_comparison(args, wires, seller_mapping, identity_report):
             verified_ids["wb_nm_id"] = rows[0]["nm_id"]
         elif "performance" in wires:
             verified_wires["performance"] = wires["performance"]
+    return verified_wires, verified_ids, unavailable
+
+
+def verified_comparison(args, wires, seller_mapping, identity_report):
+    if identity_report["complete"]:
+        return comparison(args, wires, identity_report["mapping"])
+    verified_wires, verified_ids, unavailable = verified_accounts(args, wires, seller_mapping, identity_report)
     if not verified_wires:
         return identity_report
     data = comparison(args, verified_wires, verified_ids)

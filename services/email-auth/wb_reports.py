@@ -17,6 +17,29 @@ def _ids(args):
 
 
 def funnel_history(args, request):
+    if args["group_by"] == "week":
+        start, end = date.fromisoformat(args["date_from"]), date.fromisoformat(args["date_to"])
+        week_start, offset = start, args.get("offset", 0)
+        if args.get("cursor"):
+            date_text, sep, page = args["cursor"].partition("|")
+            week_start = date.fromisoformat(date_text)
+            if (not sep or not page.isascii() or not page.isdecimal() or len(page) > 8
+                    or not start <= week_start <= end or (week_start != start and week_start.weekday() != 0)):
+                raise ValueError("Invalid weekly funnel cursor")
+            offset = int(page)
+        week_end = min(end, week_start + timedelta(days=6-week_start.weekday()))
+        query = {k: v for k, v in args.items() if k not in ("group_by", "cursor")}
+        query.update(date_from=week_start.isoformat(), date_to=week_end.isoformat(), offset=offset)
+        page = wb._funnel(query, request)
+        next_product = page["next_cursor"]
+        if not page["complete"] and next_product is None:
+            return page
+        next_week = week_end + timedelta(days=1)
+        cursor = (f"{week_start}|{next_product}" if next_product is not None
+                  else f"{next_week}|0" if next_week <= end else None)
+        return result([dict(row, week_from=week_start.isoformat(), week_to=week_end.isoformat())
+                       for row in page["items"]], cursor, aggregation="week", date_basis="order_date_moscow",
+                      source="/api/analytics/v3/sales-funnel/products", cursor_parameter="cursor")
     ids = _ids(args)
     if not 1 <= len(ids) <= 20:
         return result([], complete=False, status="select_1_to_20_products")
@@ -150,6 +173,10 @@ def region(args, request):
             currency=data.get("currency"),
             updated_at=iso(r["updatedAt"]),
             created_at=iso(r["createdAt"]),
+            srid=ident,
+            warehouse=r.get("warehouseName"),
+            warehouse_type=("Склад продавца" if r["isMp"] else "Склад WB") if type(r.get("isMp")) is bool else None,
+            is_b2b=r.get("isB2b"),
         )
         items.append(row)
         key = row["region"], row["city"], row["status"], row["currency"], row["nm_id"]

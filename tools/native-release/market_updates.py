@@ -2,6 +2,7 @@
 
 import hashlib
 import http.client
+import http.cookiejar
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import tempfile
 from datetime import datetime, timezone
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 WB = "https://dev.wildberries.ru/api/swagger/yaml/ru/"
 SOURCES = {
@@ -47,7 +49,8 @@ def main():
             headers = {"User-Agent": "wbozon-schema-monitor/2"}
             if prev.get("etag"):
                 headers["If-None-Match"] = prev["etag"]
-            with urllib.request.urlopen(
+            opener = urllib.request.build_opener(PublisherRedirect(), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+            with opener.open(
                 urllib.request.Request(url, headers=headers), timeout=18
             ) as response:
                 raw = response.read(20 * 1024 * 1024 + 1)
@@ -84,6 +87,14 @@ def main():
                 for k, v in records.items()
             },
         )
+
+
+class PublisherRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        src, dst = urlsplit(req.full_url), urlsplit(newurl)
+        if dst.scheme != "https" or dst.netloc != src.netloc or dst.username:
+            raise urllib.error.HTTPError(req.full_url, code, "Unexpected publisher redirect", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 if __name__ == "__main__":

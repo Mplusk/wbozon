@@ -20,7 +20,7 @@ def main():
         "wb_availability",
     )
     for dataset in datasets:
-        connection = http.client.HTTPConnection("127.0.0.1", settings["port"], timeout=24)
+        connection = http.client.HTTPConnection("127.0.0.1", settings["port"], timeout=50)
         try:
             body = json.dumps({"operation": "archive_market_day", "arguments": {"dataset": dataset}})
             connection.request(
@@ -35,7 +35,7 @@ def main():
             )
             reply = connection.getresponse()
             raw = reply.read(2048)
-            if reply.status in (400, 401, 404, 503):
+            if reply.status in (401, 403):
                 return
             status = json.loads(raw).get("status") if reply.status == 200 else str(reply.status)
             print(
@@ -46,7 +46,7 @@ def main():
                 flush=True,
             )
         except (OSError, ValueError, http.client.HTTPException):
-            return
+            print(dataset, "archive_request_incomplete", flush=True)
         finally:
             connection.close()
 

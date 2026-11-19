@@ -6,7 +6,7 @@ ConditionPathExists=/etc/3dprinta-portal/api-client-token
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 -B -I /usr/local/libexec/wbozon-cd/archive_client.py
-TimeoutStartSec=150
+TimeoutStartSec=330
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict

@@ -6,11 +6,25 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 import urllib.error
 
+import market_cooldown
 import ozon_fbo
 import ozon_details
 from market_specs import iso, matches, money, result, rows, select, validate
 
 BASE = "https://api-seller.ozon.ru"
+
+
+def cluster_directory(request, cluster_type="CLUSTER_TYPE_OZON", cluster_id=None):
+    body = {"cluster_type": cluster_type}
+    if cluster_id is not None:
+        body["cluster_ids"] = [int(cluster_id)]
+    raw = request("POST", BASE + "/v1/cluster/list", body=body, ttl=1800)
+    groups = []
+    for cluster in rows(raw.get("clusters")):
+        warehouses = [select(w, "warehouse_id name type") for group in rows(cluster.get("logistic_clusters", []))
+                      for w in rows(group.get("warehouses", []))]
+        groups.append(dict(select(cluster, "id name type macrolocal_cluster_id"), warehouses=warehouses))
+    return groups
 
 
 def _page(raw, previous):
@@ -36,7 +50,24 @@ def _range(args):
 
 
 def _article_card(article, request):
-    raw = request("POST", BASE + "/v3/product/info/list", body={"offer_id": [article]}, ttl=1800)
+    try:
+        raw = request("POST", BASE + "/v3/product/info/list", body={"offer_id": [article]}, ttl=1800)
+        source = "/v3/product/info/list"
+    except market_cooldown.MethodLimited as exc:
+        if exc.reason != "retry_time_unknown":
+            raise
+        # The attribute and stock reports identify the same offer independently.
+        filters = {"filter": {"offer_id": [article], "visibility": "ALL"}, "limit": 100}
+        attributes = request("POST", BASE + "/v4/product/info/attributes", body=filters, ttl=1800)
+        inventory = request("POST", BASE + "/v4/product/info/stocks", body=filters, ttl=1800)
+        cards, stock = rows(attributes.get("result")), rows(inventory.get("items"))
+        if (len(cards) != 1 or len(stock) != 1 or cards[0].get("offer_id") != article
+                or stock[0].get("offer_id") != article or not cards[0].get("id")
+                or str(stock[0].get("product_id")) != str(cards[0]["id"])):
+            return None
+        schemes = [{"sku": item.get("sku"), "source": item.get("type")} for item in rows(stock[0].get("stocks"))]
+        raw = {"items": [dict(cards[0], sources=schemes)]}
+        source = "/v4/product/info/attributes + /v4/product/info/stocks"
     identity = ozon_details._products({"offer_ids": [article]}, raw, None)
     cards = identity["items"]
     if (
@@ -48,7 +79,7 @@ def _article_card(article, request):
         return None
     if set(cards[0]["incomplete_fields"]) & {"sku", "sources", "stock_sources"}:
         return None
-    return cards[0]
+    return dict(cards[0], identity_source=source)
 
 
 def lookup(article, request):
@@ -93,9 +124,10 @@ def _orders(args, request):
     orders, issues = [], list(listed["issues"])
     if listed["order_ids"]:
         body = {"order_ids": listed["order_ids"]}
-        detail = request("POST", BASE + ozon_fbo.ENDPOINTS[ozon_fbo.GET], body=body, interval=2, ttl=120)
-        parsed = ozon_fbo.project_response(ozon_fbo.GET, body, detail)
+        parsed = _order_details(body, request)
         orders, issues = parsed["orders"], issues + parsed["issues"]
+        if parsed.get("pending"):
+            return result([], complete=False, status="pending", issues=issues)
     return result(
         orders,
         listed["next_cursor"],
@@ -103,6 +135,26 @@ def _orders(args, request):
         issues=issues,
         period_basis="timeslot_start_utc",
     )
+
+
+def _order_details(body, request):
+    try:
+        raw = request("POST", BASE + ozon_fbo.ENDPOINTS[ozon_fbo.GET], body=body, interval=2, ttl=120)
+        return ozon_fbo.project_response(ozon_fbo.GET, body, raw)
+    except market_cooldown.MethodLimited as exc:
+        if exc.reason != "retry_time_unknown":
+            raise
+    ids = body["order_ids"]
+    ctx = request.progress("ozon-order-details-v1", ids) if hasattr(request, "progress") else nullcontext(({}, lambda *a: None))
+    with ctx as (saved, save):
+        state = saved or {"orders": [], "issues": []}
+        for ident in ids[len(state["orders"]):][:3]:
+            raw = request("POST", BASE + "/v1/supply-order/details", body={"order_id": int(ident)}, interval=2, ttl=1800)
+            parsed = ozon_fbo.project_response(ozon_fbo.GET, {"order_ids": [ident]}, {"orders": [raw]})
+            state["orders"].extend(parsed["orders"])
+            state["issues"].extend(parsed["issues"])
+            save(state, 1800)
+        return dict(state, pending=len(state["orders"]) != len(ids))
 
 
 def _items(args, request):
@@ -136,8 +188,7 @@ def _items(args, request):
         return output
     sid, oid = str(args["supply_id"]), str(args["order_id"])
     detail_args = {"order_ids": [oid]}
-    raw = request("POST", BASE + ozon_fbo.ENDPOINTS[ozon_fbo.GET], body=detail_args, interval=2, ttl=120)
-    orders = ozon_fbo.project_response(ozon_fbo.GET, detail_args, raw)["orders"]
+    orders = _order_details(detail_args, request)["orders"]
     supplies = [s for order in orders for s in order["supplies"] or [] if str(s["supply_id"]) == sid]
     if len(supplies) != 1 or supplies[0]["bundle_id"] != args["bundle_id"]:
         output.update(acceptance_status="supply_bundle_mismatch", complete=False)
@@ -236,6 +287,7 @@ def _stocks(name, args, request):
         return request.stock_history(args)
     skus = args.get("skus", [args["sku"]] if "sku" in args else [])
     fbs_only = set()
+    card = None
     if not skus and "article" in args:
         card = _article_card(args["article"], request)
         if card:
@@ -261,6 +313,8 @@ def _stocks(name, args, request):
         sku = str(row["sku"])
         if sku not in expected:
             raise ValueError("Unexpected SKU in stock report")
+        if card and not row["article"]:
+            row.update(article=card["offer_id"], offer_id=card["offer_id"], article_basis="verified_catalog_sku")
         if any(str(row[k]) != str(args[k]) for k in ("warehouse_id", "cluster_id") if k in args):
             raise ValueError("Unexpected stock location")
         position = (sku, str(row["warehouse_id"]))
@@ -389,6 +443,7 @@ def _geo(args, request):
                 **select(f, "cluster_from cluster_to"),
                 status=p.get("status"),
                 posting_number=p.get("posting_number"),
+                order_id=p.get("order_id") or p.get("order_number"),
                 created_at=iso(p.get("created_at")),
                 in_process_at=iso(p.get("in_process_at")),
             )
@@ -716,19 +771,14 @@ def read(name, args, request):
             return _cash_summary(args, request)
         return _cash(args, request)
     if name == "ozon_clusters":
-        body = {"cluster_type": args.get("cluster_type", "CLUSTER_TYPE_OZON")}
-        if "cluster_id" in args:
-            body["cluster_ids"] = [int(args["cluster_id"])]
-        data = request("POST", BASE + "/v1/cluster/list", body=body, ttl=1800)
-        items = []
-        for c in rows(data.get("clusters")):
-            warehouses = [
-                select(w, "warehouse_id name type")
-                for group in rows(c.get("logistic_clusters", []))
-                for w in rows(group.get("warehouses", []))
-            ]
-            items.append(dict(select(c, "id name type macrolocal_cluster_id"), warehouses=warehouses))
-        return result(items)
+        clusters = cluster_directory(request, args.get("cluster_type", "CLUSTER_TYPE_OZON"), args.get("cluster_id"))
+        if args.get("mode") == "details":
+            items = [dict(w, cluster_id=c["id"], cluster_name=c["name"]) for c in clusters for w in c["warehouses"]]
+        else:
+            items = [dict(c, warehouse_count=len(c["warehouses"]), warehouses=c["warehouses"][:3]) for c in clusters]
+        offset, limit = args.get("offset", 0), min(args.get("limit", 50), 100)
+        return result(items[offset:offset+limit], offset+limit if offset+limit < len(items) else None,
+                      total=len(items), cursor_parameter="offset", warehouse_preview_limit=3 if args.get("mode")!="details" else None)
     if name == "ozon_reviews":
         start = (
             date.fromisoformat(args["date_from"]) - timedelta(days=1)

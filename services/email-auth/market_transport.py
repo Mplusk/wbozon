@@ -47,10 +47,12 @@ SELLER_READS = frozenset(
     (
         "/v3/supply-order/list",
         "/v3/supply-order/get",
+        "/v1/supply-order/details",
         "/v1/supply-order/bundle",
         "/v1/supply-order/act/product/get",
         "/v1/supply-order/act/summary/get",
         "/v3/product/info/list",
+        "/v4/product/info/attributes",
         "/v4/product/info/stocks",
         "/v1/analytics/stocks",
         "/v1/analytics/turnover/stocks",
