@@ -44,7 +44,7 @@ def admission(service, work, phase, state):
         challenge = base64.urlsafe_b64encode(hashlib.sha256(state['verifier'].encode()).digest()).rstrip(b'=').decode()
         ticket, nonce, _, _ = oauth.begin(dict(client_id=state['client'], redirect_uri=REDIRECT,
             response_type='code', code_challenge=challenge, code_challenge_method='S256',
-            state='fixture', scope='mcp:read', resource=RESOURCE), RESOURCE)
+            state='fixture', scope='mcp:read mcp:propose' if key_id.startswith('cp_') else 'mcp:read', resource=RESOURCE), RESOURCE)
         return oauth.approve(ticket, nonce, key_id)[0]
 
     def redeem(code):
@@ -68,7 +68,7 @@ def admission(service, work, phase, state):
     assert listed(state['legacy'][1]) == listed(state['old_oauth']['access_token']) == legacy
     if phase == 'issue':
         state['scoped'] = {}
-        for access in ('avito','all'):
+        for access in (('catalog_read','catalog_operations') if state.get('catalog') else ('avito','all')):
             key_id, bearer = keys.create(access,secrets.token_urlsafe(16),NOW,access)
             state['scoped'][access] = [key_id,bearer,redeem(code_for(key_id)),code_for(key_id)]
     for access, (key_id,bearer,tokens,unused) in state.get('scoped',{}).items():
@@ -82,8 +82,12 @@ def admission(service, work, phase, state):
                 else:
                     raise AssertionError('previous service accepted a scoped grant')
         else:
-            import avito_mcp
-            expected = set(avito_mcp.CONTRACTS) | (legacy if access == 'all' else set())
+            if state.get('catalog'):
+                import market_catalog
+                expected=set(market_catalog.available(access))
+            else:
+                import avito_mcp
+                expected = set(avito_mcp.CONTRACTS) | (legacy if access == 'all' else set())
             assert listed(bearer) == listed(tokens['access_token']) == expected
             if phase == 'resume':
                 new = refresh(tokens)
@@ -99,9 +103,12 @@ def main():
         state = json.load(sys.stdin)
         json.dump(admission(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4], state), sys.stdout)
         return
-    old, candidate = (Path(path).resolve(strict=True) for path in sys.argv[1:])
+    old, candidate = (Path(path).resolve(strict=True) for path in sys.argv[1:3])
+    catalog=sys.argv[3:]==['--catalog']
+    if len(sys.argv)>3 and not catalog:
+        raise ValueError('Invalid arguments')
     with tempfile.TemporaryDirectory() as work:
-        state = '{}'
+        state = json.dumps({'catalog':catalog})
         for service, phase in ((old,'legacy'),(candidate,'issue'),(old,'rollback'),(candidate,'resume')):
             command = [sys.executable,'-B','-I',__file__,'--child',str(service),work,phase]
             state = subprocess.run(command,input=state,text=True,stdout=subprocess.PIPE,check=True).stdout

@@ -60,6 +60,7 @@ SELLER_READS = frozenset(
         "/v1/analytics/data",
         "/v3/posting/fbo/list",
         "/v3/posting/fbs/list",
+        "/v4/posting/fbs/list",
         "/v1/finance/cash-flow-statement/list",
         "/v1/cluster/list",
         "/v2/review/list",
@@ -524,6 +525,27 @@ class Wire:
 
     def _analytics_budget(self):
         market_cooldown._analytics_slot(self.gate_dir, self.creds)
+
+    def admit_catalog(self, host, path, group, interval):
+        # Match the existing reports' credential slot and the documented
+        # shared bucket, which also survives a token change in this cabinet.
+        legacy=path
+        if host=='supplies-api.wildberries.ru' and '{' in path:
+            legacy='fbw-goods' if path.endswith('/goods') else 'fbw-package' if path.endswith('/package') else 'fbw-detail'
+        elif host=='feedbacks-api.wildberries.ru' and '/feedbacks' in path:
+            legacy='feedbacks'
+        elif '/tasks/{' in path:
+            legacy=path.split('/tasks/')[0].rsplit('/',1)[-1]+'-'+path.rsplit('/',1)[-1]
+        keys=(_id([self.scope,host,legacy]),_id(['catalog-cabinet',host,group]))
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            now=time.time()
+            until,unknown=db.execute('SELECT MAX(until_at),MAX(unknown) FROM quota WHERE k IN (?,?)',keys).fetchone()
+            if unknown:
+                raise finance_gate.GateError('retry_time_unknown')
+            if until and until>now:
+                raise finance_gate.GateError('cooldown',max(1,math.ceil(until-now)))
+            db.executemany('INSERT OR REPLACE INTO quota VALUES(?,?,0)',[(k,now+interval) for k in keys])
 
     def _check_active(self, db, key):
         slot = _id([self.scope, "active-report"])

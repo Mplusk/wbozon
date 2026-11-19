@@ -477,8 +477,8 @@ class OrderShareContracts(unittest.TestCase):
                         return {'postings': [posting(1, 101), posting(2, 102)], 'has_next': True, 'cursor': 'next'}
                     if body['cursor'] == 'next':
                         return {'postings': [posting(1, 101), posting(3, 101)], 'has_next': False, 'cursor': ''}
-                if url.endswith('/v3/posting/fbs/list') and body['offset'] == 0:
-                    return {'result': {'postings': [posting(2, 102), posting(1, 101)], 'has_next': False}}
+                if url.endswith('/v4/posting/fbs/list') and body['cursor'] == '':
+                    return {'postings': [posting(2, 102), posting(1, 101)], 'has_next': False}
                 raise AssertionError('unexpected synthetic order request')
         wire = Wire()
         counts, issue = expansion_gateway._ozon_order_counts(wire, ARGS, {'101', '102'})
@@ -518,7 +518,7 @@ class OrderShareContracts(unittest.TestCase):
                 def progress(self, *_): yield {}, lambda *_: None
                 def __call__(self, method, url, *, body, **kwargs):
                     if url.endswith('/fbs/list'):
-                        return {'result': {'postings': [], 'has_next': False}}
+                        return {'postings': [], 'has_next': False}
                     post = {'order_id': 1, 'products': [{'sku': 101}]}
                     if malformed == 'missing_order_id': post.pop('order_id')
                     if malformed == 'unknown_product': post['products'] = [{'sku': None}]
@@ -534,7 +534,7 @@ class OrderShareContracts(unittest.TestCase):
             @contextmanager
             def progress(self, *_): yield {}, lambda *_: None
             def __call__(self, method, url, *, body, **kwargs):
-                if url.endswith('/fbs/list'): return {'result': {'postings': [], 'has_next': False}}
+                if url.endswith('/fbs/list'): return {'postings': [], 'has_next': False}
                 def post(number, order):
                     return {'posting_number': number, 'order_id': order, 'products': [{'sku': 101, 'quantity': 1}]}
                 return {'postings': [post('same', 1), post('same', 2), post('other', 1)], 'has_next': False}

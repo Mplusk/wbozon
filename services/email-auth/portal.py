@@ -13,6 +13,7 @@ from app import LoginApp, smtp_mailer
 import ozon_mcp, ozon_details, ozon_article_summary, wb_mcp, external_keys, external_mcp, oauth_mcp, finance_gate
 import market_specs
 import avito_mcp
+import market_actions, market_catalog
 import expansion_gateway
 import market_health, market_history
 import market_archive
@@ -348,7 +349,7 @@ def _read_article_summary(args,creds,deadline):
 PROVIDER_DEADLINE_SECONDS = 20
 PROVIDER_WORKER = os.path.realpath(__file__)
 
-def provider_read(operation, args, creds, finance_gate_dir=None):
+def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=None):
     """Bound the entire provider operation, including DNS and response reads.
 
     Credentials go over a private stdin pipe, never argv or the environment.
@@ -373,7 +374,7 @@ def provider_read(operation, args, creds, finance_gate_dir=None):
         deadline=started+max(0,PROVIDER_DEADLINE_SECONDS-2)
         process = subprocess.run([sys.executable, PROVIDER_WORKER, '--provider-worker'],
             input=json.dumps({'operation':operation, 'args':args, 'creds':creds,
-                              'finance_gate_dir':finance_gate_dir,'deadline_monotonic':deadline}).encode(),
+                              'finance_gate_dir':finance_gate_dir,'deadline_monotonic':deadline,'dispatch':dispatch}).encode(),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=PROVIDER_DEADLINE_SECONDS,
             env=env, check=False)
     except subprocess.TimeoutExpired as exc:
@@ -446,6 +447,13 @@ def _provider_worker():
             if type(deadline) not in (int,float) or not math.isfinite(deadline) or deadline < 0:
                 raise ValueError('Invalid provider deadline')
         def read():
+            if request['operation'] in ('market_api_read','market_api_propose'):
+                from contextlib import nullcontext
+                gate=(market_actions.transmission(request.get('dispatch'),request['args'])
+                      if request['operation']=='market_api_propose' else nullcontext())
+                with gate:
+                    return market_catalog.transfer(request['operation'],request['args'],request['creds'],
+                                                   request['finance_gate_dir'],request['deadline_monotonic'])
             if request['operation'] in avito_mcp.CONTRACTS:
                 return avito_mcp.read(request['operation'], request['args'], request['creds'],
                                       request['finance_gate_dir'], request['deadline_monotonic'])
@@ -592,6 +600,7 @@ def render_preview(provider, result, fetched_at, sensitive_values=(), lookup_nm_
     return document(title,content)
 
 class Portal:
+    native_provider = staticmethod(provider_read)
     def __init__(self, login, vault, read_token_hash, gateway=provider_read, mcp_read_token_hash=None, external_key_store=None, oauth_store=None, finance_gate_dir=None):
         if not re.fullmatch(r'[0-9a-f]{64}',read_token_hash): raise ValueError('Expected SHA256 token hash')
         if mcp_read_token_hash is not None and (not re.fullmatch(r'[0-9a-f]{64}',mcp_read_token_hash) or hmac.compare_digest(read_token_hash,mcp_read_token_hash)):
@@ -685,7 +694,7 @@ class Portal:
                     present=c.execute('SELECT 1 FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),self.login.clock())).fetchone()
                 if present:
                     start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
-        if path not in OAUTH_PATHS and path not in ('/settings','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/mcp','/api/read','/healthz'):
+        if path not in OAUTH_PATHS and path not in ('/settings','/settings/catalog','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/mcp','/api/read','/healthz'):
             return self.login(e,start)
         def reply(text,code='200 OK',json_response=False,extra_headers=()):
             if not json_response and not text.lstrip().lower().startswith('<!doctype'): text=document('Кабинет', '<main id="content" class="error-card"><h1>Кабинет</h1><p>'+text+'</p></main>')
@@ -696,17 +705,36 @@ class Portal:
             return oauth_mcp.handle(e,start,self.oauth,self.external_keys,self.login.origin)
         if path=='/mcp':
             def authenticate(token):
-                key_id=self.external_keys.check_token(token) or self.oauth.verify(token,self.login.origin+'/mcp')
-                return key_id if key_id and self.external_keys.mark_used(key_id,self.login.clock()) else None
+                key_id=self.external_keys.check_token(token)
+                grant=(key_id,external_keys.access_for_key(key_id)) if key_id else self.oauth.verify_access(token,self.login.origin+'/mcp')
+                return grant if grant and self.external_keys.mark_used(grant[0],self.login.clock()) else None
             def execute(key_id,operation,args):
+                creds={}
                 try:
                     if not self.login.permit('external-mcp:'+key_id,30,60) or not self.login.permit('api',30,60):
                         raise external_mcp.MCPToolError('rate_limited')
-                    creds=(self.vault.read('avito') if operation in avito_mcp.CONTRACTS else
+                    if operation=='market_api_search':
+                        return market_catalog.search(args)
+                    if operation=='market_api_describe':
+                        return market_catalog.describe(args['operation_id'])
+                    if operation=='market_api_propose':
+                        return market_actions.Store(self).propose(key_id,args)
+                    if operation=='market_api_status':
+                        return market_actions.Store(self).status(key_id,args['proposal_id'])
+                    creds=(market_catalog.read_credentials(self.vault,market_catalog.routes()[args['operation_id']]) if operation=='market_api_read'
+                           else self.vault.read('avito') if operation in avito_mcp.CONTRACTS else
                            expansion_gateway.credentials(self.vault,operation))
                     if not creds and operation!='mcp_health': raise external_mcp.MCPToolError('not_configured')
                     return self.read_gateway(operation,args,creds)
+                except market_actions.ActionError as exc:
+                    return {'status':'action_unavailable','reason':str(exc)}
                 except urllib.error.HTTPError as exc:
+                    if operation=='market_api_read' and exc.code!=429:
+                        status=exc.code
+                        exc.close()
+                        return {'status':'provider_error','http_status':status,'reason':{400:'invalid_provider_parameters',
+                                401:'provider_credentials',402:'provider_subscription_required',403:'provider_access_denied',
+                                404:'provider_resource_not_found',422:'provider_validation_failed'}.get(status,'provider_replied')}
                     code='provider_access_denied' if exc.code in (401,403) else 'rate_limited' if exc.code==429 else 'unavailable'
                     delay=getattr(exc,'retry_after_seconds',None) if exc.code==429 else None
                     if exc.code==429 and delay is None: delay,_=finance_gate.parse_retry_after(exc.headers)
@@ -840,6 +868,15 @@ class Portal:
         except sqlite3.Error:
             return reply('Сервис временно недоступен. Повторите позже. <a href="/settings">Настройки</a>','503 Service Unavailable')
         if not session: return reply('Войдите заново на главной странице.','401 Unauthorized')
+        if path=='/settings/catalog':
+            try:
+                return market_actions.handle(self,e,method,session,now,body,reply,start)
+            except market_actions.ActionError as exc:
+                return reply(html.escape(str(exc))+' <a href="/settings/catalog">Операции</a>','409 Conflict')
+            except (ValueError,TypeError,UnicodeError):
+                return reply('Проверьте параметры запроса.','400 Bad Request')
+            except (sqlite3.Error,OSError):
+                return reply('Хранилище операций временно недоступно.','503 Service Unavailable')
         if path in ('/settings/mcp/create','/settings/mcp/revoke'):
             if method!='POST': return reply('Method not allowed','405 Method Not Allowed')
             if e.get('HTTP_ORIGIN')!=self.login.origin: return reply('Forbidden','403 Forbidden')
@@ -852,6 +889,8 @@ class Portal:
                 if path=='/settings/mcp/create':
                     if set(form) not in ({'csrf','request_id','name'}, {'csrf','request_id','name','access'}): raise ValueError()
                     access=form.get('access','marketplaces')
+                    if access.startswith('catalog_') and session[0]-43200 < now-300:
+                        return reply('Для выдачи доступа к полному каталогу войдите заново по ссылке из письма.','403 Forbidden')
                     name=form['name'].strip()
                     _,token=self.external_keys.create(name,form['request_id'],now,access)
                     return reply(document('Ключ создан',external_keys.render_created(name,token,self.login.origin,access)))
@@ -940,12 +979,17 @@ class Portal:
                 form={k:v[0] for k,v in form.items()}
                 csrf=form.get('csrf',''); provider=form.get('provider','')
                 if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
-                fields=(('client_id','client_secret') if provider in ('avito','performance') else ('api_token',)
-                        if provider in market_health.WB_CATEGORIES else FIELDS.get(provider))
+                fields=FIELDS.get(provider)
+                if provider in ('avito','performance'):
+                    fields=('client_id','client_secret')
+                elif provider in market_health.WB_CATEGORIES or provider=='wb_write' or provider in {v[0] for v in market_catalog.WB_EXTRA.values()}:
+                    fields=('api_token',)
+                elif provider=='ozon_write':
+                    fields=FIELDS['ozon']
                 if not fields or set(form)!=set(fields)|{'csrf','provider'}: raise ValueError()
                 values={k:form[k] for k in fields}
                 if any(not re.fullmatch(r'[!-~]{1,2048}',v) for v in values.values()): raise ValueError()
-                if provider=='ozon' and not re.fullmatch(r'[0-9]{1,32}',values['client_id']): raise ValueError()
+                if provider in ('ozon','ozon_write') and not re.fullmatch(r'[0-9]{1,32}',values['client_id']): raise ValueError()
                 if provider=='avito' and len(values['client_id']) > 128: raise ValueError()
                 if provider == 'wb' or provider in market_health.WB_CATEGORIES:
                     from market_transport import remember_wb_feed_credentials

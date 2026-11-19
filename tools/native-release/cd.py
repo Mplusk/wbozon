@@ -25,6 +25,7 @@ CONFIG = '/etc/wbozon-cd.json'
 SCOPED_BACKUP_SECONDS = 5
 # Table columns, constraints and unique indexes created by the reviewed KeyStore.
 SCOPED_KEYS_SCHEMA = '01adb0bd15e847f9d1fadccb4b45169c0271bb00a15f7667d69d796787278723'
+ACTION_SCHEMA = '990bf1ca3f3cd956f47988c1b16ad9bfe6d60ca16c2fc8fb5eed8f6933bf7ac1'
 
 MARKET_BASE = 'b543e1568394095a20f14213feb3a194a456716c70d43b95c06b33c98cd32aed'
 MARKET_BRIDGE = '4fbd8858010f37f39b7676c4b34fede5526aa56623569bbc231e77524edce0cf'
@@ -39,6 +40,7 @@ MARKET_V2_REPORT_FIX = '85d5b8a840f480678fe83fbf3bbd301a8db75d0910b8dfb39dfdce5f
 MARKET_REPORT_SUCCESSORS = (
     'ea75c8c64e6a3295f2c3e4c8e483b15e7194e89bb300587ff9b936bf04e18dba',
     '013c84e6a33beb009e7498468adbbe43950835cba416fd6ee690bf5b89f50a0f',
+    '6f869913808cef6edc5c89cae97c87bd679e675688c3adeeffe7fbe1250fd25d',
 )
 
 
@@ -51,8 +53,14 @@ def present(path):
 
 
 def backup_scoped_keys(host, txn):
-    """Snapshot Avito-capable key grants while both portal workers are drained."""
-    source = Path(host.cfg['databases'][1] + '.avito-keys')
+    """Snapshot optional grants and the action journal while both workers are drained."""
+    for suffix,schema in (('.avito-keys',SCOPED_KEYS_SCHEMA),('.catalog-keys',SCOPED_KEYS_SCHEMA),
+                          ('.market-actions',ACTION_SCHEMA)):
+        backup_sidecar(host,txn,suffix,schema)
+
+
+def backup_sidecar(host, txn, suffix, expected_schema):
+    source = Path(host.cfg['databases'][1] + suffix)
     if not present(source):
         return
     info = source.lstat()
@@ -77,7 +85,7 @@ def backup_scoped_keys(host, txn):
                 src.backup(dest, pages=128, progress=progress, sleep=0.05)
                 dest.execute('PRAGMA trusted_schema=OFF')
                 dest.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
-                if Host.schema(dest) != SCOPED_KEYS_SCHEMA or dest.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+                if Host.schema(dest) != expected_schema or dest.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
                     raise ReleaseError('scoped key snapshot verification failed')
         with partial.open('rb') as stream:
             os.fsync(stream.fileno())

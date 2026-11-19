@@ -1,0 +1,86 @@
+{
+  "01-general": {
+    "filename": "01-general.yaml",
+    "url": "https://dev.wildberries.ru/api/swagger/yaml/ru/01-general.yaml",
+    "sha256": "44d3bf09b5a4528f67ee36096788e4a96cafa0d28e4ed19cc7b96149898f3a3b",
+    "checked_on": "2026-11-19"
+  },
+  "02-items": {
+    "filename": "02-items.yaml",
+    "url": "https://dev.wildberries.ru/api/swagger/yaml/ru/02-items.yaml",
+    "sha256": "691be0e380d103ab69681306aec70429ca27fb9f21604f74fcaae913f502e0a9",
+    "checked_on": "2026-11-19"
+  },
+  "03-orders-fbs": {
+    "filename": "03-orders-fbs.yaml",
+    "url": "https://dev.wildberries.ru/api/swagger/yaml/ru/03-orders-fbs.yaml",
+    "sha256": "f5d34b41856e2a5306ea480ae13ab1d59c06b65db696b5d50ac4cf148f009b8a",
+    "checked_on": "2026-11-19"
+  },
+  "04-orders-dbw": {
+    "filename": "04-orders-dbw.yaml",
+    "url": "https://dev.wildberries.ru/api/swagger/yaml/ru/04-orders-dbw.yaml",
+    "sha256": "9026e34186403deeedf5adcadec8c085bc1e275b709e0d7badcf8fd046ee79cd",
+    "checked_on": "2026-11-19"
+  },
+  "05-dbs": {
+    "filename": "05-dbs.yaml",
+    "url": "https://dev.wildberries.ru/api/swagger/yaml/ru/05-dbs.yaml",
+    "sha256": "ef25211cb0dfe223e444fe39b6c072eb771427577b3a5a04b0a302924decd3a2",
+    "checked_on": "2026-11-19"
+  },
+  "06-in-store-pickup": {
+    "filename": "06-in-store-pickup.yaml",
+    "url": "https://dev.wildberries.ru/api/swagger/yaml/ru/06-in-store-pickup.yaml",
+    "sha256": "2b73eff97fe11232805de6c95d0356152650c3ec04eb2751abd4f665f9a77e37",
+    "checked_on": "2026-11-19"
+  },
+  "07-orders-fbw": {
+    "filename": "07-orders-fbw.yaml",
+    "url": "https://dev.wildberries.ru/api/swagger/yaml/ru/07-orders-fbw.yaml",
+    "sha256": "660c2c61a912b0650c2ac1530f1d7b85ae346b331897621fd21fbb496ce469e5",
+    "checked_on": "2026-11-19"
+  },
+  "08-promotion": {
+    "filename": "08-promotion.yaml",
+    "url": "https://dev.wildberries.ru/api/swagger/yaml/ru/08-promotion.yaml",
+    "sha256": "1e1d7fa8357f61b91ae3364ebcb88f92444dfd1269d8bcd2ad52082d7f0cf5b5",
+    "checked_on": "2026-11-19"
+  },
+  "09-communications": {
+    "filename": "09-communications.yaml",
+    "url": "https://dev.wildberries.ru/api/swagger/yaml/ru/09-communications.yaml",
+    "sha256": "7cfa9caf5243e41072afeff35036bbf73e5cf81f24ac8917464c6722a47e8266",
+    "checked_on": "2026-11-19"
+  },
+  "10-rates": {
+    "filename": "10-rates.yaml",
+    "url": "https://dev.wildberries.ru/api/swagger/yaml/ru/10-rates.yaml",
+    "sha256": "50e55adf0584c81a14620afe8064fbe2b9a954b168f12aca350785a4bbce8d9e",
+    "checked_on": "2026-11-19"
+  },
+  "11-analytics": {
+    "filename": "11-analytics.yaml",
+    "url": "https://dev.wildberries.ru/api/swagger/yaml/ru/11-analytics.yaml",
+    "sha256": "23e4d4fb896e89f7af349d323a2a16911681e6a9504eec9502b4c99ddd1dd077",
+    "checked_on": "2026-11-19"
+  },
+  "12-reports": {
+    "filename": "12-reports.yaml",
+    "url": "https://dev.wildberries.ru/api/swagger/yaml/ru/12-reports.yaml",
+    "sha256": "07de81522e545388348c9aca6b3e52088e32ca93bd1e7b9f8f278585510c6a36",
+    "checked_on": "2026-11-19"
+  },
+  "13-finances": {
+    "filename": "13-finances.yaml",
+    "url": "https://dev.wildberries.ru/api/swagger/yaml/ru/13-finances.yaml",
+    "sha256": "6998ea47923bb34d0db36fec9a9a225e85149a03849935092eb5523e9e74d7e2",
+    "checked_on": "2026-11-19"
+  },
+  "ozon-seller-ru": {
+    "filename": "ozon-seller-ru.json",
+    "url": "https://docs.ozon.com/api/seller/swagger.json",
+    "sha256": "57f27f1a08d09f75473601183b8ee2d0f2e3336c084ca295d41d4969a0be8b2f",
+    "checked_on": "2026-11-18"
+  }
+}

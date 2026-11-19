@@ -22,6 +22,8 @@ HOST_KEYS = {
     "finance-api": "wb_finance",
     "feedbacks-api": "wb_feedback",
     "advert-api": "wb_advert",
+    "advert-media-api": "wb_advert",
+    "dp-calendar-api": "wb_prices_key",
     "seller-analytics-api": "wb_analytics",
     "content-api": "wb_content",
     "documents-api": "wb_documents",

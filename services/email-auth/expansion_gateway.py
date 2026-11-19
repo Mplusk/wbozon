@@ -309,13 +309,13 @@ def _ozon_order_counts(wire, args, skus):
     """Count unique orders containing each SKU across FBO and FBS, including split postings."""
     query = [args["date_from"], args["date_to"], sorted(skus)]
     start, end = ozon_expansion._range(args)
-    with wire.progress("ozon-order-denominator-v2", query) as (saved, save):
+    with wire.progress("ozon-order-denominator-v3", query) as (saved, save):
         state = saved or {
-            "next": {"fbo": "", "fbs": 0},
+            "next": {"fbo": "", "fbs": ""},
             "ids": {sku: {} for sku in skus},
             "units": {sku: {} for sku in skus},
             "posting_orders": {},
-            "seen_cursors": [],
+            "seen_cursors": {"fbo":[],"fbs":[]},
             "issue": None,
         }
         for scheme in ("fbo", "fbs"):
@@ -323,15 +323,9 @@ def _ozon_order_counts(wire, args, skus):
                 cursor = state["next"][scheme]
                 if cursor is None or state["issue"]:
                     break
-                body = {"filter": {"since": start, "to": end}, "limit": 100}
-                if scheme == "fbo":
-                    body.update(cursor=cursor, sort_dir="ASC")
-                else:
-                    body.update(offset=cursor, dir="asc")
-                raw = wire(
-                    "POST", ozon_expansion.BASE + "/v3/posting/" + scheme + "/list", body=body, ttl=1800
-                )
-                payload = raw if scheme == "fbo" else raw["result"]
+                import ozon_posting_status
+                body = {"filter": {"since": start, "to": end}, "limit": 100,"cursor":cursor,"sort_dir":"ASC"}
+                payload = wire("POST",ozon_posting_status.ENDPOINTS[scheme.upper()],body=body,ttl=1800)
                 postings = market_specs.rows(payload.get("postings"))
                 for post in postings:
                     products = market_specs.rows(post.get("products"))
@@ -366,11 +360,11 @@ def _ozon_order_counts(wire, args, skus):
                             state["issue"] = "inconsistent_order_quantity"
                         units[posting_key] = quantity
                 more = payload.get("has_next")
-                next_cursor = payload.get("cursor") if scheme == "fbo" else cursor + len(postings)
-                if type(more) is not bool or (more and (not postings or next_cursor in (None, "", cursor))):
+                next_cursor = payload.get("cursor")
+                if type(more) is not bool or (more and (not postings or not isinstance(next_cursor,str) or next_cursor in ("", cursor))):
                     state["issue"] = "unconfirmed_order_pagination"
-                if scheme == "fbo" and more:
-                    history = state.setdefault("seen_cursors", [])
+                if more and not state["issue"]:
+                    history = state["seen_cursors"][scheme]
                     if next_cursor in history or len(history) >= 1000:
                         state["issue"] = "nonadvancing_order_cursor"
                     history.append(next_cursor)

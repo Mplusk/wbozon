@@ -15,6 +15,9 @@
 !market_specs.py
 !avito_mcp.py
 !avito_contracts.json
+!market_catalog.py
+!market_actions.py
+!market_routes.jsonl
 !market_transport.py
 !market_archive.py
 !market_composites.py

@@ -37,6 +37,7 @@ VALUE_RE = re.compile(r'[A-Za-z0-9_-]{43}\Z')
 VERIFIER_RE = re.compile(r'[A-Za-z0-9._~-]{43,128}\Z')
 CLIENT_RE = re.compile(r'client_[A-Za-z0-9_-]{32}\Z')
 SCOPE = 'mcp:read'
+PROPOSE = 'mcp:propose'
 PENDING_TTL = 15 * 60
 MAX_PENDING_COOKIES = 8
 _LOG = logging.getLogger('sidzen.oauth')
@@ -175,7 +176,7 @@ class OAuthStore:
         if not isinstance(scope,str) or len(scope)>128: raise OAuthError('invalid_scope')
         requested=scope.split()
         if not requested: requested=[SCOPE]
-        if SCOPE not in requested or len(set(requested))!=len(requested) or any(x not in (SCOPE,'offline_access') for x in requested):
+        if SCOPE not in requested or len(set(requested))!=len(requested) or any(x not in (SCOPE,PROPOSE,'offline_access') for x in requested):
             raise OAuthError('invalid_scope')
         scope=' '.join(sorted(requested))
         with self.connect() as c:
@@ -214,7 +215,10 @@ class OAuthStore:
             try: c.execute('INSERT INTO oauth_pending_used VALUES(?,?)',(_hash(nonce),expires))
             except sqlite3.IntegrityError: raise OAuthError('invalid_request') from None
             c.execute('DELETE FROM oauth_codes WHERE expires<=?',(now,))
-            c.execute('INSERT INTO oauth_codes VALUES(?,?,?,?,?,?,?,?)',(_hash(code),row[0],row[1],row[3],row[4],row[5],key_id,now+60))
+            scope=row[4]
+            if external_keys.access_for_key(key_id)!='catalog_operations':
+                scope=' '.join(k for k in scope.split() if k!=PROPOSE)
+            c.execute('INSERT INTO oauth_codes VALUES(?,?,?,?,?,?,?,?)',(_hash(code),row[0],row[1],row[3],scope,row[5],key_id,now+60))
         return code,row[1],row[2]
 
     def _check_grant(self,c,params,resource,basic,now):
@@ -273,11 +277,20 @@ class OAuthStore:
         return result
 
     def verify(self,token,resource):
+        grant=self.verify_access(token,resource)
+        return grant[0] if grant else None
+
+    def verify_access(self,token,resource):
         if not isinstance(token,str) or not TOKEN_RE.fullmatch(token): return None
         with self.connect() as c:
-            row=c.execute('''SELECT t.key_id FROM oauth_tokens t JOIN mcp_keys_for_access k ON k.public_id=t.key_id
-                             WHERE t.access_hash=? AND t.access_expires>? AND t.resource=? AND t.scope IN (?,?) AND k.revoked_at IS NULL''',(_hash(token),self.clock(),resource,SCOPE,SCOPE+' offline_access')).fetchone()
-        return row[0] if row else None
+            row=c.execute('''SELECT t.key_id,t.scope FROM oauth_tokens t JOIN mcp_keys_for_access k ON k.public_id=t.key_id
+                             WHERE t.access_hash=? AND t.access_expires>? AND t.resource=? AND k.revoked_at IS NULL''',(_hash(token),self.clock(),resource)).fetchone()
+        if not row or row[1] not in (SCOPE,SCOPE+' offline_access',PROPOSE+' '+SCOPE,PROPOSE+' '+SCOPE+' offline_access'):
+            return None
+        access=external_keys.access_for_key(row[0])
+        if access=='catalog_operations' and PROPOSE not in row[1].split():
+            access='catalog_read'
+        return row[0],access
 
 
 def handle(environ,start,store,keys,origin):
@@ -309,14 +322,14 @@ def handle(environ,start,store,keys,origin):
         except ValueError: raise OAuthError('invalid_request') from None
     try:
         if path in ('/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp') and method=='GET':
-            return reply('200 OK',{'resource':resource,'authorization_servers':[origin],'scopes_supported':[SCOPE],
+            return reply('200 OK',{'resource':resource,'authorization_servers':[origin],'scopes_supported':[SCOPE,PROPOSE],
                 'bearer_methods_supported':['header']})
         if path=='/.well-known/oauth-authorization-server' and method=='GET':
             return reply('200 OK',{'issuer':origin,'authorization_endpoint':origin+'/oauth/authorize',
                 'token_endpoint':origin+'/oauth/token','registration_endpoint':origin+'/oauth/register',
                 'response_types_supported':['code'],'grant_types_supported':['authorization_code','refresh_token'],
                 'token_endpoint_auth_methods_supported':['none'],
-                'code_challenge_methods_supported':['S256'],'scopes_supported':[SCOPE,'offline_access'],
+                'code_challenge_methods_supported':['S256'],'scopes_supported':[SCOPE,PROPOSE,'offline_access'],
                 'client_id_metadata_document_supported':True,'authorization_response_iss_parameter_supported':True})
         if path=='/oauth/register' and method=='POST':
             try: data=json.loads(read_body('application/json'))
@@ -328,7 +341,7 @@ def handle(environ,start,store,keys,origin):
             ticket,nonce,platform,name=store.begin(params(raw),resource)
             page=('<main id="content"><h1>Подключить '+html.escape(platform)+'</h1><p>Приложение '
                 +html.escape(name)+' запрашивает чтение площадок, выбранных для вашего ключа MCP. Для ключа Авито это объявления, заказы, статистика и переписка. '
-                'Оно не сможет изменять товары, цены или заказы.</p><form method="post" action="/oauth/authorize">'
+                'Полный каталог может содержать документы и данные покупателей. Право mcp:propose позволяет направить запрос на изменение. Каждую отправку отдельно подтверждает владелец в кабинете.</p><form method="post" action="/oauth/authorize">'
                 '<input type="hidden" name="csrf" value="'+nonce+'"><input type="hidden" name="ticket" value="'+ticket+'"><label for="mcp-key">Ключ MCP из кабинета</label>'
                 '<input id="mcp-key" type="password" name="key" required autocomplete="off" maxlength="47">'
                 '<button>Разрешить доступ</button></form><p><a href="/settings">Открыть настройки ключей</a></p></main>')

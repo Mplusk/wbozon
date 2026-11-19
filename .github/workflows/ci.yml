@@ -289,14 +289,19 @@ jobs:
           git archive e3c2823a8f6b4714eb53ac67f4f5d1dbb04dea21:services/email-auth | tar -x -C "$reports"
           git archive a51e1411d9b60bbdaa792e7d095e95d41ae8f2e1:services/email-auth | tar -x -C "$regional"
           git archive 7c27cc2d0fdc8464c712f193310c2494df83366a:services/email-auth | tar -x -C "$active"
+          scoped="$RUNNER_TEMP/market-avito/service"
+          mkdir -p "$scoped"
+          git archive 929c65948445c7f2e9413393ce4b198d44e1c64f:services/email-auth | tar -x -C "$scoped"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09 \
             --next-service "$reports" --next-commit e3c2823a8f6b4714eb53ac67f4f5d1dbb04dea21 \
             --latest-service "$regional" --latest-commit a51e1411d9b60bbdaa792e7d095e95d41ae8f2e1 \
             --successor 7c27cc2d0fdc8464c712f193310c2494df83366a "$active" \
+            --successor 929c65948445c7f2e9413393ce4b198d44e1c64f "$scoped" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
-          "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$packaged"
+          "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
+          "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
           sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports --interrupted-finance \
             --python /opt/staging-account-acceptance/venv/bin/python --baseline-service "$previous" --candidate-service "$deployed"
       - name: Verify next release rollback and same-release recovery under systemd
@@ -318,7 +323,10 @@ jobs:
           check_pair "$regional" "$regional"
           check_pair "$regional" "$active"
           check_pair "$active" "$active"
-          check_pair "$active" "$packaged"
+          scoped="$RUNNER_TEMP/market-avito/service"
+          check_pair "$active" "$scoped"
+          check_pair "$scoped" "$scoped"
+          check_pair "$scoped" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

@@ -12,8 +12,11 @@ from datetime import datetime, timezone
 
 MAX_ACTIVE_KEYS = 10
 TOKEN_PATTERN = re.compile(r'mcp_[A-Za-z0-9_-]{43}\Z')
-ID_PATTERN = re.compile(r'(?:(?:av|all)_)?[0-9a-f]{24}\Z')
-ACCESS_LABELS = {'marketplaces': 'Ozon и Wildberries', 'avito': 'Авито', 'all': 'Ozon, Wildberries и Авито'}
+ID_PATTERN = re.compile(r'(?:(?:av|all|cr|cp)_)?[0-9a-f]{24}\Z')
+ACCESS_LABELS = {'marketplaces': 'Ozon и Wildberries', 'avito': 'Авито', 'all': 'Ozon, Wildberries и Авито',
+                 'catalog_read':'Полный каталог Ozon и WB · чтение',
+                 'catalog_operations':'Полный каталог Ozon и WB · чтение и запросы на изменение'}
+PREFIXES = {'marketplaces':'','avito':'av_','all':'all_','catalog_read':'cr_','catalog_operations':'cp_'}
 REQUEST_PATTERN = re.compile(r'[A-Za-z0-9_-]{22}\Z')
 KEY_COLUMNS = 'public_id,token_hash,name,created_at,revoked_at,last_used_at,request_hash'
 
@@ -35,9 +38,7 @@ def _valid_name(name):
             and not re.search(r'[\x00-\x1f\x7f]', name))
 
 def access_for_key(key_id):
-    if key_id.startswith('av_'):
-        return 'avito'
-    return 'all' if key_id.startswith('all_') else 'marketplaces'
+    return next((name for name,prefix in PREFIXES.items() if prefix and key_id.startswith(prefix)), 'marketplaces')
 
 
 def key_connection(path):
@@ -45,9 +46,12 @@ def key_connection(path):
     database = sqlite3.connect(path, timeout=0.5, uri=True)
     try:
         database.execute('ATTACH DATABASE ? AS additional_keys', (companion,))
+        catalogue = Path(str(path) + '.catalog-keys').resolve().as_uri() + '?mode=rw'
+        database.execute('ATTACH DATABASE ? AS catalog_keys', (catalogue,))
         database.execute('CREATE TEMP VIEW mcp_keys_for_access AS '
                          f'SELECT {KEY_COLUMNS} FROM main.external_mcp_keys UNION ALL '
-                         f'SELECT {KEY_COLUMNS} FROM additional_keys.external_mcp_keys')
+                         f'SELECT {KEY_COLUMNS} FROM additional_keys.external_mcp_keys UNION ALL '
+                         f'SELECT {KEY_COLUMNS} FROM catalog_keys.external_mcp_keys')
         return database
     except Exception:
         database.close()
@@ -55,7 +59,10 @@ def key_connection(path):
 
 
 def _table(key_id):
-    return 'main.external_mcp_keys' if access_for_key(key_id) == 'marketplaces' else 'additional_keys.external_mcp_keys'
+    access = access_for_key(key_id)
+    if access.startswith('catalog_'):
+        return 'catalog_keys.external_mcp_keys'
+    return 'main.external_mcp_keys' if access=='marketplaces' else 'additional_keys.external_mcp_keys'
 
 
 class KeyStore:
@@ -64,9 +71,11 @@ class KeyStore:
         companion = str(path) + '.avito-keys'
         # The previous release can authorize every row in the legacy key table.
         # Keep narrower and combined grants outside that table, including through rollback.
-        descriptor = os.open(companion, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
-        os.close(descriptor)
-        for database in (path, companion):
+        catalogue = str(path) + '.catalog-keys'
+        for sidecar in (companion,catalogue):
+            descriptor = os.open(sidecar, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+            os.close(descriptor)
+        for database in (path, companion, catalogue):
             with contextlib.closing(sqlite3.connect(database, timeout=0.5)) as c, c:
                 c.execute('''CREATE TABLE IF NOT EXISTS external_mcp_keys (
                 public_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
@@ -80,7 +89,7 @@ class KeyStore:
         if access not in ACCESS_LABELS:
             raise ValueError('Invalid marketplace access')
         token = 'mcp_' + secrets.token_urlsafe(32)
-        key_id = {'marketplaces':'', 'avito':'av_', 'all':'all_'}[access] + secrets.token_hex(12)
+        key_id = PREFIXES[access] + secrets.token_hex(12)
         token_hash = hashlib.sha256(token.encode('ascii')).hexdigest()
         request_hash = hashlib.sha256(request_id.encode('ascii')).hexdigest()
         with key_connection(self.path) as c:
@@ -124,6 +133,10 @@ class KeyStore:
         with key_connection(self.path) as c:
             return c.execute('SELECT public_id,name,created_at,last_used_at FROM mcp_keys_for_access WHERE revoked_at IS NULL ORDER BY created_at DESC, public_id').fetchall()
 
+    def active(self,key_id):
+        with contextlib.closing(key_connection(self.path)) as c:
+            return c.execute('SELECT 1 FROM mcp_keys_for_access WHERE public_id=? AND revoked_at IS NULL',(key_id,)).fetchone() is not None
+
 
 def _escape(value):
     return html.escape(str(value), quote=True)
@@ -139,10 +152,13 @@ def render_section(store, csrf, origin):
     request_id = secrets.token_urlsafe(16)
     endpoint = _escape(origin.rstrip('/') + '/mcp')
     content = '<section class="mcp-card" aria-labelledby="external-mcp-title"><div><h2 id="external-mcp-title">Подключение других ИИ</h2>'
-    content += '<p>Адрес MCP: <strong>' + endpoint + '</strong>. Тип подключения: Streamable HTTP. Доступ только для чтения.</p>'
+    content += '<p>Адрес MCP: <strong>' + endpoint + '</strong>. Тип подключения: Streamable HTTP. Права задаются отдельно при создании ключа.</p>'
     content += '<p>Создайте отдельный ключ для каждого приложения. Передайте его приложению как заголовок <code>Authorization: Bearer КЛЮЧ</code>. Поддержка заголовка зависит от приложения; ссылка без ключа не даёт доступ.</p>'
     content += '<p>Для Claude, Grok и ChatGPT используйте адрес MCP при добавлении коннектора. Если откроется страница подключения SIDZEN, введите на ней созданный ключ и разрешите чтение. Клиенты с ручной настройкой заголовков могут передать ключ через Bearer.</p>'
     content += '<form method="post" action="/settings/mcp/create"><input type="hidden" name="csrf" value="'+_escape(csrf)+'"><input type="hidden" name="request_id" value="'+_escape(request_id)+'"><label for="external-mcp-name">Название приложения</label><input id="external-mcp-name" type="text" name="name" maxlength="60" required><label for="mcp-account-access">Площадки для этого ключа</label><select id="mcp-account-access" name="access"><option value="marketplaces">Ozon и Wildberries</option><option value="avito">Авито</option><option value="all">Ozon, Wildberries и Авито</option></select><button>Создать ключ</button></form>'
+    options = ''.join('<option value="'+k+'">'+_escape(v)+'</option>' for k,v in ACCESS_LABELS.items() if k.startswith('catalog_'))
+    content = content.replace('</select>',options+'</select>')
+    content += '<p>Полный каталог может содержать данные заказов, документы и сведения о покупателях. Запросы на изменение подтверждаются в разделе <a href="/settings/catalog">Операции маркетплейсов</a>.</p>'
     rows = store.list_active()
     if not rows:
         content += '<p>Ключей для других ИИ пока нет.</p>'
