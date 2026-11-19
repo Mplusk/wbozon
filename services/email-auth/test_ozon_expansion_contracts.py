@@ -12,6 +12,7 @@ import urllib.error
 from contextlib import contextmanager
 from decimal import Decimal
 from urllib.parse import urlsplit
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import ozon_expansion
 import market_transport
@@ -194,7 +195,7 @@ class OzonExpansionContracts(unittest.TestCase):
             w = market_transport.Wire.__new__(market_transport.Wire)
             w.provider, w.creds = 'ozon', {'client_id': 'synthetic-client', 'api_key': secret}
             w.scope = market_transport._id([w.provider, w.creds])
-            w.aead = market_transport.AESGCM(hashlib.sha256(('market-cache-v1:' + w.scope).encode()).digest())
+            w.aead = AESGCM(hashlib.sha256(('market-cache-v1:' + w.scope).encode()).digest())
             w.db = lambda: db
             return w
         first, second = wire('synthetic-A'), wire('synthetic-B')

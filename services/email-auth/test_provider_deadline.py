@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -13,6 +14,38 @@ from portal import provider_read
 
 
 class ProviderDeadlineTests(unittest.TestCase):
+    def test_simple_reads_start_without_loading_portal_or_cache_encryption(self):
+        portal_path = Path(__file__).with_name('portal.py').resolve()
+        script = """import io, json, pathlib, runpy, sys, urllib.request
+from email.message import Message
+for name in ('app', 'ui', 'oauth_mcp', 'avito_mcp', 'cryptography'):
+    sys.modules[name] = None
+class Response(io.BytesIO):
+    status = 200
+    headers = Message()
+    headers['Content-Type'] = 'application/json'
+class Opener:
+    def open(self, req, timeout):
+        body = {'data': {'listGoods': []}, 'result': {'items': [], 'total': 0, 'last_id': ''}}
+        return Response(json.dumps(body).encode())
+urllib.request.build_opener = lambda *handlers: Opener()
+path = sys.argv[1]
+sys.path.insert(0, str(pathlib.Path(path).parent))
+sys.argv = [path, '--provider-worker']
+runpy.run_path(path, run_name='__main__')
+"""
+        ozon = {'client_id':'8123', 'api_key':'synthetic-private-key'}
+        reads = [('wb_prices', {'limit':1}, {'api_token':'synthetic-private-key'}),
+                 ('ozon_products', {'limit':1,'include_identity':False}, ozon),
+                 ('market_api_read', {'operation_id':'ozon_product_list','input':{'body':{'limit':1}}}, ozon)]
+        for tool, arguments, credentials in reads:
+            with self.subTest(tool=tool), tempfile.TemporaryDirectory() as tmp:
+                request = dict(operation=tool, args=arguments, creds=credentials,
+                               finance_gate_dir=str(Path(tmp)/'gates'), deadline_monotonic=time.monotonic()+60)
+                result = subprocess.run([sys.executable, '-B', '-I', '-c', script, str(portal_path)],
+                                        input=json.dumps(request), capture_output=True, text=True, timeout=60, check=True)
+                self.assertEqual(json.loads(result.stdout)['kind'], 'ok')
+
     def test_real_child_serializes_provider_outcomes(self):
         # Launch the production worker entry point in a real child process, with
         # only its HTTP transport replaced by synthetic deterministic responses.

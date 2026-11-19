@@ -20,6 +20,12 @@ two-worker configuration, and production readiness verifies both serving workers
 Both host checks run as wbozon-test with private networking and bounded tmpfs.
 The controller and its trust policy are installed separately by the administrator.
 
+On the two-vCPU production VPS the portal's systemd drop-in grants one CPU
+(`CPUQuota=100%`, `CPUWeight=1000`). `TimeoutStopSec=65s` allows Gunicorn to
+reap its workers within the controller's 75-second stop deadline. Forward
+startup and restoration allow 180 seconds for two workers. Each local health
+probe allows five seconds for the verified HTTP response.
+
 Before stopping the portal, the controller fences new connections on its two
 listener addresses, waits for established requests and provider children to exit,
 then holds every existing Ozon finance lock. The deadline leaves a busy portal

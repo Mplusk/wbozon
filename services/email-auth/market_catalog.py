@@ -1,7 +1,6 @@
 """Discover and invoke only the marketplace operations in the reviewed, bundled catalogue."""
 import base64
 from datetime import datetime, timezone
-from email.message import EmailMessage
 from functools import lru_cache
 import json
 import math
@@ -230,6 +229,7 @@ def _scalar(value):
 
 
 def _multipart(body,schema,defs,files):
+    from email.message import EmailMessage
     boundary = 'sidzen'+secrets.token_hex(16)
     parts = []
     while '$ref' in schema:

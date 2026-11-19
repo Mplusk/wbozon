@@ -7,12 +7,12 @@ import urllib.request
 
 
 def method(req):
-    from market_transport import SELLER_READS, WB_READS, allowed_read
+    from market_transport import allowed_read
 
     parts = urlsplit(req.full_url)
     path = parts.path
     allowed = allowed_read(parts.netloc, req.get_method(), path)
-    if not allowed:
+    if not allowed and parts.netloc == "api-seller.ozon.ru":
         import ozon_details, ozon_fbo, ozon_accrual_day, ozon_return_events, ozon_realization, ozon_unallocated
 
         fixed = (
@@ -22,12 +22,9 @@ def method(req):
         )
         for mod in (ozon_accrual_day, ozon_return_events, ozon_realization, ozon_unallocated):
             fixed.add(urlsplit(getattr(mod, "ENDPOINT", "")).path)
-        allowed = (
-            parts.netloc == "api-seller.ozon.ru"
-            and path in fixed
-            or parts.netloc == "common-api.wildberries.ru"
-            and path in ("/api/v1/tariffs/box", "/api/v1/tariffs/commission")
-        )
+        allowed = path in fixed
+    if parts.netloc == "common-api.wildberries.ru" and path in ("/api/v1/tariffs/box", "/api/v1/tariffs/commission"):
+        allowed = True
     if not allowed:
         return None
     path = re.sub(r"/tasks/[^/]+/", "/tasks/{task}/", path)

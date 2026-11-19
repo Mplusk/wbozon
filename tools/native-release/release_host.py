@@ -409,7 +409,7 @@ class Host:
     def health(self, mark=0):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            sock.settimeout(2)
+            sock.settimeout(5)
             self.mark_socket(sock, mark)
             sock.connect((self.addresses[0], self.port))
             sock.sendall(('GET /healthz HTTP/1.1\r\nHost: ' + self.cfg['host'] +

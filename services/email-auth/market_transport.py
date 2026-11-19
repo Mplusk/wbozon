@@ -14,10 +14,10 @@ import urllib.error
 import urllib.request
 import uuid
 from decimal import Decimal
+from functools import cached_property
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode, urlsplit
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import finance_gate
 import market_cooldown
 from wb_mcp import NoRedirect
@@ -184,13 +184,17 @@ class _AvailableResult(Exception):
 
 
 class Wire:
+    @cached_property
+    def aead(self):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        return AESGCM(hashlib.sha256(("market-cache-v1:" + self.scope).encode()).digest())
+
     def __init__(self, provider, creds, directory, deadline):
         self.provider, self.creds, self.deadline = provider, creds, deadline
         self.gate_dir = directory
         self.token = None
         self.fetch_times = []
         self.scope = _id([provider, creds])
-        self.aead = AESGCM(hashlib.sha256(("market-cache-v1:" + self.scope).encode()).digest())
         self.root = Path(directory).parent / ".market-reports"
         self.root.mkdir(mode=0o700, exist_ok=True)
         self.path = self.root / "reports.db"

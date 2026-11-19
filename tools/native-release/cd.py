@@ -40,7 +40,7 @@ MARKET_V2_REPORT_FIX = '85d5b8a840f480678fe83fbf3bbd301a8db75d0910b8dfb39dfdce5f
 MARKET_REPORT_SUCCESSORS = (
     'ea75c8c64e6a3295f2c3e4c8e483b15e7194e89bb300587ff9b936bf04e18dba',
     '013c84e6a33beb009e7498468adbbe43950835cba416fd6ee690bf5b89f50a0f',
-    'd0990fda123b3b772b8e821991b63e65346b21a2764ff9af6414589bf66c128d',
+    '484e7b010b36091a6006928c976356c98a9b65775770b38322b451fa89c7137d',
 )
 
 
@@ -223,7 +223,7 @@ class Transaction:
         # have imported the application. Keep ingress fenced during cold start.
         # A recovery may try the committed candidate before restoring the previous
         # release. Reserve the longer wait for forward startup and the fallback.
-        deadline = time.monotonic() + (18 if j['phase'] == 'committed' else 90)
+        deadline = time.monotonic() + (18 if j['phase'] == 'committed' else 180)
         while True:
             try:
                 checking = 'running process'

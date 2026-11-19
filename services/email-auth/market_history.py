@@ -10,8 +10,6 @@ import secrets
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
 
 def utc():
     return datetime.now(timezone.utc).isoformat()
@@ -84,6 +82,7 @@ class History:
             conn.close()
 
     def _cipher(self):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         path = self.root / "history-v2.key"
         try:
             key = path.read_bytes()

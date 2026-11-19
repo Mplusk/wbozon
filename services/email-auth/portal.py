@@ -1,25 +1,27 @@
 """Local integration prototype. Browser sessions never authenticate the read API."""
-from ui import document, CSP
 import contextvars
 import market_cooldown
-import hashlib, hmac, html, json, math, os, re, secrets, sqlite3, ssl, subprocess, sys, urllib.request, urllib.error, smtplib
+import hashlib, json, math, os, re, sys, urllib.request, urllib.error
 import threading, time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from email.message import EmailMessage
-from urllib.parse import parse_qs, urlsplit
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from app import LoginApp, smtp_mailer
-import ozon_mcp, ozon_details, ozon_article_summary, wb_mcp, external_keys, external_mcp, oauth_mcp, finance_gate
+import finance_gate
 import market_specs
-import avito_mcp
-import market_actions, market_catalog
 from market_https import VerifiedHTTPS
-import expansion_gateway
-import market_health, market_history
-import market_archive
-import posting_discovery
 import market_diagnostics
+
+# Provider children are fresh interpreters with a single request and a hard
+# deadline. Load their marketplace implementation only when dispatching it.
+if __name__ != '__main__' or sys.argv[1:] != ['--provider-worker']:
+    import hmac, html, secrets, sqlite3, ssl, subprocess, smtplib
+    from email.message import EmailMessage
+    from urllib.parse import parse_qs, urlsplit
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from ui import document, CSP
+    from app import LoginApp, smtp_mailer
+    import ozon_mcp, ozon_details, ozon_article_summary, wb_mcp, avito_mcp
+    import external_keys, external_mcp, oauth_mcp, market_actions, market_catalog
+    import expansion_gateway, market_health, market_history, market_archive, posting_discovery
 
 FIELDS = {'ozon': ('client_id', 'api_key'), 'wb': ('api_token',)}
 CHECK_OPERATIONS = {'ozon':'ozon_products', 'wb':'wb_prices', 'avito':'avito_get_user_info_self'}
@@ -64,6 +66,7 @@ def public_retry_delay(delay, creds):
 
 def finance_request_preflight(operation, args, creds):
     """Reject local input errors before reserving a finance request."""
+    import ozon_mcp, ozon_details, ozon_article_summary, posting_discovery
     if operation not in finance_gate.FINANCE_OPERATIONS or not isinstance(creds,dict):
         raise ValueError('Invalid financial request')
     client_id, api_key = creds.get('client_id'), creds.get('api_key')
@@ -185,8 +188,10 @@ def decode_provider_payload(raw, preserve_decimal=False, reject_duplicates=False
 def _provider_read(operation, args, creds, *, request_timeout=15, absolute_deadline=None):
     """Bounded, read-only provider requests, within one deadline worker."""
     started=time.monotonic()
-    if operation in wb_mcp.OPERATIONS:
+    if operation.startswith('wb_'):
+        import wb_mcp
         return wb_mcp.read(operation, args, creds)
+    import ozon_mcp, ozon_details, ozon_article_summary
     if operation not in ozon_mcp.OPERATIONS:
         raise ValueError('Unknown operation')
     if operation == ozon_mcp.ozon_supply_allocation.OPERATION:
@@ -319,6 +324,7 @@ def _guard_ozon_result(result,creds):
 
 def _read_article_summary(args,creds,deadline):
     """Sequential bounded reads; a supplied posting set is partial."""
+    import ozon_article_summary
     ozon_article_summary.validate_args(args)
     def read(operation,arguments):
         remaining=deadline-time.monotonic()
@@ -455,39 +461,50 @@ def _provider_worker():
             finance_request_preflight(request['operation'],request['args'],request['creds'])
         is_finance=request['operation'] in finance_gate.FINANCE_OPERATIONS
         if is_finance:
+            import ozon_article_summary, ozon_unallocated
             deadline=request.get('deadline_monotonic')
             if type(deadline) not in (int,float) or not math.isfinite(deadline) or deadline < 0:
                 raise ValueError('Invalid provider deadline')
         def read():
             if request['operation'] in ('market_api_read','market_api_propose'):
                 from contextlib import nullcontext
-                gate=(market_actions.transmission(request.get('dispatch'),request['args'])
-                      if request['operation']=='market_api_propose' else nullcontext())
+                import market_catalog
+                gate=nullcontext()
+                if request['operation']=='market_api_propose':
+                    import market_actions
+                    gate=market_actions.transmission(request.get('dispatch'),request['args'])
                 with gate:
                     return market_catalog.transfer(request['operation'],request['args'],request['creds'],
                                                    request['finance_gate_dir'],request['deadline_monotonic'])
-            if request['operation'] in avito_mcp.CONTRACTS:
+            if request['operation'].startswith('avito_'):
+                import avito_mcp
                 return avito_mcp.read(request['operation'], request['args'], request['creds'],
                                       request['finance_gate_dir'], request['deadline_monotonic'])
             if (request['operation']=='wb_sales_summary' and 'group_by' in request['args'] or
                     request['operation']=='wb_prices' and 'vendor_code' in request['args']):
-                import wb_legacy_reports
+                import expansion_gateway, wb_legacy_reports, wb_mcp
                 wire=expansion_gateway.make_wire('wb',request['creds'],request['finance_gate_dir'],request['deadline_monotonic'])
                 fn=wb_legacy_reports.sales if request['operation']=='wb_sales_summary' else wb_legacy_reports.prices
                 return fn(wb_mcp.validate_args(request['operation'],request['args']),wire)
             if request['operation']=='archive_market_day':
+                import market_archive
                 return market_archive.tick(request['args']['dataset'],request['creds'],request['finance_gate_dir'],request['deadline_monotonic'])
             if request['operation']=='ozon_orders_analytics' and set(request['args'])!={'date_from','date_to'}:
+                import expansion_gateway
                 return expansion_gateway.execute('ozon_sku_daily',{k:v for k,v in request['args'].items() if k!='dimension'},
                     request['creds'],request['finance_gate_dir'],request['deadline_monotonic'])
             if request['operation'] in market_specs.TOOLS:
+                import expansion_gateway
                 return expansion_gateway.execute(request['operation'],request['args'],request['creds'],
                     request['finance_gate_dir'],request['deadline_monotonic'])
             with market_cooldown.worker(request.get('finance_gate_dir'), request['creds']):
-                if request['operation'] in ('ozon_article_summary','ozon_posting_accruals') and posting_discovery.active(request['args']):
-                    wire=expansion_gateway.Wire('ozon',request['creds'],request['finance_gate_dir'],deadline)
-                    return posting_discovery.read(request['operation'],request['args'],wire,
-                        lambda name,args:_provider_read(name,args,request['creds'],absolute_deadline=deadline))
+                if request['operation'] in ('ozon_article_summary','ozon_posting_accruals'):
+                    import posting_discovery
+                    if posting_discovery.active(request['args']):
+                        import expansion_gateway
+                        wire=expansion_gateway.Wire('ozon',request['creds'],request['finance_gate_dir'],deadline)
+                        return posting_discovery.read(request['operation'],request['args'],wire,
+                            lambda name,args:_provider_read(name,args,request['creds'],absolute_deadline=deadline))
                 if is_finance:
                     return _provider_read(request['operation'],request['args'],request['creds'],absolute_deadline=deadline)
                 if request['operation'] == 'ozon_orders_analytics':
@@ -496,7 +513,7 @@ def _provider_worker():
                 return _provider_read(request['operation'],request['args'],request['creds'])
         value = (_finance_read_with_retry(request.get('finance_gate_dir'),request['creds'],read,deadline,
                   allow_retry=(request['operation'] != ozon_article_summary.OPERATION and
-                    (request['operation'] not in ('ozon_posting_accruals',ozon_mcp.ozon_unallocated.OPERATION) or
+                    (request['operation'] not in ('ozon_posting_accruals',ozon_unallocated.OPERATION) or
                      not request['args'].get('include_types',True))))
                  if is_finance else read())
         if request['operation'] in market_specs.TOOLS or request['operation'] in ('wb_sales_summary','wb_prices','archive_market_day'):

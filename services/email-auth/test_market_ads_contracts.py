@@ -12,6 +12,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from urllib.parse import urlsplit
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import finance_gate
 import expansion_gateway
@@ -411,7 +412,7 @@ class OzonPerformanceContracts(unittest.TestCase):
         wire = self.wire_fixture()
         wire.provider, wire.creds, wire.scope = 'performance', CREDS, 'synthetic-scope'
         wire.deadline, wire.token, wire.opener = time.monotonic() + 30, None, Opener()
-        wire.aead = market_transport.AESGCM(bytes(32))
+        wire.aead = AESGCM(bytes(32))
         wire.db = lambda: db
         wire._admit = lambda *_args: None
         first = ozon_performance.read(ARGS, wire, CREDS)
