@@ -89,15 +89,17 @@ def _sync_tree(release):
             os.close(fd)
 
 
-def _command(argv, *, cwd=None, timeout=120):
+def _command(argv, *, cwd=None, timeout=120, stage='candidate preparation'):
     env = {'PATH': '/usr/bin:/bin', 'HOME': '/tmp', 'LC_ALL': 'C.UTF-8', 'PYTHONDONTWRITEBYTECODE': '1'}
     try:
         result = subprocess.run(argv, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 timeout=timeout, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        raise BuildError('candidate preparation outcome unknown') from None
+    except subprocess.TimeoutExpired:
+        raise BuildError(f'{stage} exceeded its {timeout}-second deadline') from None
+    except OSError:
+        raise BuildError(f'{stage} could not start') from None
     if result.returncode:
-        raise BuildError('candidate preparation or isolated tests failed')
+        raise BuildError(f'{stage} failed with exit code {result.returncode}')
 
 
 def _sandbox(release, unit, args, cwd, *, runtime_seconds):
@@ -116,7 +118,8 @@ def _sandbox(release, unit, args, cwd, *, runtime_seconds):
     clean = ['/usr/bin/env', '-i', 'HOME=/tmp', 'PATH=/usr/bin:/bin', 'LC_ALL=C.UTF-8',
              'PYTHONDONTWRITEBYTECODE=1']
     _command(['/usr/bin/systemd-run', '--quiet', '--wait', '--pipe', '--collect', '--unit=' + unit,
-              '--working-directory=' + str(cwd), *properties, *clean, *args], timeout=runtime_seconds + 30)
+              '--working-directory=' + str(cwd), *properties, *clean, *args], timeout=runtime_seconds + 30,
+             stage='isolated test unit ' + unit)
     try:
         status = subprocess.run(['/usr/bin/systemctl', 'show', unit, '--property=LoadState', '--value'],
                                 capture_output=True, text=True, timeout=10, check=False)
@@ -149,11 +152,13 @@ def prepare(files, release, work, *, run_id, attempt, release_gid):
         elif name.startswith(('wheelhouse/', 'bootstrap/')) or name == 'requirements-offline.lock':
             _write(work / name, data)
     python = release / 'venv/bin/python'
-    _command(['/usr/bin/python3', '-m', 'venv', '--without-pip', '--copies', str(release / 'venv')])
+    _command(['/usr/bin/python3', '-m', 'venv', '--without-pip', '--copies', str(release / 'venv')],
+             stage='candidate virtual environment creation')
     bootstrap = "import runpy,sys;sys.path.insert(0,sys.argv.pop(1));runpy.run_module('pip',run_name='__main__')"
     _command([str(python), '-c', bootstrap, str(work / 'bootstrap/pip-26.3-py3-none-any.whl'),
               'install', '--isolated', '--no-index', '--no-cache-dir', '--no-compile', '--no-deps',
-              '--find-links', str(work / 'wheelhouse'), '--require-hashes', '-r', str(work / 'requirements-offline.lock')])
+              '--find-links', str(work / 'wheelhouse'), '--require-hashes', '-r', str(work / 'requirements-offline.lock')],
+             timeout=360, stage='offline wheel installation')
     for path in [p for p in release.rglob('*') if p.is_symlink()]:
         if path == release / 'venv/lib64' and os.readlink(path) == 'lib':
             path.unlink()

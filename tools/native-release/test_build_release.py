@@ -33,6 +33,13 @@ class BuildInputTests(unittest.TestCase):
                 self.assertIn('--property=CPUWeight=20', args)
                 self.assertGreater(run.call_args.kwargs['timeout'], seconds)
 
+    def test_builder_reports_the_stage_of_a_timeout(self):
+        timed_out = build_release.subprocess.TimeoutExpired(['private-argument'], 360)
+        with patch.object(build_release.subprocess, 'run', side_effect=timed_out):
+            with self.assertRaises(build_release.BuildError) as failure:
+                build_release._command(['private-argument'], timeout=360, stage='offline wheel installation')
+        self.assertEqual(str(failure.exception), 'offline wheel installation exceeded its 360-second deadline')
+
     def test_missing_service_or_nonbinary_content_refused_before_writes(self):
         with self.assertRaises(build_release.BuildError):
             build_release._validate_files({'service/portal.py': b'x'})
