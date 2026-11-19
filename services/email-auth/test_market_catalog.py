@@ -43,6 +43,10 @@ class CatalogTests(unittest.TestCase):
 
     def test_catalogue_and_strict_authorization(self):
         self.assertEqual(len(catalog.routes()),809)
+        identifiers=list(catalog.routes())
+        for operation in (identifiers[0],identifiers[len(identifiers)//2],identifiers[-1]):
+            self.assertEqual(catalog.find_route(operation),catalog.routes()[operation])
+        self.assertIsNone(catalog.find_route('absent_operation'))
         self.assertEqual(catalog.routes()['wb_get_adv_start']['category'],'write')
         self.assertEqual(catalog.routes()['ozon_post_v1_fbp_order_direct_timeslot_edit']['category'],'write')
         for access,expected in [('marketplaces',set()),('avito',set()),('all',set()),

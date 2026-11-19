@@ -299,7 +299,9 @@ class OzonArticleSummaryTests(unittest.TestCase):
                     'portal._provider_worker()\n'
                     'open('+repr(marker)+',"w",encoding="utf-8").write(json.dumps(calls))\n')
             with open(worker,'w',encoding='utf-8') as file: file.write(script)
-            with patch('portal.PROVIDER_WORKER',worker):
+            # Exercise the complete four-response projection on a cold runner.
+            # Separate tests below simulate both slow preparation and cancellation.
+            with patch('portal.PROVIDER_WORKER',worker), patch('portal.PROVIDER_DEADLINE_SECONDS',60):
                 result=portal.provider_read('ozon_article_summary',ARGS,CREDS,
                                             finance_gate_dir=os.path.join(tmp,'gate'))
             self.assertEqual(result['status'],'partial')

@@ -43,7 +43,10 @@ portal._provider_worker()
                     # A preceding unknown 429 must not make the next scenario unreachable.
                     state = Path(tmp) / str(scenario)
                     state.mkdir()
-                    with patch('portal.PROVIDER_WORKER', str(worker)), patch.dict(
+                    # This matrix checks the public-safe outcome for each response.
+                    # Its simulated timeouts come from the transport. The real
+                    # process deadline and kill behavior have their own test below.
+                    with patch('portal.PROVIDER_WORKER', str(worker)), patch('portal.PROVIDER_DEADLINE_SECONDS',60), patch.dict(
                             os.environ, {'OZON_FINANCE_GATE_DIR': str(state / 'gate')}):
                         if scenario == 'ok':
                             item = provider_read('wb_prices', {'limit':1}, {'api_token':'synthetic-secret'})['items'][0]

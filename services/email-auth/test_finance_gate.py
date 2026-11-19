@@ -227,7 +227,8 @@ class FinanceGateTests(unittest.TestCase):
 
     def test_local_tls_setup_failure_does_not_leave_uncertain_state(self):
         creds={'client_id':self.client,'api_key':'synthetic-private'}
-        with patch('portal.ssl.create_default_context',side_effect=OSError('not exported')):
+        with patch('market_https._context',side_effect=OSError('not exported')), \
+             patch('urllib.request.OpenerDirector.open',side_effect=AssertionError('unexpected request')):
             with self.assertRaises(gate.LocalPreparationError):
                 gate.run(self.root,self.client,lambda:portal._provider_read('ozon_accrual_types',{},creds))
         self.assertEqual(gate.run(self.root,self.client,lambda:'next'),'next')
@@ -418,7 +419,9 @@ class FinanceGateTests(unittest.TestCase):
                   'portal._provider_worker()\n')
         worker=os.path.join(self.temp.name,'fake_worker.py')
         with open(worker,'w',encoding='utf-8') as file: file.write(script)
-        with patch('portal.PROVIDER_WORKER',worker):
+        # This fixture checks HTTP error serialization across a cold child.
+        # The hard cancellation deadline is exercised in test_provider_deadline.
+        with patch('portal.PROVIDER_WORKER',worker), patch('portal.PROVIDER_DEADLINE_SECONDS',60):
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 portal.provider_read('ozon_accrual_types',{}, {'client_id':self.client,'api_key':'fake'},
                                      finance_gate_dir=self.root)
@@ -434,7 +437,7 @@ class FinanceGateTests(unittest.TestCase):
                   'portal._provider_worker()\n')
         worker=os.path.join(self.temp.name,'fake_worker.py')
         with open(worker,'w',encoding='utf-8') as file: file.write(script)
-        with patch('portal.PROVIDER_WORKER',worker):
+        with patch('portal.PROVIDER_WORKER',worker), patch('portal.PROVIDER_DEADLINE_SECONDS',60):
             with self.assertRaises(gate.ProviderResponseTooLarge) as caught:
                 portal.provider_read('ozon_accrual_types',{}, {'client_id':self.client,'api_key':'fake'},
                                      finance_gate_dir=self.root)

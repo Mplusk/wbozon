@@ -117,7 +117,8 @@ def main():
                     limit = row['contract']['definitions']['TextLimit']
                     limit['anyOf'] = limit.pop('oneOf')
                 row['schema_sha256'] = source['sha256']
-            print(json.dumps(row,ensure_ascii=False,separators=(',',':'),allow_nan=False),file=out)
+            ordered={'operation_id':row.pop('operation_id'),**row}
+            print(json.dumps(ordered,ensure_ascii=False,separators=(',',':'),allow_nan=False),file=out)
 
 
 if __name__=='__main__':

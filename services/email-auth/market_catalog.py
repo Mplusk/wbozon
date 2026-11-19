@@ -59,6 +59,18 @@ def routes():
     return result
 
 
+@lru_cache(maxsize=64)
+def find_route(operation_id):
+    # A short-lived provider worker requests one method. The compiler writes
+    # the identifier first on every line so only that contract needs decoding.
+    prefix=b'{"operation_id":'+json.dumps(operation_id,ensure_ascii=True).encode('ascii')+b','
+    with ROUTES.open('rb') as source:
+        for line in source:
+            if line.startswith(prefix):
+                return json.loads(line)
+    return None
+
+
 def available(access):
     if access=='catalog_operations':
         return PUBLIC_TOOLS.keys()
@@ -193,7 +205,7 @@ def validate(tool, arguments):
             raise ValueError('Invalid reference')
     if 'operation_id' not in arguments:
         return
-    row = routes().get(arguments['operation_id'])
+    row = find_route(arguments['operation_id'])
     if row is None:
         raise ValueError('Unknown operation')
     if tool in ('market_api_read','market_api_propose'):
@@ -294,7 +306,7 @@ def build_request(row, inputs, credentials):
 
 def transfer(tool, arguments, creds, directory, deadline):
     validate(tool,arguments)
-    row = routes()[arguments['operation_id']]
+    row = find_route(arguments['operation_id'])
     request = build_request(row,arguments['input'],creds)
     wire = market_transport.Wire(row['market'],creds,directory,deadline)
     interval=row.get('interval_seconds',{})
