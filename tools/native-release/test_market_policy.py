@@ -31,7 +31,7 @@ class CutoverRecovery(unittest.TestCase):
         for phase in ('starting', 'restoring'):
             host.workers_idle.side_effect = [False, True, True]
             host.health.side_effect = [TimeoutError(), None]
-            with (self.subTest(phase=phase), patch('cd.time.monotonic', side_effect=[0, 20, 47]),
+            with (self.subTest(phase=phase), patch('cd.time.monotonic', side_effect=[0, 20, 107]),
                   patch('cd.time.sleep'), patch('cd.process_uid', return_value=400)):
                 txn.ready({'phase':phase, 'mark':7}, 'release', guard)
         self.assertEqual(host.health.call_count, 4)
@@ -45,7 +45,7 @@ class CutoverRecovery(unittest.TestCase):
         txn = Transaction(host)
         host.process.return_value = (123, 'generation', '/unit')
         host.health.side_effect = TimeoutError()
-        for phase, budget in (('starting', 90), ('committed', 18), ('restoring', 90)):
+        for phase, budget in (('starting', 180), ('committed', 18), ('restoring', 180)):
             with self.subTest(phase=phase), patch('cd.time.monotonic', side_effect=[0, budget]):
                 with self.assertRaisesRegex(ReleaseError, 'marked health response'):
                     txn.ready({'phase':phase, 'mark':7}, 'new', guard)
