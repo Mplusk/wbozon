@@ -1,6 +1,6 @@
 """Join verified seller reports without changing their time, stock or payment basis."""
 from datetime import date, timedelta
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 import time
 
 import market_composites
@@ -215,32 +215,41 @@ def _avito(name, args, mapping, creds, directory, deadline):
     if name == "unit_economics":
         first,last=seller_views.period(args)
         dates=dict(dateFrom=first.isoformat(),dateTo=last.isoformat())
-        query=dict(dates,grouping="item",metrics=["deliveredItems","deliveredItemsPrice"],limit=100,offset=0)
+        spending_metrics={"promotion":"promoSpending","presence":"presenceSpending","commission":"commission","rest":"restSpending"}
+        query=dict(dates,grouping="item",metrics=["deliveredItems","deliveredItemsPrice",*spending_metrics.values()],limit=100,offset=0)
         metrics={}
         while time.monotonic()+1<deadline:
             page=get("avito_item_analytics",query)
             groups=((page.get("data") or {}).get("result") or {}).get("groupings") or []
-            matches=[g for g in groups if str(g.get("id"))==str(item)]
+            matches=[g for g in groups if isinstance(g,dict) and str(g.get("id"))==str(item)
+                     and g.get("type") in (None,"item")]
             if len(matches)==1:
-                metrics={m["slug"]:m["value"] for m in matches[0].get("metrics",[]) if "slug" in m and m.get("value") is not None}
+                lines=matches[0].get("metrics") or []
+                for slug in query["metrics"]:
+                    values=[m.get("value") for m in lines if isinstance(m,dict) and m.get("slug")==slug]
+                    if len(values)!=1 or values[0] is None:
+                        continue
+                    try:
+                        value=Decimal(str(values[0]))
+                    except InvalidOperation:
+                        continue
+                    if value.is_finite():
+                        metrics[slug]=value
                 break
+            if len(matches)>1:break
             nxt=(page.get("pagination") or {}).get("next")
             if type(nxt) is not int or nxt<=query["offset"]:break
             query["offset"]=nxt
-        spend=get("avito_account_spendings",dict(dates,grouping="month",filter={"itemIDs":[int(item)]},
-                  spendingTypes=["promotion","presence","commission","rest"]))
-        groups=((spend.get("data") or {}).get("result") or {}).get("groupings") or []
-        expenses={line["slug"]:Decimal(str(line["value"]))/100 for group in groups for line in group.get("spendings",[])
-                  if line.get("slug") and line.get("value") is not None} if len(groups)==1 else {}
+        expenses={k:metrics[m]/100 for k,m in spending_metrics.items() if m in metrics}
         quantity=metrics.get("deliveredItems")
-        delivered=Decimal(str(metrics["deliveredItemsPrice"]))/100 if "deliveredItemsPrice" in metrics else None
-        quantity=Decimal(str(quantity)) if quantity is not None else None
+        delivered=metrics["deliveredItemsPrice"]/100 if "deliveredItemsPrice" in metrics else None
         units=int(quantity) if quantity is not None and quantity>=0 and quantity==quantity.to_integral_value() else None
         components=("promotion","presence","rest")
         net=delivered-sum(expenses[k] for k in components) if delivered is not None and all(k in expenses for k in components) else None
         data.update(sold_units=units,delivered_payout=str(delivered) if delivered is not None else None,
-            expenses={k:str(v) for k,v in expenses.items()},currency="RUB",status="reported" if net is not None else "partial_settlement",
+            expenses={k:str(v) for k,v in expenses.items()},currency="RUB",status="reported" if net is not None and units is not None else "partial_settlement",
             net_after_expenses={"amount":str(net) if net is not None else None,"per_sold_unit":seller_views.num(net/units) if net is not None and units else None},
+            source="avito_item_analytics",source_unit="kopeck",
             basis="deliveredItemsPrice_after_commission_less_item_attributed_promotion_presence_rest")
     return data
 

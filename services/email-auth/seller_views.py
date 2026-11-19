@@ -286,8 +286,9 @@ def render(r,read=None):
     if not r.issues and name in ("ozon_compensations","ozon_buyout","wb_retentions","ozon_supply_acts","ozon_removals","ozon_fbs_orders"):
         totals={}
         for row in items:
-            key=(row.get("kind") or row.get("act_type") or name,row.get("currency"))
+            key=(row.get("kind") or row.get("act_type") or name,row.get("currency"),row.get("supply_id") if name=="ozon_supply_acts" else None,row.get("act_id") if name=="ozon_supply_acts" else None)
             bucket=totals.setdefault(key,{"kind":key[0],"currency":key[1],"rows":0})
+            if name=="ozon_supply_acts":bucket.update(supply_id=key[2],act_id=key[3])
             bucket["rows"]+=1
             for field in ("quantity","declared","received","difference","amount"):
                 v=row.get(field)

@@ -131,19 +131,34 @@ class Contracts(unittest.TestCase):
                 self.assertEqual(finance_gate.run(gate,"1",lambda:7,read_recovery=True),7)
 
     def test_avito_item_income_keeps_seller_commission_out_of_second_deduction(self):
+        group_type="item"
+        duplicate_promotion=False
         def provider(tool,args,*_):
             if tool=="avito_get_item_info":
                 self.assertEqual(args,{"item_id":123})
                 return {"data":{"autoload_item_id":"sample","status":"active"}}
             if tool=="avito_item_analytics":
                 self.assertNotIn("filter",args)
-                return {"data":{"result":{"groupings":[{"id":"123","metrics":[
-                    {"slug":"deliveredItems","value":2},{"slug":"deliveredItemsPrice","value":10000}]}]}}}
-            self.assertEqual(args["filter"],{"itemIDs":[123]})
-            return {"data":{"result":{"groupings":[{"spendings":[{"slug":key,"value":v} for key,v in
-                [("promotion",1000),("presence",500),("commission",200),("rest",0)]]}]}}}
-        with patch.object(avito_mcp,"read",side_effect=provider):
-            actual=seller_insights._avito("unit_economics",{"article":"sample","month":"2026-10"},
+                values={"deliveredItems":2,"deliveredItemsPrice":10000,"promoSpending":1000,"presenceSpending":500,
+                        "commission":200,"restSpending":0}
+                self.assertEqual(set(args["metrics"]),set(values))
+                metrics=[{"slug":k,"value":v} for k,v in values.items()]
+                if duplicate_promotion:
+                    metrics.append({"slug":"promoSpending","value":1000})
+                return {"data":{"result":{"groupings":[{"id":"123","type":group_type,"metrics":metrics}]}}}
+            self.fail("Unexpected source for item expenses")
+        def calculate():
+            return seller_insights._avito("unit_economics",{"article":"sample","month":"2026-10"},
                 {"avito_item_id":123,"avito_article":"sample"},{"client_id":"fixture"},"fixture",time.monotonic()+10)
-        self.assertEqual(actual["net_after_expenses"]["per_sold_unit"],"42.5")
-        self.assertEqual(actual["sold_units"],2)
+        with patch.object(avito_mcp,"read",side_effect=provider):
+            actual=calculate()
+            self.assertEqual(actual["net_after_expenses"]["per_sold_unit"],"42.5")
+            self.assertEqual(actual["sold_units"],2)
+            group_type="month"
+            self.assertIsNone(calculate()["delivered_payout"])
+            group_type="item"
+            duplicate_promotion=True
+            partial=calculate()
+            self.assertEqual((partial["delivered_payout"],partial["sold_units"]),("100",2))
+            self.assertIsNone(partial["net_after_expenses"]["amount"])
+            self.assertNotIn("promotion",partial["expenses"])

@@ -768,6 +768,15 @@ def execute(name, args, creds, directory, deadline):
                         data["status"] = "partial_catalog_identity" if verified else "catalog_identity_unavailable"
             import seller_insights
             seller_insights.enrich(name,args,data,wires,mapping,creds,directory,deadline)
+            if name=="sales_drop_check":
+                def display(value):
+                    if isinstance(value,dict):return {k:display(v) for k,v in value.items()}
+                    if isinstance(value,list):return [display(v) for v in value]
+                    if isinstance(value,(Decimal,float)):
+                        n=Decimal(str(value))
+                        return int(n) if n==n.to_integral_value() else market_specs.seller_views.num(n)
+                    return value
+                data=display(data)
             used_wires=list(wires.values())
         else:
             p = provider(name)

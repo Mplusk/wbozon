@@ -140,7 +140,7 @@ def unit_row(provider, article, currency, units, returned, amounts, cost=None, c
             with localcontext() as display:
                 display.clear_flags()
                 value = amount / denominator - subtract
-                return format(value, ".4f") if display.flags[Inexact] else str(value)
+                return format(value, ".4f") if display.flags[Inexact] or value.as_tuple().exponent < -4 else str(value)
         rates = {k: per_unit(v) for k, v in numeric.items()}
         cost = money(cost)
         margin = None

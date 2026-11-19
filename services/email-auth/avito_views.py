@@ -1,6 +1,5 @@
 """Seller views over the existing account-bound read-only Avito operations."""
 from datetime import datetime, timezone, timedelta
-from decimal import Decimal
 
 
 def contracts(raw):
@@ -118,10 +117,9 @@ def read(name,args,creds,directory,deadline):
                 q["filter"]={"itemIDs":ids}
         rows=_items(get(op,q)["data"]);more=offset+size<len(rows);rows=rows[offset:offset+size]
         if name=="avito_spendings":
-            for group in rows:
-                for line in group.get("spendings") or []:
-                    if line.get("value") is not None:
-                        line.update(amount=format(Decimal(str(line["value"]))/100,"f"),currency="RUB",source_unit="kopeck")
+            metadata["monetary_coverage"]="provider_documents_conflicting_units"
+            metadata["source_field"]="result.groupings[].spendings[].value"
+            metadata["unit_documentation"]={"field":"RUB","operation_description":"kopeck"}
             metadata["total_basis"]="all_includes_the_individual_spending_types"
     else:
         if name=="avito_stats":

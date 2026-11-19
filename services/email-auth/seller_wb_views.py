@@ -85,11 +85,16 @@ def _inventory(r):
         for d in rows:
             key=(d["article"],d.get("warehouse_id"),d.get("warehouse"))
             values=grouped.setdefault(key,{})
-            values[d["date"]]=values.get(d["date"],0)+d["stock"]
+            values.setdefault(d["date"],[]).append(d)
         for (article,wid,office),values in grouped.items():
             day=max(values)
-            yield {"article":article,"warehouse_id":wid,"warehouse":office,"stock":values[day],"date":day,
-                   "observed_days":len(values),"zero_on_observation_dates":sorted(d for d,n in values.items() if n==0)}
+            positions=values[day]
+            def total(field):
+                vals=[p.get(field) for p in positions]
+                return sum(vals) if all(type(v) is int for v in vals) else None
+            yield {"article":article,**({"nm_id":nm} if nm else {}),"warehouse_id":wid,"warehouse":office,"stock":total("stock"),"date":day,
+                   "to_buyer":total("to_buyer"),"from_buyer":total("from_buyer"),
+                   "observed_days":len(values),"zero_on_observation_dates":sorted(d for d,rs in values.items() if sum(r["stock"] for r in rs)==0)}
     else:yield from rows
 
 
