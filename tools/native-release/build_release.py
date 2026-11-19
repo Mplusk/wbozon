@@ -21,7 +21,7 @@ CATALOG_HOST_TESTS = (
     'test_finance_gate.FinanceGateTests.test_cooldown_is_enforced_after_a_fresh_process_starts',
     'test_finance_gate.FinanceGateTests.test_killed_process_leaves_uncertain_state',
     'test_finance_gate.FinanceGateTests.test_worker_preserves_429_header_without_provider_body',
-    'test_provider_deadline.ProviderDeadlineTests.test_hung_worker_is_killed_at_deadline',
+    'test_provider_deadline.ProviderDeadlineTests.test_expired_worker_startup_prevents_dispatch_and_reaps_child',
 )
 
 
@@ -114,7 +114,7 @@ def _command(argv, *, cwd=None, timeout=120, stage='candidate preparation'):
         raise BuildError(f'{stage} failed with exit code {result.returncode}')
 
 
-def _sandbox(release, unit, args, cwd, *, runtime_seconds):
+def _sandbox(release, unit, args, cwd, *, runtime_seconds, cpu_weight=20, cpu_quota=150):
     properties = ['--property=User=wbozon-test', '--property=Group=wbozon-test', '--property=ProtectProc=invisible',
                   '--property=PrivateNetwork=yes', '--property=PrivateIPC=yes', '--property=PrivateDevices=yes',
                   '--property=ProtectSystem=strict', '--property=ProtectHome=yes', '--property=NoNewPrivileges=yes',
@@ -124,8 +124,8 @@ def _sandbox(release, unit, args, cwd, *, runtime_seconds):
                   '--property=TemporaryFileSystem=/tmp:rw,nosuid,nodev,noexec,size=64M,mode=1777',
                   '--property=TemporaryFileSystem=/var/tmp:rw,nosuid,nodev,noexec,size=64M,mode=1777',
                   '--property=BindReadOnlyPaths=' + str(release) + ':' + str(release),
-                  '--property=MemoryMax=512M', '--property=CPUQuota=150%', '--property=TasksMax=100',
-                  '--property=CPUWeight=20', '--property=IOWeight=20',
+                  '--property=MemoryMax=512M', f'--property=CPUQuota={cpu_quota}%', '--property=TasksMax=100',
+                  f'--property=CPUWeight={cpu_weight}', '--property=IOWeight=20',
                   '--property=RuntimeMaxSec=' + str(runtime_seconds)]
     clean = ['/usr/bin/env', '-i', 'HOME=/tmp', 'PATH=/usr/bin:/bin', 'LC_ALL=C.UTF-8',
              'PYTHONDONTWRITEBYTECODE=1']
@@ -188,10 +188,13 @@ def prepare(files, release, work, *, run_id, attempt, release_gid):
     prefix = 'wbozon-test-' + run_id + '-' + attempt
     # Older releases predate the catalogue and retain their original host checks.
     tests = CATALOG_HOST_TESTS if 'service/market_catalog.py' in files else ()
+    # Bound the focused checks below one core while allowing their cold workers
+    # to make progress alongside the package manager and other host services.
+    resources = {'cpu_weight': 200, 'cpu_quota': 75} if tests else {}
     _sandbox(release, prefix + '-unit', [str(python), '-m', 'unittest', '-q', *tests], release / 'service',
-             runtime_seconds=720)
+             runtime_seconds=720, **resources)
     _sandbox(release, prefix + '-smoke', [str(python), str(release / 'test_native.py')], '/tmp',
-             runtime_seconds=300)
+             runtime_seconds=300, **resources)
     if inventory(release) != before:
         raise BuildError('candidate changed during isolated tests')
     for path in [release, *release.rglob('*')]:

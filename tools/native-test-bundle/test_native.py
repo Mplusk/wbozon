@@ -12,21 +12,23 @@ with tempfile.TemporaryDirectory() as tmp:
         path=root/name;path.write_bytes(value);path.chmod(0o600);env[name]=str(path)
     with socket.socket() as s:s.bind(('127.0.0.1',0));port=s.getsockname()[1]
     process=subprocess.Popen([str(pathlib.Path(sys.executable).parent/'gunicorn'),'--config','gunicorn.conf.py','--bind',f'127.0.0.1:{port}','portal:create_portal()'],cwd=base/'service',env=env,start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    def request(path,method='GET',data=None,headers=None,timeout=10):
+    def request(path,method='GET',data=None,headers=None,timeout=30):
         h={'Host':'3dprinta.shop',**(headers or {})}
         req=urllib.request.Request(f'http://127.0.0.1:{port}'+path,data=data,headers=h,method=method)
         try:
             with urllib.request.urlopen(req,timeout=timeout) as r:return r.status,r.read()
         except urllib.error.HTTPError as e:return e.code,e.read()
     try:
-        ready_by=time.monotonic()+60
+        ready_by=time.monotonic()+120
         while (remaining:=ready_by-time.monotonic())>0:
             if process.poll() is not None:raise RuntimeError('runtime exited')
             try:
-                if request('/',timeout=min(3,remaining))[0]==200:break
+                status,body=request('/healthz',timeout=min(30,remaining))
+                if status==200 and json.loads(body)=={'status':'ok'}:break
             except OSError:pass
-            time.sleep(.1)
+            time.sleep(.5)
         else:raise RuntimeError('runtime readiness timeout')
+        assert request('/')[0]==200
         assert request('/settings')[0]==401
         assert request('/api/read','POST',b'{}',{'Content-Type':'application/json','oai-authenticated-user-id':'owner'})[0]==401
         # Synthetic session fixture, never an authentication bypass in the app.
@@ -43,11 +45,12 @@ with tempfile.TemporaryDirectory() as tmp:
         payload=json.dumps({'operation':'ozon_products','arguments':{}}).encode()
         assert request('/api/read','POST',payload,{'Authorization':'Bearer '+token,'Content-Type':'application/json'})[0]==409
     finally:
+        primary_error=sys.exc_info()[1]
         process.terminate()
         try:
             # Gunicorn gives its workers up to 30 seconds to shut down. Allow
             # time to reap both workers under the production sandbox CPU share.
-            status = process.wait(timeout=60)
+            status = process.wait(timeout=90)
         except subprocess.TimeoutExpired:
             # Only this synthetic server and its children belong to this group.
             try:
@@ -55,7 +58,12 @@ with tempfile.TemporaryDirectory() as tmp:
             except ProcessLookupError:
                 pass
             process.wait(timeout=10)
-            raise RuntimeError('native smoke Gunicorn did not stop within 60 seconds') from None
-        if status != 0:
-            raise RuntimeError('native smoke Gunicorn exited with status ' + str(status))
+            message='native smoke Gunicorn did not stop within 90 seconds'
+            if primary_error is None:raise RuntimeError(message) from None
+            primary_error.add_note(message)
+        else:
+            if status != 0:
+                message='native smoke Gunicorn exited with status ' + str(status)
+                if primary_error is None:raise RuntimeError(message)
+                primary_error.add_note(message)
     print('PASS: real native Gunicorn + file secrets + sessions + CSRF + encrypted storage + independent API auth + graceful shutdown')

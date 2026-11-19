@@ -22,15 +22,16 @@ class BuildInputTests(unittest.TestCase):
     def test_client_waits_for_the_bounded_isolated_test_unit(self):
         release = Path('/opt/test-release')
         collected = Mock(returncode=0, stdout='not-found\n')
-        for seconds in (300, 720):
-            with self.subTest(seconds=seconds), patch.object(build_release, '_command') as run, \
+        for seconds, resources in ((300, {}), (720, {}), (300, {'cpu_weight': 200, 'cpu_quota': 75})):
+            with self.subTest(seconds=seconds, resources=resources), patch.object(build_release, '_command') as run, \
                     patch.object(build_release.subprocess, 'run', return_value=collected):
                 build_release._sandbox(release, 'wbozon-test', ['python', '-m', 'unittest'], release,
-                                       runtime_seconds=seconds)
+                                       runtime_seconds=seconds, **resources)
                 args = run.call_args.args[0]
                 self.assertIn('--property=RuntimeMaxSec=' + str(seconds), args)
                 self.assertIn('--property=PrivateNetwork=yes', args)
-                self.assertIn('--property=CPUWeight=20', args)
+                self.assertIn(f"--property=CPUWeight={resources.get('cpu_weight', 20)}", args)
+                self.assertIn(f"--property=CPUQuota={resources.get('cpu_quota', 150)}%", args)
                 self.assertGreater(run.call_args.kwargs['timeout'], seconds)
 
     def test_builder_reports_the_stage_of_a_timeout(self):

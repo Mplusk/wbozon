@@ -2,11 +2,12 @@
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import time
 import unittest
 import urllib.error
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from portal import provider_read
 
@@ -98,6 +99,34 @@ portal._provider_worker()
             self.assertLess(time.monotonic()-start, 1.5)
             time.sleep(2)
             self.assertFalse(marker.exists(), 'timed out worker was not stopped')
+
+    def test_expired_worker_startup_prevents_dispatch_and_reaps_child(self):
+        # A controlled monotonic clock reproduces a slow launch. The subprocess,
+        # its stdin, the kill signal and the final wait are all real.
+        with tempfile.TemporaryDirectory() as tmp:
+            received = Path(tmp) / 'received'
+            worker = Path(tmp) / 'worker.py'
+            worker.write_text('import pathlib,sys,time\nif sys.stdin.buffer.read():\n'
+                              '    pathlib.Path('+repr(str(received))+').touch()\n'
+                              'time.sleep(60)\n', encoding='utf-8')
+            spawn = subprocess.Popen
+            children = []
+            with patch('portal.time') as clock, patch('portal.PROVIDER_DEADLINE_SECONDS',20):
+                clock.monotonic.return_value = 10.0
+                def delayed_start(*args, **kwargs):
+                    child = spawn(*args, **kwargs)
+                    child.communicate = Mock(wraps=child.communicate)
+                    children.append(child)
+                    clock.monotonic.return_value = 31.0
+                    return child
+                with patch('portal.PROVIDER_WORKER',str(worker)), patch('portal.subprocess.Popen',side_effect=delayed_start):
+                    with self.assertRaises(TimeoutError):
+                        provider_read('wb_prices', {'limit':1}, {'api_token':'synthetic-secret'})
+            self.assertEqual(len(children), 1)
+            children[0].communicate.assert_not_called()
+            self.assertIsNotNone(children[0].returncode)
+            self.assertNotEqual(children[0].returncode, 0)
+            self.assertFalse(received.exists())
 
     def test_credentials_only_passed_on_stdin(self):
         with tempfile.TemporaryDirectory() as tmp:

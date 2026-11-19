@@ -356,6 +356,8 @@ def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=Non
     Credentials go over a private stdin pipe, never argv or the environment.
     Killing the subprocess on timeout also stops a stuck resolver/socket call.
     """
+    started=time.monotonic()
+    hard_deadline=started+PROVIDER_DEADLINE_SECONDS
     if finance_gate_dir is None and operation not in finance_gate.FINANCE_OPERATIONS:
         finance_gate_dir = os.environ.get('OZON_FINANCE_GATE_DIR')
         if finance_gate_dir is None and os.environ.get('VAULT_PATH'):
@@ -370,20 +372,29 @@ def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=Non
                  'ALL_PROXY', 'NO_PROXY', 'https_proxy', 'http_proxy', 'all_proxy',
                  'no_proxy', 'SSL_CERT_FILE', 'SSL_CERT_DIR'):
         if name in os.environ: env[name] = os.environ[name]
-    started=time.monotonic()
+    deadline=started+max(0,PROVIDER_DEADLINE_SECONDS-2)
+    payload=json.dumps({'operation':operation, 'args':args, 'creds':creds,
+                        'finance_gate_dir':finance_gate_dir,'deadline_monotonic':deadline,'dispatch':dispatch}).encode()
+    if time.monotonic()>=hard_deadline:
+        raise market_diagnostics.timeout(operation,time.monotonic()-started,None)
     try:
-        deadline=started+max(0,PROVIDER_DEADLINE_SECONDS-2)
-        process = subprocess.run([sys.executable, PROVIDER_WORKER, '--provider-worker'],
-            input=json.dumps({'operation':operation, 'args':args, 'creds':creds,
-                              'finance_gate_dir':finance_gate_dir,'deadline_monotonic':deadline,'dispatch':dispatch}).encode(),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=PROVIDER_DEADLINE_SECONDS,
-            env=env, check=False)
+        with subprocess.Popen([sys.executable, PROVIDER_WORKER, '--provider-worker'], env=env,
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+            try:
+                remaining=hard_deadline-time.monotonic()
+                if remaining<=0:
+                    # A delayed launch must never receive credentials or dispatch work after expiry.
+                    raise subprocess.TimeoutExpired(process.args,PROVIDER_DEADLINE_SECONDS)
+                stdout,stderr=process.communicate(payload,timeout=remaining)
+            except BaseException:
+                process.kill()
+                raise
     except subprocess.TimeoutExpired as exc:
         raise market_diagnostics.timeout(operation,time.monotonic()-started,exc.stderr) from None
     if process.returncode:
         raise urllib.error.URLError('Marketplace worker failed')
     try:
-        result=json.loads(process.stdout)
+        result=json.loads(stdout)
         if result.get('kind') == 'http' and type(result.get('status')) is int:
             delay = result.get('retry_after_seconds')
             if type(delay) is not int or not 0 <= delay <= finance_gate.MAX_RETRY_SECONDS: delay = None
@@ -404,7 +415,7 @@ def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=Non
             raise finance_gate.ProviderResponseInvalid('Invalid provider response')
         if result.get('kind') == 'local_preparation_failed':
             raise finance_gate.LocalPreparationError('Provider request could not be prepared')
-        if result.get('kind') == 'timeout': raise market_diagnostics.timeout(operation,time.monotonic()-started,getattr(process,'stderr',None))
+        if result.get('kind') == 'timeout': raise market_diagnostics.timeout(operation,time.monotonic()-started,stderr)
         if result.get('kind') == 'unavailable': raise urllib.error.URLError('Marketplace unavailable')
         if result.get('kind') != 'ok' or not isinstance(result.get('result'),dict):
             raise ValueError('Marketplace response failed')
