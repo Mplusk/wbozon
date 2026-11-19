@@ -19,6 +19,12 @@ def snapshot(page):
 def _compensation_adjustment(row, report, ledger):
     net=row["net_after_expenses"]
     info=row["compensation_income"]
+    if "amount_before_compensations" in net:
+        net["amount"]=net["amount_before_compensations"]
+        net["per_sold_unit"]=net["per_sold_unit_before_compensations"]
+        net.get("signed_settlement_adjustments",{}).pop("item_compensations",None)
+    info.pop("confirmed_adjustment",None)
+    info["included_in_net"]=False
     entries=report.get("items") or []
     if report.get("complete") and not entries:
         info.update(reconciliation="complete_exports_no_matching_lines",confirmed_adjustment="0")
@@ -29,7 +35,8 @@ def _compensation_adjustment(row, report, ledger):
                and e.get("currency")==row["currency"] for e in entries):
         return
     types=ledger("ozon_accrual_types",{}).get("types") or []
-    fee_ids={t["id"] for t in types if any(term in (t.get("name") or "").casefold() for term in ("компенсац","возмещен"))}
+    fee_ids={t["id"] for t in types if any(term in ((t.get("name") or "")+" "+(t.get("description") or "")).casefold()
+                                             for term in ("компенсац","возмещен","compensation","reimbursement"))}
     matched={}
     for day in sorted({e["date"] for e in entries}):
         expected=[e for e in entries if e["date"]==day]
@@ -37,6 +44,9 @@ def _compensation_adjustment(row, report, ledger):
         source=ledger("ozon_accrual_day",args)
         cursors=set()
         while True:
+            if (not isinstance(source.get("matching_rows"),list) or source.get("date")!=day or
+                source.get("requested_cursor")!=args.get("last_id","") or not isinstance(source.get("next_cursor"),str)):
+                return
             for line in source.get("matching_rows") or []:
                 if line.get("category")!="ITEM":continue
                 for e in expected:
@@ -46,7 +56,9 @@ def _compensation_adjustment(row, report, ledger):
                              and (f.get("accrued") or {}).get("currency")==row["currency"]]
                     if len(amounts)!=1 or amounts[0] is None or key in matched:return
                     value=Decimal(str(amounts[0]))
-                    if abs(value)!=abs(Decimal(e["amount"])) or (value<0)!=(e["kind"]=="DECOMPENSATION_REPORT"):return
+                    documented=Decimal(e["amount"])
+                    if e["kind"]=="COMPENSATION_REPORT" and documented<0:return
+                    if abs(value)!=abs(documented) or (value<0)!=(e["kind"]=="DECOMPENSATION_REPORT"):return
                     matched[key]=value
             marker=source.get("next_cursor")
             if not marker:break
@@ -59,6 +71,7 @@ def _compensation_adjustment(row, report, ledger):
     revised=Decimal(net["amount"])+adjustment
     info.update(included_in_net=True,confirmed_adjustment=str(adjustment),reconciliation="exact_ITEM_accrual_id_sku_day_currency_signed_fee")
     net["amount_before_compensations"]=net["amount"]
+    net["per_sold_unit_before_compensations"]=net.get("per_sold_unit")
     net["amount"]=str(revised)
     if row.get("sold_units"):
         net["per_sold_unit"]=seller_views.num(revised/row["sold_units"])
@@ -75,6 +88,10 @@ def _units(row, read, period, ledger=None):
     compensation = read("ozon_compensations", period)
     row["compensation_income"] = dict(snapshot(compensation),
         included_in_net=False, reconciliation="match_each_operation_to_existing_accruals_before_adding")
+    net=row["net_after_expenses"]
+    net["complete"]=net.setdefault("complete_before_compensations",net.get("complete",False))
+    if "compensation_reconciliation" in net.get("unreconciled",[]):
+        net["unreconciled"].remove("compensation_reconciliation")
     _compensation_adjustment(row,compensation,ledger)
     if row["compensation_income"].get("confirmed_adjustment") is None:
         net=row["net_after_expenses"]

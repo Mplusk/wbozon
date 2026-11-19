@@ -98,12 +98,21 @@ class Contracts(unittest.TestCase):
         entry=dict(operation_id="301",sku="101",date="2026-10-12",currency="RUB",amount="10",kind="COMPENSATION_REPORT")
         def ledger(tool,args):
             if tool=="ozon_accrual_types":return {"types":[{"id":5,"name":"Компенсация за утрату"}]}
-            return {"matching_rows":[dict(category="ITEM",accrual_id="301",sku="101",fees=[
+            return {"date":args["date"],"requested_cursor":args.get("last_id",""),"next_cursor":"","matching_rows":[dict(category="ITEM",accrual_id="301",sku="101",fees=[
                 dict(type_id=5,accrued=dict(amount="10",currency="RUB"))])]}
         for operation,expected in (("301","110"),("302","100")):
             row=dict(sold_units=2,currency="RUB",net_after_expenses=dict(amount="100",per_sold_unit="50"),compensation_income={})
-            seller_insights._compensation_adjustment(row,{"complete":True,"items":[dict(entry,operation_id=operation)]},ledger)
+            page={"complete":True,"items":[dict(entry,operation_id=operation)]}
+            seller_insights._compensation_adjustment(row,page,ledger)
+            seller_insights._compensation_adjustment(row,page,ledger)
             self.assertEqual(row["net_after_expenses"]["amount"],expected)
+            def partial(tool,args):
+                if tool=="ozon_accrual_types":return ledger(tool,args)
+                if args.get("last_id"):return {"status":"pending"}
+                return dict(ledger(tool,args),next_cursor="p2")
+            seller_insights._compensation_adjustment(row,page,partial)
+            self.assertEqual(row["net_after_expenses"]["amount"],"100")
+            self.assertFalse(row["compensation_income"]["included_in_net"])
 
     def test_missing_retry_header_resumes_only_after_one_minute(self):
         with tempfile.TemporaryDirectory() as tmp:
