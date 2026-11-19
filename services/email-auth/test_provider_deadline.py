@@ -31,7 +31,7 @@ class Opener:
 urllib.request.build_opener = lambda *handlers: Opener()
 path = sys.argv[1]
 sys.path.insert(0, str(pathlib.Path(path).parent))
-sys.argv = [path, '--provider-worker']
+sys.argv = [path, '--provider-worker', *sys.argv[2:]]
 runpy.run_path(path, run_name='__main__')
 """
         ozon = {'client_id':'8123', 'api_key':'synthetic-private-key'}
@@ -42,9 +42,49 @@ runpy.run_path(path, run_name='__main__')
             with self.subTest(tool=tool), tempfile.TemporaryDirectory() as tmp:
                 request = dict(operation=tool, args=arguments, creds=credentials,
                                finance_gate_dir=str(Path(tmp)/'gates'), deadline_monotonic=time.monotonic()+60)
-                result = subprocess.run([sys.executable, '-B', '-I', '-c', script, str(portal_path)],
-                                        input=json.dumps(request), capture_output=True, text=True, timeout=60, check=True)
-                self.assertEqual(json.loads(result.stdout)['kind'], 'ok')
+                for prepare in (False, True):
+                    command = [sys.executable, '-B', '-I', '-c', script, str(portal_path)]
+                    if prepare:
+                        command.append(tool)
+                    result = subprocess.run(command,
+                                            input=json.dumps(request), capture_output=True, text=True, timeout=60, check=True)
+                    if prepare:
+                        self.assertTrue(result.stdout.startswith('R'))
+                    self.assertEqual(json.loads(result.stdout.removeprefix('R'))['kind'], 'ok')
+
+    @unittest.skipUnless(os.name=='posix', 'native Linux worker readiness pipe')
+    def test_preparation_withholds_credentials_and_network_work_has_its_own_deadline(self):
+        script = """import json, os, select, sys, time
+if select.select([sys.stdin.buffer], [], [], 0.6)[0]:
+    raise SystemExit(2)
+os.write(1, b'R')
+request = json.load(sys.stdin)
+if request['args']['limit'] == 2:
+    time.sleep(5)
+print(json.dumps({'kind':'ok','result':{'private':request['creds']['api_token']=='test-private'}}))
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = Path(tmp)/'worker.py'
+            worker.write_text(script, encoding='utf-8')
+            with (patch.dict(os.environ, {'MCP_PREPARE_MARKET_WORKERS':'1'}),
+                  patch('portal.PROVIDER_WORKER',str(worker)), patch('portal.PROVIDER_STARTUP_SECONDS',10),
+                  patch('portal.PROVIDER_DEADLINE_SECONDS',0.4)):
+                self.assertEqual(provider_read('wb_prices',{'limit':1},{'api_token':'test-private'}),{'private':True})
+                with self.assertRaises(TimeoutError):
+                    provider_read('wb_prices',{'limit':2},{'api_token':'test-private'})
+
+    @unittest.skipUnless(os.name=='posix', 'native Linux worker readiness pipe')
+    def test_unready_worker_never_receives_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp)/'received'
+            worker = Path(tmp)/'worker.py'
+            worker.write_text("import sys,pathlib\nif sys.stdin.buffer.read(): pathlib.Path("+
+                              repr(str(marker))+").touch()\n", encoding='utf-8')
+            with (patch.dict(os.environ, {'MCP_PREPARE_MARKET_WORKERS':'1'}),
+                  patch('portal.PROVIDER_WORKER',str(worker)), patch('portal.PROVIDER_STARTUP_SECONDS',0.3)):
+                with self.assertRaises(TimeoutError):
+                    provider_read('wb_prices',{'limit':1},{'api_token':'test-private'})
+            self.assertFalse(marker.exists())
 
     def test_real_child_serializes_provider_outcomes(self):
         # Launch the production worker entry point in a real child process, with

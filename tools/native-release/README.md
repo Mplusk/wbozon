@@ -26,6 +26,13 @@ reap its workers within the controller's 75-second stop deadline. Forward
 startup and restoration allow 180 seconds for two workers. Each local health
 probe allows five seconds for the verified HTTP response.
 
+The same production drop-in sets `MCP_PREPARE_MARKET_WORKERS=1` through
+`Environment=`. The native Gunicorn timeout is 60 seconds. A catalogue or
+product/price worker gets up to 30 seconds to load the modules and TLS trust
+store before it receives any request or credentials. A one-byte readiness
+signal starts the 20-second request deadline. The parent kills and reaps an
+unready or overdue child. The full operation is bounded at 50 seconds.
+
 Before stopping the portal, the controller fences new connections on its two
 listener addresses, waits for established requests and provider children to exit,
 then holds every existing Ozon finance lock. The deadline leaves a busy portal

@@ -12,7 +12,8 @@ import market_diagnostics
 
 # Provider children are fresh interpreters with a single request and a hard
 # deadline. Load their marketplace implementation only when dispatching it.
-if __name__ != '__main__' or sys.argv[1:] != ['--provider-worker']:
+_worker_cli = __name__ == '__main__' and sys.argv[1:2] == ['--provider-worker']
+if not _worker_cli:
     import hmac, html, secrets, sqlite3, ssl, subprocess, smtplib
     from email.message import EmailMessage
     from urllib.parse import parse_qs, urlsplit
@@ -354,7 +355,24 @@ def _read_article_summary(args,creds,deadline):
     return _guard_ozon_result(result,creds)
 
 PROVIDER_DEADLINE_SECONDS = 20
+PROVIDER_STARTUP_SECONDS = 30
+PREPARED_OPERATIONS = frozenset(('market_api_read','market_api_propose','ozon_products','ozon_prices',
+                                 'wb_products','wb_prices','wb_commissions','wb_box_tariffs'))
 PROVIDER_WORKER = os.path.realpath(__file__)
+
+def _prepare_provider_worker(operation):
+    # No request body or credential has been sent at this point. Use exactly
+    # the same TLS context and module cache as the subsequent real request.
+    if operation.startswith('market_api_'):
+        import market_catalog
+        if operation == 'market_api_propose':
+            import market_actions
+    elif operation.startswith('ozon_'):
+        import ozon_mcp
+    else:
+        import wb_mcp
+    import market_transport  # Also used by the allowlisted request diagnostics.
+    VerifiedHTTPS()
 
 def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=None):
     """Bound the entire provider operation, including DNS and response reads.
@@ -363,7 +381,9 @@ def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=Non
     Killing the subprocess on timeout also stops a stuck resolver/socket call.
     """
     started=time.monotonic()
-    hard_deadline=started+PROVIDER_DEADLINE_SECONDS
+    prepare = (os.name == 'posix' and operation in PREPARED_OPERATIONS
+               and os.environ.get('MCP_PREPARE_MARKET_WORKERS') == '1')
+    hard_deadline=started+PROVIDER_DEADLINE_SECONDS+(PROVIDER_STARTUP_SECONDS if prepare else 0)
     if finance_gate_dir is None and operation not in finance_gate.FINANCE_OPERATIONS:
         finance_gate_dir = os.environ.get('OZON_FINANCE_GATE_DIR')
         if finance_gate_dir is None and os.environ.get('VAULT_PATH'):
@@ -378,15 +398,29 @@ def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=Non
                  'ALL_PROXY', 'NO_PROXY', 'https_proxy', 'http_proxy', 'all_proxy',
                  'no_proxy', 'SSL_CERT_FILE', 'SSL_CERT_DIR'):
         if name in os.environ: env[name] = os.environ[name]
-    deadline=started+max(0,PROVIDER_DEADLINE_SECONDS-2)
-    payload=json.dumps({'operation':operation, 'args':args, 'creds':creds,
-                        'finance_gate_dir':finance_gate_dir,'deadline_monotonic':deadline,'dispatch':dispatch}).encode()
     if time.monotonic()>=hard_deadline:
         raise market_diagnostics.timeout(operation,time.monotonic()-started,None)
+    command=[sys.executable, PROVIDER_WORKER, '--provider-worker']
+    if prepare:
+        command.append(operation)
     try:
-        with subprocess.Popen([sys.executable, PROVIDER_WORKER, '--provider-worker'], env=env,
+        with subprocess.Popen(command, env=env,
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
             try:
+                if prepare:
+                    import select
+                    remaining_startup=started+PROVIDER_STARTUP_SECONDS-time.monotonic()
+                    if remaining_startup<=0 or not select.select([process.stdout],[],[],remaining_startup)[0]:
+                        raise subprocess.TimeoutExpired(process.args,PROVIDER_STARTUP_SECONDS)
+                    if os.read(process.stdout.fileno(),1) != b'R':
+                        raise finance_gate.LocalPreparationError('Marketplace worker could not prepare')
+                    ready_at=time.monotonic()
+                    if ready_at>=started+PROVIDER_STARTUP_SECONDS:
+                        raise subprocess.TimeoutExpired(process.args,PROVIDER_STARTUP_SECONDS)
+                    hard_deadline=min(hard_deadline,ready_at+PROVIDER_DEADLINE_SECONDS)
+                deadline=hard_deadline-min(2,PROVIDER_DEADLINE_SECONDS)
+                payload=json.dumps({'operation':operation, 'args':args, 'creds':creds,
+                                    'finance_gate_dir':finance_gate_dir,'deadline_monotonic':deadline,'dispatch':dispatch}).encode()
                 remaining=hard_deadline-time.monotonic()
                 if remaining<=0:
                     # A delayed launch must never receive credentials or dispatch work after expiry.
@@ -1157,5 +1191,13 @@ def create_portal():
     return Portal(login,vault,secret_file('READ_TOKEN_HASH_FILE'),mcp_read_token_hash=mcp_hash,
                   finance_gate_dir=os.environ.get('OZON_FINANCE_GATE_DIR'))
 
-if __name__ == '__main__' and sys.argv[1:] == ['--provider-worker']:
+if _worker_cli:
+    if sys.argv[2:]:
+        if len(sys.argv)!=3 or sys.argv[2] not in PREPARED_OPERATIONS:
+            raise SystemExit(2)
+        try:
+            _prepare_provider_worker(sys.argv[2])
+        except Exception:
+            raise SystemExit(1) from None
+        os.write(1,b'R')
     _provider_worker()
