@@ -14,6 +14,7 @@ import ozon_mcp, ozon_details, ozon_article_summary, wb_mcp, external_keys, exte
 import market_specs
 import avito_mcp
 import market_actions, market_catalog
+from market_https import VerifiedHTTPS
 import expansion_gateway
 import market_health, market_history
 import market_archive
@@ -200,7 +201,7 @@ def _provider_read(operation, args, creds, *, request_timeout=15, absolute_deadl
         return _read_article_summary(args,creds,deadline)
     try:
         req=ozon_mcp.build_request(operation,args,creds)
-        opener=urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+        opener=urllib.request.build_opener(NoRedirect, VerifiedHTTPS)
     except Exception:
         raise finance_gate.LocalPreparationError('Provider request could not be prepared') from None
     if absolute_deadline is not None:
@@ -280,7 +281,7 @@ def _provider_read(operation, args, creds, *, request_timeout=15, absolute_deadl
             def read_company_currency():
                 try:
                     profile=ozon_mcp.build_seller_info_request(creds)
-                    profile_opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+                    profile_opener = urllib.request.build_opener(NoRedirect, VerifiedHTTPS)
                     with market_cooldown.legacy_open(profile_opener, profile, remaining) as response:
                         raw_profile=response.read(65537)
                     if len(raw_profile)>65536: return

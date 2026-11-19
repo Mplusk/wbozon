@@ -1,8 +1,9 @@
-import gc
 import io
 import json
 import secrets
+import ssl
 import unittest
+import urllib.request
 from email.message import Message
 from unittest.mock import patch
 import time
@@ -10,6 +11,7 @@ import time
 import finance_gate
 import market_actions as actions
 import market_catalog as catalog
+import market_https
 import test_external_mcp_integration
 import test_portal
 
@@ -153,3 +155,15 @@ class CatalogTests(unittest.TestCase):
         with patch('urllib.request.OpenerDirector.open',return_value=response),patch('market_transport.Wire.admit_catalog'):
             with self.assertRaises(finance_gate.ProviderResponseInvalid):
                 catalog.transfer('market_api_propose',args,credentials,self.app.finance_gate_dir,time.monotonic()+5)
+
+    def test_tls_is_prepared_by_the_real_opener_and_reused_across_requests(self):
+        market_https._context.cache_clear()
+        with patch('market_https.ssl.create_default_context',wraps=ssl.create_default_context) as create:
+            create.assert_not_called()
+            openers=[urllib.request.build_opener(market_https.VerifiedHTTPS) for _ in range(2)]
+            first,second=(next(h for h in opener.handlers if isinstance(h,market_https.VerifiedHTTPS)) for opener in openers)
+            self.assertEqual(create.call_count,1)
+            self.assertIs(first._context,second._context)
+            self.assertTrue(first._context.check_hostname)
+            self.assertEqual(first._context.verify_mode,ssl.CERT_REQUIRED)
+        market_https._context.cache_clear()

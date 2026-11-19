@@ -7,7 +7,7 @@ import json
 import base64
 import math
 import re
-import ssl
+from market_https import VerifiedHTTPS
 import urllib.request
 from datetime import date, datetime
 from urllib.parse import urlencode
@@ -183,7 +183,7 @@ def read(operation, args, creds):
     # The sales-funnel API includes many nested, unused statistics per product;
     # bound that raw envelope separately from our much smaller projected output.
     cap = MAX_TABLE_BODY if operation in ('wb_commissions','wb_box_tariffs','wb_sales_summary') else MAX_ROW_BODY
-    opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+    opener = urllib.request.build_opener(NoRedirect, VerifiedHTTPS)
     with market_cooldown.legacy_open(opener, req, 15) as response:
         raw = response.read(cap + 1)
     if len(raw) > cap: raise ValueError('Response too large')

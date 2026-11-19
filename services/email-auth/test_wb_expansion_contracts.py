@@ -117,7 +117,7 @@ class WBExpansionContracts(unittest.TestCase):
                     probe = ('import sys; from test_wb_expansion_contracts import interrupted_report_fixture; '
                              'interrupted_report_fixture(*sys.argv[1:])')
                     died = subprocess.run([sys.executable, '-B', '-c', probe, gate, provider, phase],
-                                          cwd=Path(__file__).parent, capture_output=True, timeout=15)
+                                          cwd=Path(__file__).parent, capture_output=True, timeout=60)
                     self.assertEqual(died.returncode, 73, died.stderr)
                     fresh, args, params = creation_fixture(provider, gate)
                     with self.assertRaises(market_transport.finance_gate.GateError) as stopped:

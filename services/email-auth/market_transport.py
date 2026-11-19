@@ -9,7 +9,6 @@ import os
 import re
 from pathlib import Path
 import sqlite3
-import ssl
 import time
 import urllib.error
 import urllib.request
@@ -22,6 +21,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import finance_gate
 import market_cooldown
 from wb_mcp import NoRedirect
+from market_https import VerifiedHTTPS
 
 WB_HOSTS = frozenset(
     x + ".wildberries.ru"
@@ -195,7 +195,7 @@ class Wire:
         self.root.mkdir(mode=0o700, exist_ok=True)
         self.path = self.root / "reports.db"
         self.opener = urllib.request.build_opener(
-            NoRedirect, urllib.request.HTTPSHandler(context=ssl.create_default_context())
+            NoRedirect, VerifiedHTTPS
         )
         with self.db() as db:
             db.execute(

@@ -18,6 +18,7 @@
 !market_catalog.py
 !market_actions.py
 !market_routes.jsonl
+!market_https.py
 !market_transport.py
 !market_archive.py
 !market_composites.py

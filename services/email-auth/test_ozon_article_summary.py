@@ -347,6 +347,9 @@ class OzonArticleSummaryTests(unittest.TestCase):
             self.assertEqual(finance_gate.run(root,CREDS['client_id'],lambda:'next'),'next')
 
     def test_deadline_is_rechecked_after_local_tls_preparation(self):
+        import market_https
+        market_https._context.cache_clear()
+        self.addCleanup(market_https._context.cache_clear)
         opener=FakeOpener()
         clock={'at':1.0}
         def slow_tls():
@@ -354,7 +357,7 @@ class OzonArticleSummaryTests(unittest.TestCase):
             return object()
         with patch('portal.time.monotonic',side_effect=lambda:clock['at']), \
              patch('portal.ssl.create_default_context',side_effect=slow_tls), \
-             patch('portal.urllib.request.build_opener',return_value=opener):
+             patch('portal.urllib.request.build_opener',side_effect=lambda _,handler: (handler(),opener)[1]):
             with self.assertRaises(finance_gate.LocalPreparationTimeout):
                 portal._read_article_summary(ARGS,CREDS,deadline=2.0)
         self.assertEqual(opener.calls,[])
