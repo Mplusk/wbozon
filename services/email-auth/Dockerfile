@@ -8,7 +8,7 @@ COPY app.py portal.py smoke.py candidate.py ozon_mcp.py ozon_details.py ozon_art
 COPY ozon_unallocated.py ozon_fbo.py ozon_supply_allocation.py ./
 COPY avito_mcp.py avito_contracts.json ./
 COPY market_catalog.py market_actions.py market_https.py market_routes.jsonl ./
-COPY market_specs.py market_transport.py expansion_gateway.py ozon_expansion.py ozon_performance.py wb_expansion.py supply_plan.py ./
+COPY market_specs.py market_transport.py expansion_gateway.py ozon_expansion.py ozon_performance.py wb_expansion.py supply_plan.py seller_reports.py ./
 COPY market_archive.py market_composites.py market_diagnostics.py market_health.py market_history.py posting_discovery.py supply_history.py wb_reports.py wb_legacy_reports.py ./
 USER 10001:10001
 EXPOSE 8000

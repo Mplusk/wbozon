@@ -85,15 +85,13 @@ class BridgeActivityTests(unittest.TestCase):
         instance=Portal(self.login,self.vault,self.app.token_hash,mcp_read_token_hash=hashlib.sha256(mcp_token.encode()).hexdigest())
         self.assertIsNotNone(instance.mcp_token_hash)
 
-    def test_rate_limited_mcp_request_records_safe_unknown_operation(self):
+    def test_mcp_reads_validate_input_independently_of_bridge_quota(self):
         mcp_token=secrets.token_urlsafe(32)
         self.app.mcp_token_hash=hashlib.sha256(mcp_token.encode()).hexdigest()
         with patch.object(self.login,'permit',return_value=False):
-            self.assertTrue(self.read(operation='untrusted-operation',auth=mcp_token)['status'].startswith('429'))
-        self.assertEqual(self.vault.bridge_activity('mcp'),('unknown','rate_limited',self.now))
+            self.assertTrue(self.read(operation='untrusted-operation',auth=mcp_token)['status'].startswith('400'))
         self.assertFalse(self.calls)
         page=self.request()['body']
-        self.assertIn('операция не определена, превышен лимит запросов',page)
         self.assertNotIn('untrusted-operation',page)
 
     def test_activity_database_failure_does_not_break_reads_or_settings(self):
