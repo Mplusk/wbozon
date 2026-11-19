@@ -41,6 +41,15 @@ SERVER_INVENTORY = '88b7d5dde100b635d7ac881e1f6999fc9d0626fff5c1ea9e722e31ec58aa
 V2_INVENTORY = 'efce8b3fceb171b0ce4025e08708389623993046cb2962d26fbee43063af4187'
 DEPLOYED_REPORT_INVENTORY = '0f009122b40353df9f0a65c8cd8b01b3efaf39703eaa5281349bd8c8183aae81'
 DEPLOYED_REPORT_FIX_INVENTORY = '85d5b8a840f480678fe83fbf3bbd301a8db75d0910b8dfb39dfdce5fbe63d41f'
+READ_RECOVERY_PARENT = '45994e7a52912e22db23dff882f3918f12ad8c49c51cf39d20886f7f0cca87d6'
+# The bounded read recovery migration changes both modules. Pin their exact bytes
+# in addition to the service inventory and the bidirectional state replays below.
+READ_RECOVERY_MODULES = {
+    'finance_gate.py': ('5353f0a85438cdc1144a4c5ad40aa126eb8a8b18912508685d4da66ca9a75a2b',
+                        '7e26f12c8a5ff7803605df565573fab78a65788a93d47a89b9796b975c910424'),
+    'market_cooldown.py': ('4fd7b3ba5337908a472f6bc11ad396ca75d8dafccad91ae0cd4e8b22867cb8f9',
+                           '7e4ea222380116314eb121d200eff7a9a57e752f2479f10b3956e8e19dfcd58e'),
+}
 NEW_TOOLS = frozenset((
     'article_map', 'unit_economics', 'sales_drop_check', 'mcp_health',
     'ozon_stocks_analytics', 'ozon_turnover', 'ozon_delivery_time',
@@ -93,9 +102,11 @@ def assert_next_sources(deployed, candidate, candidate_ref, root, expected_paren
     old_hash, new_hash = service_digest(deployed), service_digest(candidate)
     if old_hash != expected_parent or new_hash == old_hash or new_hash != service_digest(reference):
         raise AssertionError('next candidate must be distinct and match its exact Git service tree')
-    for name in ('finance_gate.py', 'market_cooldown.py'):
-        if (deployed / name).read_bytes() != (candidate / name).read_bytes():
-            raise AssertionError('next candidate changed the shared cooldown implementation: ' + name)
+    modules = {name: tuple(hashlib.sha256((service / name).read_bytes()).hexdigest()
+                           for service in (deployed, candidate)) for name in READ_RECOVERY_MODULES}
+    if any(old != new for old, new in modules.values()):
+        if old_hash != READ_RECOVERY_PARENT or modules != READ_RECOVERY_MODULES:
+            raise AssertionError('next candidate changed unreviewed shared cooldown modules')
     return old_hash, new_hash
 
 
