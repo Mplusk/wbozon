@@ -147,8 +147,10 @@ class CatalogTests(unittest.TestCase):
         response.headers=Message()
         response.headers['Content-Type']='application/json'
         args={'operation_id':'wb_get_api_keys_api_keys_redeemed','input':{}}
-        with patch('urllib.request.OpenerDirector.open',return_value=response),patch('market_transport.Wire.admit_catalog'):
+        with patch('urllib.request.OpenerDirector.open',return_value=response),patch('market_transport.Wire.admit_catalog'), \
+             patch.object(catalog.market_cooldown,'request',wraps=catalog.market_cooldown.request) as guard:
             result=catalog.transfer('market_api_read',args,creds,self.app.finance_gate_dir,time.monotonic()+5)
+        self.assertEqual(guard.call_args.args[2],{'api_token':'synthetic-digital'})
         self.assertEqual(result['data'],{'items':[{'id':2}],'total':1})
 
     def test_ambiguous_outcome_blocks_equivalent_replay_and_pause(self):

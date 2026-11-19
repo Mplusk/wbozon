@@ -365,7 +365,10 @@ def transfer(tool, arguments, creds, directory, deadline):
             raise finance_gate.LocalPreparationTimeout('Deadline expired')
         return wire.opener.open(request,timeout=min(10,remaining))
     def paced():
-        return market_cooldown.request(directory,row['market'],creds,request,open_request,before_send=prepare)
+        # The shared quota guard accepts the vendor token under api_token. Only
+        # the HTTP builder uses the dedicated Digital credential and audience.
+        guard_credentials={'api_token':token} if row['host']==DIGITAL_HOST and token else creds
+        return market_cooldown.request(directory,row['market'],guard_credentials,request,open_request,before_send=prepare)
     # The original Ozon finance reader shares an account-wide gate across
     # endpoints. A new route must observe its outstanding Retry-After too.
     use_finance = row['market']=='ozon' and ('/finance/' in row['path'] or '/report/realization/' in row['path'])
