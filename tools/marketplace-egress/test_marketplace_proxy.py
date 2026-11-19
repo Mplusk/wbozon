@@ -18,7 +18,8 @@ class RelayTests(unittest.TestCase):
             'advert-api.wildberries.ru','documents-api.wildberries.ru','api-performance.ozon.ru',
             'dev.wildberries.ru','docs.ozon.com','api.avito.ru',
             'marketplace-api.wildberries.ru','buyer-chat-api.wildberries.ru','advert-media-api.wildberries.ru',
-            'dp-calendar-api.wildberries.ru','returns-api.wildberries.ru','user-management-api.wildberries.ru'})
+            'dp-calendar-api.wildberries.ru','returns-api.wildberries.ru','user-management-api.wildberries.ru',
+            'devapi-digital.wildberries.ru'})
 
     def run_connection(self, payload, resolver=None, connector=None):
         server, client = socket.socketpair()

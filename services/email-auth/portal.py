@@ -58,7 +58,7 @@ def public_retry_delay(delay, creds):
         return None
     if isinstance(creds,dict) and any(public_retry_delay(delay,value) is None for value in creds.values() if isinstance(value,dict)):
         return None
-    for field in ('api_key','api_token','client_secret'):
+    for field in ('api_key','api_token','client_secret','digital_token'):
         secret=creds.get(field) if isinstance(creds,dict) else None
         if isinstance(secret,str) and secret and secret in str(delay):
             return None
@@ -558,7 +558,7 @@ def _provider_worker():
             def check(payload):
                 for k,v in payload.items():
                     if isinstance(v,dict): check(v)
-                    elif k in ('api_key','api_token','client_secret') and isinstance(v,str) and v and json.dumps(v,ensure_ascii=False)[1:-1] in encoded:
+                    elif k in ('api_key','api_token','client_secret','digital_token') and isinstance(v,str) and v and json.dumps(v,ensure_ascii=False)[1:-1] in encoded:
                         raise finance_gate.ProviderResponseInvalid('Unsafe response')
             check(request['creds'])
             value=json.loads(encoded)
@@ -1045,12 +1045,16 @@ class Portal:
                 fields=FIELDS.get(provider)
                 if provider in ('avito','performance'):
                     fields=('client_id','client_secret')
+                elif provider=='wb_digital':
+                    fields=('digital_token',)
                 elif provider in market_health.WB_CATEGORIES or provider=='wb_write' or provider in {v[0] for v in market_catalog.WB_EXTRA.values()}:
                     fields=('api_token',)
                 elif provider=='ozon_write':
                     fields=FIELDS['ozon']
                 if not fields or set(form)!=set(fields)|{'csrf','provider'}: raise ValueError()
                 values={k:form[k] for k in fields}
+                if provider=='wb_digital':
+                    values['digital_token']=values['digital_token'].strip().removeprefix('Bearer ')
                 if any(not re.fullmatch(r'[!-~]{1,2048}',v) for v in values.values()): raise ValueError()
                 if provider in ('ozon','ozon_write') and not re.fullmatch(r'[0-9]{1,32}',values['client_id']): raise ValueError()
                 if provider=='avito' and len(values['client_id']) > 128: raise ValueError()

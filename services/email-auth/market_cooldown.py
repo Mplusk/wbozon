@@ -120,7 +120,7 @@ def request(directory, provider, credentials, req, send, *, before_send=None):
     root = str(Path(directory).parent / '.market-method-gates')
     try:
         return finance_gate.run(root, method_key(provider, credentials, url), open_http,
-            (credentials.get('api_key'), credentials.get('api_token'), credentials.get('client_secret')),
+            (credentials.get('api_key'), credentials.get('api_token'), credentials.get('client_secret'), credentials.get('digital_token')),
             before_send=prepare)
     except finance_gate.GateError as exc:
         if exc.reason in ('busy', 'cooldown', 'retry_time_unknown'):

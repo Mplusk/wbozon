@@ -82,5 +82,20 @@
     "url": "https://docs.ozon.com/api/seller/swagger.json",
     "sha256": "57f27f1a08d09f75473601183b8ee2d0f2e3336c084ca295d41d4969a0be8b2f",
     "checked_on": "2026-11-18"
+  },
+  "14-wbd": {
+    "filename": "14-wbd.yaml",
+    "url": "https://dev.wildberries.ru/api/swagger/yaml/ru/14-wbd.yaml",
+    "sha256": "b8dc1eea23c15a764d81ff683475b8abcdae4eabc0e64c094c825ae7f2a77c78",
+    "checked_on": "2026-11-19",
+    "archive_url": "https://raw.githubusercontent.com/eslazarev/wildberries-sdk/6b4c008071643e236c3bfc2dbebc038b36718816/specs/14-wbd.yaml",
+    "source_status": "publisher_url_returned_404",
+    "publisher_notice": "https://t.me/s/wb_api_notifications?q=%23wb_digital"
+  },
+  "ozon-seller-ru-20261119": {
+    "filename": "ozon-seller-ru-20261119.json",
+    "url": "https://docs.ozon.com/api/seller/swagger.json",
+    "sha256": "bb508ef79f58500849958f66a37e350c8e94ab0734dd5d8e8e19ed54f4aee2d9",
+    "checked_on": "2026-11-19"
   }
 }

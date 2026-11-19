@@ -118,6 +118,11 @@ class Store:
         return json.loads(self.portal.vault.aead.decrypt(blob[:12],blob[12:],(pid+':'+kind).encode()))
 
     def account(self,row):
+        if row['host']==market_catalog.DIGITAL_HOST:
+            snapshot=self.portal.vault.snapshot('wb_digital')
+            if not snapshot:
+                raise ActionError('Для этой операции нужен отдельный токен WB Цифровой.')
+            return 'wb_digital',snapshot[0],snapshot[1]
         provider=row['market']
         slots=[provider+'_write']
         preferred=market_catalog.category_key(row['host']) if provider=='wb' else None
@@ -264,7 +269,7 @@ class Store:
 
 
 def publication(row):
-    return row['path'] in ('/v3/product/import','/v1/product/import-by-sku','/v1/product/unarchive',
+    return row.get('requires_rights',False) or row['path'] in ('/v3/product/import','/v1/product/import-by-sku','/v1/product/unarchive',
         '/v2/product/pictures/import','/v1/product/attributes/update','/content/v2/cards/upload','/content/v2/cards/update',
         '/content/v2/cards/recover','/content/v2/cards/upload/add','/content/v3/media/file','/content/v3/media/save')
 
@@ -303,6 +308,8 @@ def owner_page(store,csrf,fresh):
                 content+='<label>'+label+'<input type="password" name="'+field+'" maxlength="2048" required autocomplete="off"></label>'
             content+='<button>Сохранить</button></form>'
         content+='</details>'
+        content+='<details><summary>Токен WB Цифровой</summary><p>Для работы с предложениями, контентом и ключами активации используйте токен из кабинета WB Цифровой. Дерево категорий доступно без токена.</p>'
+        content+='<form method="post" action="/settings">'+hidden+'<input type="hidden" name="provider" value="wb_digital"><label>Токен WB Цифровой<input type="password" name="digital_token" maxlength="2048" required autocomplete="off"></label><button>Сохранить</button></form></details>'
         content+='<details><summary>Категорийные ключи WB для каталога</summary>'
         for slot,label in market_catalog.WB_EXTRA.values():
             content+='<form method="post" action="/settings">'+hidden+'<input type="hidden" name="provider" value="'+slot+'"><label>'+label+'<input type="password" name="api_token" maxlength="2048" required autocomplete="off"></label><button>Сохранить</button></form>'
@@ -326,7 +333,12 @@ def owner_page(store,csrf,fresh):
         if row:
             content+='<p><code>'+esc(row['method']+' '+row['host']+row['path'])+'</code></p>'
         if p['body']:
-            content+='<details'+(' open' if p['status']=='pending' else '')+'><summary>Параметры запроса</summary><pre>'+esc(json.dumps(display_inputs(store.decrypt(p['id'],'input',p['body'])),ensure_ascii=False,indent=2))+'</pre></details>'
+            inputs=store.decrypt(p['id'],'input',p['body'])
+            if row and row.get('restricted_data')=='activation_keys' and isinstance(inputs.get('body'),dict):
+                keys=inputs['body'].get('keys')
+                if isinstance(keys,list):
+                    inputs['body']['keys']={'count':len(keys),'sha256':_version(keys)}
+            content+='<details'+(' open' if p['status']=='pending' else '')+'><summary>Параметры запроса</summary><pre>'+esc(json.dumps(display_inputs(inputs),ensure_ascii=False,indent=2))+'</pre></details>'
         if p['result']:
             content+='<details><summary>Результат</summary><pre>'+esc(_json(display_inputs(store.decrypt(p['id'],'result',p['result']))))+'</pre></details>'
         if fresh and p['status']=='pending' and row:

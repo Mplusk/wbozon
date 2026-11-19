@@ -84,6 +84,73 @@ class CatalogTests(unittest.TestCase):
         self.app.external_keys.revoke(key,self.now)
         self.assertIn('401',self.mcp({'jsonrpc':'2.0','id':1,'method':'ping'},token)['status'])
 
+    def test_reviewed_aliases_use_the_current_wire_contract_and_safety_policy(self):
+        for row in catalog.routes().values():
+            if 'alias_of' not in row:
+                continue
+            current=catalog.routes()[row['alias_of']]
+            for field in ('method','host','path','category','contract','quota_group','interval_seconds'):
+                self.assertEqual(row.get(field),current.get(field),row['operation_id'])
+            self.assertEqual(catalog.find_route(row['operation_id']),row)
+        for name in ('ozon_verify_courier_code','ozon_create_or_get_product_exemplar','ozon_post_v1_notification_check'):
+            with self.assertRaises(ValueError):
+                catalog.validate('market_api_read',{'operation_id':name,'input':{}})
+        self.assertEqual(catalog.describe('ozon_get_supply_timeslots')['path'],'/v2/supply-order/timeslot/list')
+        self.assertEqual(catalog.describe('ozon_ship')['category'],'retired')
+        self.assertEqual(catalog.describe('ozon_refund_r_f_b_s')['category'],'superseded')
+        self.assertIn('ozon_refund_r_f_b_s',
+                      {r['operation_id'] for r in catalog.search({'search':'/v2/returns/rfbs/return-money'})['operations']})
+        alias=catalog.routes()['ozon_update_stocks']
+        params={'body':{'stocks':[{'offer_id':'example','stock':1,'warehouse_id':1}]}}
+        self.assertEqual(actions.fingerprint(alias['operation_id'],params),actions.fingerprint(alias['alias_of'],params))
+        rating=catalog.routes()['wb_get_api_analytics_banned_products_shadowed']
+        with self.assertRaisesRegex(ValueError,'documented filter'):
+            catalog.validate_inputs(rating,{'body':{'onlyShadowedNms':False}})
+
+    def test_digital_credentials_are_isolated_for_reads_proposals_and_public_catalogue(self):
+        self.vault.save('wb',{'api_token':'ordinary-seller'})
+        self.vault.save('wb_write',{'api_token':'ordinary-writer'})
+        public=catalog.routes()['wb_get_api_catalog']
+        row=catalog.routes()['wb_get_api_offers_author']
+        change=catalog.routes()['wb_post_api_offers']
+        creds=catalog.read_credentials(self.vault,public)
+        self.assertIsNone(catalog.build_request(public,{},creds).get_header('Authorization'))
+        self.assertIsNone(catalog.read_credentials(self.vault,row))
+        with self.assertRaises(actions.ActionError):
+            actions.Store(self.app).account(change)
+        with self.assertRaises(ValueError):
+            catalog.build_request(row,{},self.vault.read('wb'))
+        self.vault.save('wb_digital',{'digital_token':'synthetic-digital'})
+        self.assertEqual(actions.Store(self.app).account(change)[:2],('wb_digital',{'digital_token':'synthetic-digital'}))
+        self.assertEqual(catalog.build_request(row,{},catalog.read_credentials(self.vault,row)).get_header('Authorization'),
+                         'Bearer synthetic-digital')
+        self.assertTrue(actions.publication(change))
+        self.assertIsNone(catalog.build_request(public,{},catalog.read_credentials(self.vault,public)).get_header('Authorization'))
+        self.assertEqual(self.request('/settings','POST',{'csrf':self.csrf,'provider':'wb_digital',
+                         'digital_token':'Bearer synthetic-new'})['status'],'200 OK')
+        self.assertEqual(self.vault.read('wb_digital'),{'digital_token':'synthetic-new'})
+
+    def test_digital_files_and_activation_keys(self):
+        creds={'digital_token':'synthetic-digital'}
+        row=catalog.routes()['wb_get_api_content_download_uri']
+        args={'path':{'uri':'vol19/924/document/content'}}
+        req=catalog.build_request(row,args,creds)
+        self.assertEqual(req.full_url,'https://devapi-digital.wildberries.ru/api/v1/content/download/vol19/924/document/content')
+        self.assertEqual(req.get_header('Range'),'bytes=0-368639')
+        for bad in ('../foo','//outside.test/file','vol/%2e%2e/foo','https://elsewhere.test/file'):
+            with self.subTest(bad=bad),self.assertRaises(ValueError):
+                catalog.build_request(row,{'path':{'uri':bad}},creds)
+        with self.assertRaises(ValueError):
+            catalog.build_request(row,dict(args,header={'Range':'bytes=0-9999999'}),creds)
+        response=io.BytesIO(b'{"items":[{"id":2,"value":"one-use-key"}],"total":1}')
+        response.status=200
+        response.headers=Message()
+        response.headers['Content-Type']='application/json'
+        args={'operation_id':'wb_get_api_keys_api_keys_redeemed','input':{}}
+        with patch('urllib.request.OpenerDirector.open',return_value=response),patch('market_transport.Wire.admit_catalog'):
+            result=catalog.transfer('market_api_read',args,creds,self.app.finance_gate_dir,time.monotonic()+5)
+        self.assertEqual(result['data'],{'items':[{'id':2}],'total':1})
+
     def test_ambiguous_outcome_blocks_equivalent_replay_and_pause(self):
         _,token,args,pid,form=self.setup_action()
         def failed(op,a,c):

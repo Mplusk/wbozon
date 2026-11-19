@@ -301,6 +301,9 @@ jobs:
           scoped="$RUNNER_TEMP/market-avito/service"
           mkdir -p "$scoped"
           git archive 929c65948445c7f2e9413393ce4b198d44e1c64f:services/email-auth | tar -x -C "$scoped"
+          catalogue="$RUNNER_TEMP/market-catalogue/service"
+          mkdir -p "$catalogue"
+          git archive 4c2f238c567692ea580b828cfc5f792bab586a04:services/email-auth | tar -x -C "$catalogue"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09 \
@@ -308,6 +311,7 @@ jobs:
             --latest-service "$regional" --latest-commit a51e1411d9b60bbdaa792e7d095e95d41ae8f2e1 \
             --successor 7c27cc2d0fdc8464c712f193310c2494df83366a "$active" \
             --successor 929c65948445c7f2e9413393ce4b198d44e1c64f "$scoped" \
+            --successor 4c2f238c567692ea580b828cfc5f792bab586a04 "$catalogue" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -335,7 +339,9 @@ jobs:
           scoped="$RUNNER_TEMP/market-avito/service"
           check_pair "$active" "$scoped"
           check_pair "$scoped" "$scoped"
-          check_pair "$scoped" "$packaged"
+          catalogue="$RUNNER_TEMP/market-catalogue/service"
+          check_pair "$scoped" "$catalogue"
+          check_pair "$catalogue" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

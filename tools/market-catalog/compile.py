@@ -99,9 +99,25 @@ def main():
         else:
             import yaml
             docs[key] = yaml.safe_load(raw)
-    ledger = (json.loads(line) for line in (HERE/'review.jsonl').read_text(encoding='utf-8').splitlines())
+    ledger = [json.loads(line) for line in (HERE/'review.jsonl').read_text(encoding='utf-8').splitlines()]
+    by_id = {row['operation_id']:row for row in ledger}
+    if len(by_id) != len(ledger):
+        raise ValueError('Duplicate reviewed operation')
     with args.output.open('w', encoding='utf-8', newline='\n') as out:
-        for row in ledger:
+        for entry in ledger:
+            row = dict(entry)
+            if 'alias_of' in entry:
+                target = by_id[entry['alias_of']]
+                if (target['market'] != entry['market'] or target['category'] not in ('read','write')
+                        or 'alias_of' in target or entry['category'] != target['category']):
+                    raise ValueError('Invalid alias target: '+entry['operation_id'])
+                row = {**target, 'operation_id':entry['operation_id'], 'alias_of':target['operation_id'],
+                       'lifecycle':'alias', 'legacy_route':{k:entry[k] for k in ('method','host','path')},
+                       'review':entry['review']}
+                if entry['market']=='ozon':
+                    row.update(source=entry['source'],schema_date=entry['schema_date'])
+                if 'required_values' in entry:
+                    row['required_values'] = entry['required_values']
             if row['category'] in ('read','write'):
                 source = sources[row['source']]
                 document = docs[row['source']]
@@ -117,6 +133,10 @@ def main():
                     limit = row['contract']['definitions']['TextLimit']
                     limit['anyOf'] = limit.pop('oneOf')
                 row['schema_sha256'] = source['sha256']
+            for replacement in row.get('replacement',[]):
+                target = by_id.get(replacement.get('operation_id'))
+                if not target or target['category'] not in ('read','write'):
+                    raise ValueError('Missing executable replacement: '+row['operation_id'])
             ordered={'operation_id':row.pop('operation_id'),**row}
             print(json.dumps(ordered,ensure_ascii=False,separators=(',',':'),allow_nan=False),file=out)
 

@@ -19,7 +19,7 @@ import market_transport
 
 PUBLIC_TOOLS = {
     'market_api_search': ('Поиск методов Ozon и WB по названию, пути и назначению. Возвращает operation_id и курсор следующей страницы.',
-        {'market':{'enum':['ozon','wb']},'category':{'enum':['read','write','unverified']},
+        {'market':{'enum':['ozon','wb']},'category':{'enum':['read','write','superseded','retired','unverified']},
          'search':{'type':'string','maxLength':160},'offset':{'type':'integer','minimum':0},'limit':{'type':'integer','minimum':1,'maximum':50}}, []),
     'market_api_describe': ('Назначение метода и схема параметров из документации площадки. Для вызова передайте параметры в input.',
         {'operation_id':{'type':'string','maxLength':160}}, ['operation_id']),
@@ -34,6 +34,7 @@ PUBLIC_TOOLS = {
 READ_TOOLS = frozenset(('market_api_search','market_api_describe','market_api_read'))
 MAX_BYTES = 360 * 1024
 ROUTES = Path(__file__).with_name('market_routes.jsonl')
+DIGITAL_HOST = 'devapi-digital.wildberries.ru'
 WB_SELLER_HOSTS = market_transport.WB_HOSTS | {
     name+'.wildberries.ru' for name in ('marketplace-api','buyer-chat-api','advert-media-api','dp-calendar-api',
                                          'returns-api','user-management-api')}
@@ -84,7 +85,8 @@ def search(arguments):
     term = arguments.get('search','').strip().casefold()
     matched = [_public(r) for r in routes().values()
                if all(key not in arguments or arguments[key]==r[key] for key in ('market','category'))
-               and (not term or term in ' '.join(str(r.get(k,'')) for k in ('operation_id','title','path','section')).casefold())]
+               and (not term or term in ' '.join(str(r.get(k,'')) for k in
+                    ('operation_id','title','path','section','legacy_route','alias_of')).casefold())]
     start, size = arguments.get('offset',0),arguments.get('limit',20)
     end = start+size
     return {'operations':matched[start:end],'total':len(matched),'next_offset':end if end<len(matched) else None}
@@ -167,12 +169,21 @@ def validate_inputs(row, inputs):
     spec = row['contract']
     if not isinstance(inputs,dict) or inputs.keys()-{'path','query','body','header','media_type','files'} or set(spec['required'])-inputs.keys():
         raise ValueError('Invalid request fields')
+    for group,fields in row.get('required_values',{}).items():
+        values=inputs.get(group)
+        if not isinstance(values,dict) or any(type(values.get(k)) is not type(v) or values[k]!=v for k,v in fields.items()):
+            raise ValueError('Use the documented filter for this operation')
     for kind in ('path','query','header'):
         if kind in inputs:
             if kind not in spec['parameters']:
                 raise ValueError('Unexpected parameters')
             _check(inputs[kind],spec['parameters'][kind],spec['definitions'])
-    for value in inputs.get('path',{}).values():
+    for key,value in inputs.get('path',{}).items():
+        if key=='uri' and row['host']==DIGITAL_HOST and row['path']=='/api/v1/content/download/{uri}':
+            if (not isinstance(value,str) or len(value)>1024 or any(
+                    not re.fullmatch(r'[A-Za-z0-9_.-]{1,255}',part) or part in ('.','..') for part in value.split('/'))):
+                raise ValueError('Invalid Digital content URI')
+            continue
         if not isinstance(value,(str,int)) or not re.fullmatch(r'[A-Za-z0-9_:@.-]{1,256}',str(value)) or str(value) in ('.','..'):
             raise ValueError('Invalid path segment')
     for name,value in inputs.get('header',{}).items():
@@ -216,6 +227,8 @@ def validate(tool, arguments):
 def read_credentials(vault,row):
     if row['market']=='ozon':
         return vault.read('ozon')
+    if row['host']==DIGITAL_HOST:
+        return {'public_catalog':True} if row.get('authentication')=='public_catalog' else vault.read('wb_digital')
     category = category_key(row['host'])
     return (vault.read(category) if category else None) or vault.read('wb')
 
@@ -262,18 +275,34 @@ def _multipart(body,schema,defs,files):
 
 
 def build_request(row, inputs, credentials):
-    if not ((row['market']=='ozon' and row['host']==market_transport.SELLER) or
+    digital = row['market']=='wb' and row['host']==DIGITAL_HOST
+    if not (digital or (row['market']=='ozon' and row['host']==market_transport.SELLER) or
             (row['market']=='wb' and row['host'] in WB_SELLER_HOSTS)):
         raise ValueError('Unrecognised seller credential destination')
     validate_inputs(row,inputs)
     path = row.get('official_path',row['path'])
     for key,value in inputs.get('path',{}).items():
-        path = path.replace('{'+key+'}',quote(_scalar(value),safe=''))
+        # Digital returns a volume-relative file path, for example vol19/924/.../content.
+        safe='/' if digital and path=='/api/v1/content/download/{uri}' and key=='uri' else ''
+        path = path.replace('{'+key+'}',quote(_scalar(value),safe=safe))
     if '{' in path or '}' in path or not path.startswith('/') or path.startswith('//'):
         raise ValueError('Incomplete route')
     headers = {k:_scalar(v) for k,v in inputs.get('header',{}).items()}
+    if digital and row['path']=='/api/v1/content/download/{uri}':
+        requested=headers.setdefault('Range',f'bytes=0-{MAX_BYTES-1}')
+        match=re.fullmatch(r'bytes=([0-9]{1,19})-([0-9]{1,19})',requested)
+        if not match or not 0<=int(match[2])-int(match[1])<MAX_BYTES:
+            raise ValueError('Digital download range exceeds the MCP response limit')
     if row['market']=='ozon':
         headers.update({'Client-Id':credentials['client_id'],'Api-Key':credentials['api_key']})
+    elif digital:
+        if row.get('authentication')=='public_catalog':
+            if (row['method'],path,credentials)!=('GET','/api/v1/catalog',{'public_catalog':True}):
+                raise ValueError('Invalid public Digital request')
+        elif row.get('authentication')=='wb_digital' and set(credentials)=={'digital_token'}:
+            headers['Authorization']='Bearer '+credentials['digital_token']
+        else:
+            raise ValueError('Dedicated WB Digital credential required')
     else:
         headers['Authorization'] = credentials['api_token']
     spec = row['contract']
@@ -309,6 +338,7 @@ def transfer(tool, arguments, creds, directory, deadline):
     row = find_route(arguments['operation_id'])
     request = build_request(row,arguments['input'],creds)
     wire = market_transport.Wire(row['market'],creds,directory,deadline)
+    token=creds.get('digital_token') or creds.get('api_token') or creds.get('api_key')
     interval=row.get('interval_seconds',{})
     saved_jobs=('/api/v1/warehouse_remains','/api/v1/paid_storage','/api/v1/acceptance_report')
     if row['host']==market_transport.WB_FEED_HOST and row['path'] in (*saved_jobs,market_transport.WB_FEED_PATH):
@@ -344,13 +374,17 @@ def transfer(tool, arguments, creds, directory, deadline):
             return finance_gate.run(directory,creds['client_id'],paced,(creds['api_key'],))
         if row['market']=='wb' and ('{' in row['path'] or row.get('quota_group','').startswith('wb-group-')):
             group=row['host']+':'+row.get('quota_group',row['path'])
-            return finance_gate.run(str(Path(directory).parent/'.catalog-method-gates'),group,paced,(creds['api_token'],))
+            return finance_gate.run(str(Path(directory).parent/'.catalog-method-gates'),group,paced,(token,))
         return paced()
     with send() as response:
         status = response.status
         media = response.headers.get_content_type()
+        content_range=response.headers.get('Content-Range','')
         raw = response.read(MAX_BYTES+1)
     result = {'operation_id':row['operation_id'],'http_status':status,'fetched_at':datetime.now(timezone.utc).isoformat()}
+    if (row['host']==DIGITAL_HOST and row['path']=='/api/v1/content/download/{uri}'
+            and re.fullmatch(r'bytes [0-9]{1,19}-[0-9]{1,19}/(?:[0-9]{1,19}|\*)',content_range)):
+        result['content_range']=content_range
     # A provider acknowledgement must survive a large, binary or malformed
     # write response. It can be asynchronous; acceptance is not fulfilment.
     if tool=='market_api_propose':
@@ -359,7 +393,7 @@ def transfer(tool, arguments, creds, directory, deadline):
         if tool=='market_api_propose':
             return dict(result,response_truncated=True)
         raise finance_gate.ProviderResponseTooLarge('Use smaller page or period')
-    if raw and any(str(v).encode() in raw for v in (creds.get('api_key'),creds.get('api_token')) if v):
+    if raw and token and token.encode() in raw:
         raise finance_gate.ProviderResponseInvalid('Unsafe marketplace response')
     if not raw:
         result['data'] = None
@@ -371,8 +405,12 @@ def transfer(tool, arguments, creds, directory, deadline):
                 return dict(result,response_available=False)
             raise finance_gate.ProviderResponseInvalid('Invalid JSON') from exc
         data=_project(value)
+        if row.get('restricted_data')=='activation_keys' and isinstance(data,dict):
+            for item in data.get('items') or []:
+                if isinstance(item,dict):
+                    item.pop('value',None)
         encoded=json.dumps(data,ensure_ascii=False,allow_nan=False)
-        if any(json.dumps(v,ensure_ascii=False)[1:-1] in encoded for v in (creds.get('api_key'),creds.get('api_token')) if v):
+        if token and json.dumps(token,ensure_ascii=False)[1:-1] in encoded:
             raise finance_gate.ProviderResponseInvalid('Unsafe marketplace data')
         result['data'] = data
     else:
