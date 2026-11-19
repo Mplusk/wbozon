@@ -612,7 +612,16 @@ def _cash(args, request):
             "with_details": True,
         },
     )
+    try:
+        return _cash_page(raw, page)
+    except (KeyError, ValueError, TypeError, ArithmeticError):
+        raise finance_gate.ProviderResponseInvalid("Invalid Ozon cash statement response") from None
+
+
+def _cash_page(raw, page):
     data = raw["result"]
+    if not isinstance(data, dict):
+        raise ValueError("Invalid statement result")
     fields = {
         "period": STATEMENT_PERIOD,
         "currency_code": "text",
@@ -629,6 +638,8 @@ def _cash(args, request):
     }
     items = [_cash_detail(r, fields) for r in rows(data.get("cash_flows"))]
     detail = data.get("details") or {}
+    if not isinstance(detail, dict):
+        raise ValueError("Invalid statement details")
     payments = detail.get("payments")
     if isinstance(payments, dict):
         payments = [payments]

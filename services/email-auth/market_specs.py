@@ -134,7 +134,7 @@ TOOLS = {
         "",
     ),
     "ozon_sku_daily": (
-        "Ежедневные заказанные единицы и сумма по SKU. include_funnel добавляет просмотры и корзину при наличии доступа.",
+        "Ежедневные заказанные единицы и сумма по SKU. include_funnel добавляет просмотры и корзину. За дни с пропуском аналитики архив показывает количество и стоимость товаров в отправлениях FBO и FBS отдельными полями posting_units и posting_item_value.",
         "date_from date_to sku article offset limit include_funnel archive",
         "date_from date_to",
     ),

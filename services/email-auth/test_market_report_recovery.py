@@ -13,11 +13,13 @@ from unittest.mock import patch
 import expansion_gateway
 import finance_gate
 import market_archive
+import market_composites
 import market_cooldown
 import market_health
 import market_history
 import market_specs
 import market_transport
+import ozon_details
 import ozon_expansion
 import supply_history
 import supply_plan
@@ -38,6 +40,74 @@ class ResumeWire:
 
 
 class Recovery(unittest.TestCase):
+    def test_actual_last_mile_type_names_are_separate_from_main_logistics(self):
+        dictionary = {"types":[
+            {"id":1, "name":"LastMileCourier", "description":"Доставка до места выдачи", "category":"other"},
+            {"id":2, "name":"DeliveryToHandoverPlaceByOzon", "description":"Доставка до места выдачи силами Ozon", "category":"other"},
+            {"id":3, "name":"Logistic", "description":"Логистика", "category":"logistics"}]}
+        breakdown = [dict(sku="20",type_id=i,currency="RUB",observed_row_sum=value)
+                     for i,value in ((1,"-4"),(2,"-3"),(3,"-12"))]
+        cost = ozon_details.label_posting_accruals({"breakdown":breakdown,"returned_posting_numbers":["P"]},dictionary)
+        report = {"currency":"RUB","observed_delivery_units":2,"observed_return_rows":0,
+                  "selected_rows":[{"sku":"20","posting_number":"P","delivery_commission":{"total":"90","amount":"100","standard_fee":"10"}}]}
+        def finance(name, args, wire):
+            return report if name=="ozon_realization_article_month" else cost
+        result = market_composites.accounting({"month":"2026-10"},{"ozon":object()},
+                                              {"ozon_offer_id":"A"},None,finance)
+        row, = result["items"]
+        self.assertEqual((row["amounts"]["logistics"],row["amounts"]["last_mile"]),("12","7"))
+        self.assertEqual((row["per_sold_unit"]["last_mile"],row["reported_return_rows"]),( "3.5",0))
+        self.assertEqual(result["sources"]["ozon"]["accrual_postings_returned"],1)
+
+    def test_dictionary_retry_uses_the_previously_saved_postings(self):
+        wire = ResumeWire()
+        wire.creds,wire.gate_dir={"client_id":"17","api_key":"fixture"}, "/fixture"
+        args=dict(posting_numbers=["P"],view="summary",include_types=True)
+        def gate(_dir,_creds,read,_end,*,allow_retry):
+            self.assertTrue(allow_retry)
+            return read()
+        with patch("portal._finance_read_with_retry",side_effect=gate), patch("portal._provider_read",
+                side_effect=[{"breakdown":[]},finance_gate.GateError("cooldown",1),{"types":[]}]) as read:
+            with self.assertRaises(finance_gate.GateError):
+                expansion_gateway.regulated_ozon("ozon_posting_accruals",args,wire)
+            final=expansion_gateway.regulated_ozon("ozon_posting_accruals",args,wire)
+        self.assertEqual([a.args[0] for a in read.call_args_list],["ozon_posting_accruals","ozon_accrual_types","ozon_accrual_types"])
+        self.assertFalse(read.call_args_list[0].args[1]["include_types"])
+        self.assertEqual(final["observed_category_breakdown"],[])
+
+    def test_received_malformed_cash_statement_releases_account_but_lost_headers_do_not(self):
+        args = {"date_from":"2026-10-01","date_to":"2026-10-31"}
+        with TemporaryDirectory() as tmp, patch.object(finance_gate,"_boot_identity",return_value="a"*64):
+            gate = str(Path(tmp,"finance"))
+            with self.assertRaises(finance_gate.ProviderResponseInvalid):
+                finance_gate.run(gate,"17",lambda:ozon_expansion._cash(args,lambda *a,**k:{"result":[]}))
+            def lost_headers(*args,**kwargs):
+                raise TimeoutError()
+            with self.assertRaises(TimeoutError):
+                finance_gate.run(gate,"17",lambda:ozon_expansion._cash(args,lost_headers))
+            with self.assertRaises(finance_gate.GateError) as blocked:
+                finance_gate.run(gate,"17",lambda:self.fail("unknown upstream response"))
+            self.assertEqual(blocked.exception.reason,"retry_time_unknown")
+
+    def test_lost_body_after_successful_headers_keeps_finance_account_available(self):
+        from unittest.mock import MagicMock
+        with TemporaryDirectory() as tmp, patch.object(finance_gate,"_boot_identity",return_value="a"*64):
+            gate = str(Path(tmp,"finance"))
+            wire = market_transport.Wire("ozon",{"client_id":"17","api_key":"fixture"},gate,float("inf"))
+            reply = MagicMock()
+            reply.__enter__.return_value=reply
+            reply.status=200
+            reply.read.side_effect=TimeoutError()
+            wire.opener = SimpleNamespace(open=lambda *a,**kw:reply)
+            with self.assertRaises(finance_gate.ProviderBodyTimeout):
+                finance_gate.run(gate,"17",lambda:wire("POST",ozon_expansion.BASE+"/v1/finance/cash-flow-statement/list",body={}))
+            self.assertEqual(finance_gate.run(gate,"17",lambda:"ready"),"ready")
+
+    def test_recurring_display_rate_keeps_the_exact_source_total(self):
+        record=market_composites.unit_row("ozon","A","RUB",3,None,{"logistics":"10","last_mile":"5.01"})
+        self.assertEqual(record["per_sold_unit"]["logistics"],"3.3333")
+        self.assertEqual((record["amounts"]["logistics"],record["per_sold_unit"]["last_mile"]),("10","1.67"))
+
     def test_general_token_only_marks_claimed_categories(self):
         token = base64.urlsafe_b64encode(json.dumps({"s": 1 << 2}).encode()).decode().rstrip("=")
         vault = SimpleNamespace(read=lambda name: {"api_token": "x." + token + ".x"} if name == "wb" else None)

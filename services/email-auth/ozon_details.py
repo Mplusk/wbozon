@@ -24,6 +24,8 @@ CATEGORY_BY_OZON_TYPE = {
     ('SaleCommission','Вознаграждение за продажу'):'commission',
     ('Logistic','Логистика'):'logistics', ('Shipment','Магистраль'):'logistics',
     ('LastMile','Последняя миля'):'last_mile',
+    ('LastMileCourier','Доставка до места выдачи'):'last_mile',
+    ('DeliveryToHandoverPlaceByOzon','Доставка до места выдачи силами Ozon'):'last_mile',
     ('ClientReturn','Обработка возвратов'):'returns',
     ('BackwardShipment','Обратная магистраль'):'returns',
     ('ReturnFlowLogistic','Обратная логистика'):'returns',
@@ -280,9 +282,9 @@ def label_posting_accruals(result, type_response):
         entry=types.get(row['type_id'])
         row['type_name']=entry['name'] if entry else None
         row['type_description']=entry['description'] if entry else None
-        row['category']=entry['category'] if entry else 'other'
+        row['category']=CATEGORY_BY_OZON_TYPE.get((entry['name'],entry['description']),'other') if entry else 'other'
         row['type_classification']='not_reported_by_provider' if not entry else (
-            'unclassified' if entry['category']=='other' else 'known_pair')
+            'unclassified' if row['category']=='other' else 'known_pair')
     if 'posting_accruals' in result:
         for posting in result['posting_accruals']:
             for row in posting['accruals']:label(row)

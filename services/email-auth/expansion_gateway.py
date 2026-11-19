@@ -105,6 +105,12 @@ def make_wire(p,c,directory,deadline):
 
 def regulated_ozon(name,args,wire):
     import portal,market_cooldown
+    if name == "ozon_posting_accruals" and args.get("include_types", True):
+        # Both reads share the seller's quota. Checkpoint the posting amounts before
+        # requesting the dictionary so a short 429 cannot discard or replay that read.
+        amounts = regulated_ozon(name, dict(args, include_types=False), wire)
+        dictionary = regulated_ozon("ozon_accrual_types", {}, wire)
+        return ozon_details.label_posting_accruals(amounts, dictionary)
     if wire.deadline-time.monotonic()<2:
         raise TimeoutError("Insufficient finance read time")
     def read():
@@ -113,7 +119,8 @@ def regulated_ozon(name,args,wire):
     portal.finance_request_preflight(name,args,wire.creds)
     with wire.progress("composite-finance-v2",[name,args]) as (cached,save):
         if cached: return cached
-        value=portal._finance_read_with_retry(wire.gate_dir,wire.creds,read,wire.deadline,allow_retry=False)
+        one_read = name in ("ozon_realization_article_month", "ozon_accrual_types", "ozon_posting_accruals")
+        value=portal._finance_read_with_retry(wire.gate_dir,wire.creds,read,wire.deadline,allow_retry=one_read)
         save(value,1800)
         return value
 

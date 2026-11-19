@@ -3,6 +3,7 @@
 import base64
 import contextlib
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -717,7 +718,14 @@ class Wire:
                     self.gate_dir, self.provider, self.creds, req, send, before_send=prepare,
                 )
                 with response_context as response:
-                    raw = response.read(MAX_REPORT + 1)
+                    try:
+                        raw = response.read(MAX_REPORT + 1)
+                    except TimeoutError:
+                        raise finance_gate.ProviderBodyTimeout("Marketplace response body timed out") from None
+                    except urllib.error.HTTPError:
+                        raise
+                    except (OSError, http.client.HTTPException):
+                        raise finance_gate.ProviderResponseInvalid("Incomplete marketplace response body") from None
                     if len(raw) > MAX_REPORT:
                         raise finance_gate.ProviderResponseTooLarge("Report exceeds read bound")
                     no_content = response.status == 204
@@ -725,18 +733,13 @@ class Wire:
                         raw = (
                             b"[]" if self.provider == "wb" and parts.path.endswith("/download") else b"null"
                         )
-                value = (
-                    raw
-                    if binary
-                    else json.loads(
-                        raw,
-                        parse_float=Decimal,
-                        object_pairs_hook=_no_duplicates,
-                        parse_constant=lambda _: (_ for _ in ()).throw(ValueError("Invalid JSON number")),
-                    )
-                )
+                try:
+                    value = raw if binary else json.loads(raw, parse_float=Decimal, object_pairs_hook=_no_duplicates,
+                        parse_constant=lambda _: (_ for _ in ()).throw(ValueError("Invalid JSON number")))
+                except (ValueError, UnicodeError):
+                    raise finance_gate.ProviderResponseInvalid("Invalid marketplace JSON response") from None
                 if value is None and not no_content:
-                    raise ValueError("Unexpected JSON null in marketplace response")
+                    raise finance_gate.ProviderResponseInvalid("Unexpected JSON null in marketplace response")
                 if token_request:
                     ttl = max(0, min(86400, int(value["expires_in"])) - 60)
                 if job:

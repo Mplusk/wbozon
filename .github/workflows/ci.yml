@@ -313,6 +313,9 @@ jobs:
           snapshot="$RUNNER_TEMP/marketplace-verified-snapshots/service"
           mkdir -p "$snapshot"
           git archive d0af460f912a6582f76bbf3036ef0757d6d2d60e:services/email-auth | tar -x -C "$snapshot"
+          order_archive="$RUNNER_TEMP/marketplace-order-archive/service"
+          mkdir -p "$order_archive"
+          git archive 7b606bf1a1126fe912980aa6dd487c61e745b65b:services/email-auth | tar -x -C "$order_archive"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09 \
@@ -324,6 +327,7 @@ jobs:
             --successor e51eab6161dee31d4d4a5f522ac1f870d65a7284 "$live" \
             --successor 8c4fb1f5ae6aa0b18ff93324f8c0dc05074ff074 "$recovery" \
             --successor d0af460f912a6582f76bbf3036ef0757d6d2d60e "$snapshot" \
+            --successor 7b606bf1a1126fe912980aa6dd487c61e745b65b "$order_archive" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -359,7 +363,9 @@ jobs:
           check_pair "$live" "$recovery"
           snapshot="$RUNNER_TEMP/marketplace-verified-snapshots/service"
           check_pair "$recovery" "$snapshot"
-          check_pair "$snapshot" "$packaged"
+          order_archive="$RUNNER_TEMP/marketplace-order-archive/service"
+          check_pair "$snapshot" "$order_archive"
+          check_pair "$order_archive" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

@@ -2,7 +2,7 @@
 
 import calendar
 from datetime import date, timedelta
-from decimal import Decimal, localcontext
+from decimal import Decimal, Inexact, localcontext
 import time
 import urllib.error
 
@@ -129,17 +129,23 @@ COMPONENTS = (
 def unit_row(provider, article, currency, units, returned, amounts, cost=None, cost_currency=None):
     with localcontext() as ctx:
         ctx.prec = 128
-        numeric = {k: money(amounts.get(k)) for k in COMPONENTS}
+        components = (*COMPONENTS, "last_mile") if "last_mile" in amounts else COMPONENTS
+        numeric = {k: money(amounts.get(k)) for k in components}
         denominator = units if type(units) is int and units > 0 and currency else None
-        rates = {
-            k: str(v / denominator) if v is not None and denominator else None for k, v in numeric.items()
-        }
+        def per_unit(amount, subtract=Decimal(0)):
+            if amount is None or not denominator:
+                return None
+            with localcontext() as display:
+                display.clear_flags()
+                value = amount / denominator - subtract
+                return format(value, ".4f") if display.flags[Inexact] else str(value)
+        rates = {k: per_unit(v) for k, v in numeric.items()}
         cost = money(cost)
         margin = None
-        expenses_known = all(
-            numeric[k] is not None and numeric[k] >= 0
-            for k in ("logistics", "storage", "acceptance", "ads", "retentions")
-        )
+        expense_fields = ("logistics", "storage", "acceptance", "ads", "retentions")
+        if "last_mile" in numeric:
+            expense_fields += ("last_mile",)
+        expenses_known = all(numeric[k] is not None and numeric[k] >= 0 for k in expense_fields)
         if (
             all(v is not None for v in numeric.values())
             and expenses_known
@@ -148,8 +154,8 @@ def unit_row(provider, article, currency, units, returned, amounts, cost=None, c
             and cost >= 0
             and currency == cost_currency
         ):
-            expenses = sum(numeric[k] for k in ("logistics", "storage", "acceptance", "ads", "retentions"))
-            margin = str((numeric["for_pay"] - expenses) / denominator - cost)
+            expenses = sum(numeric[k] for k in expense_fields)
+            margin = per_unit(numeric["for_pay"] - expenses, cost)
         return dict(
             marketplace=provider,
             article=article,
@@ -161,6 +167,7 @@ def unit_row(provider, article, currency, units, returned, amounts, cost=None, c
             bank_payout_per_unit=None,
             margin_per_unit=margin,
             denominator="gross_sold_units_before_returns",
+            recurring_unit_rate_decimal_places=4,
             unavailable=[k for k, v in numeric.items() if v is None],
         )
 
@@ -318,6 +325,7 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
             "for_pay": total("total"),
             "commission": total("standard_fee"),
             "gross_sales": total("amount"),
+            "last_mile": None,
         }
         selected = data.get("selected_rows", [])
         postings = sorted({r["posting_number"] for r in selected if r.get("posting_number")})
@@ -331,16 +339,13 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
                     wires["ozon"],
                 )
             )
-            lines = [
-                r
-                for r in accrual.get("observed_category_breakdown", [])
-                if r.get("category") in ("logistics", "last_mile")
-                and r.get("currency") == data.get("currency")
-            ]
-            if lines and all(
-                r.get("incomplete") is not True and r.get("observed_row_sum") is not None for r in lines
-            ):
-                amounts["logistics"] = -sum(money(r["observed_row_sum"]) for r in lines)
+            for category in ("logistics", "last_mile"):
+                lines = [r for r in accrual.get("observed_category_breakdown", [])
+                         if r.get("category") == category and r.get("currency") == data.get("currency")]
+                if lines and not accrual.get("unreturned_posting_numbers") and all(
+                    r.get("incomplete") is not True and r.get("observed_row_sum") is not None for r in lines
+                ):
+                    amounts[category] = -sum(money(r["observed_row_sum"]) for r in lines)
         ad = observed(lambda: advertising("ozon", period, {"article": article}, wires)) if units else {}
         amounts["ads"] = ad.get("spend_by_currency", {}).get(data.get("currency"))
         row = unit_row(
@@ -354,6 +359,7 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
             args.get("currency"),
         )
         row["basis"] = "realization_month_delivery_leg_only"
+        row["reported_return_rows"] = data.get("observed_return_rows")
         items.append(row)
         sources["ozon"] = {
             k: data.get(k)
@@ -371,6 +377,9 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
             postings_in_realization=len(postings),
             ads_status=ad.get("status"),
             accrual_status=accrual.get("status"),
+            accrual_http_status=accrual.get("http_status"),
+            accrual_postings_returned=len(accrual["returned_posting_numbers"]) if "returned_posting_numbers" in accrual else None,
+            accrual_date_basis=accrual.get("period_basis"),
         )
         if units is None and data.get("status") in ("retry_time_unknown","cooldown","provider_access_denied","source_unavailable"):
             sources["ozon"]["delivered_postings"] = observed(
