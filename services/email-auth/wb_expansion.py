@@ -89,12 +89,23 @@ def supply_detail(parent, request):
     # The receiving warehouse may differ from the planned destination.
     return dict(parent, status_id=data.get("statusID", parent.get("status_id")),
                 warehouse_id=data.get("warehouseID"), warehouse=planned or actual,
+                warehouse_name=planned or actual or None,
                 warehouse_basis="planned" if planned else "actual" if actual else "unreported",
                 actual_warehouse_id=data.get("actualWarehouseID"), actual_warehouse=actual,
                 transit_warehouse_id=data.get("transitWarehouseID"),
                 paid_acceptance_coefficient=data.get("paidAcceptanceCoefficient"), accepted_at=None,
                 quantity=data.get("quantity"), accepted_quantity=data.get("acceptedQuantity"),
                 ready_for_sale_quantity=data.get("readyForSaleQuantity"))
+
+
+def display_supply_warehouse(row):
+    if row.get("warehouse"):
+        return row
+    ident = row.get("warehouse_id") or row.get("actual_warehouse_id")
+    if ident is not None:
+        return dict(row, warehouse=f"Склад WB №{ident}", warehouse_name=None,
+                    warehouse_basis="reported_id_only")
+    return row
 
 
 def _supplies(args, request):
@@ -113,7 +124,7 @@ def _supplies(args, request):
                           issues=["more_supply_details_pending"], retry_after_seconds=delay)
         if "warehouse_id" not in args or str(args["warehouse_id"]) in (
                 str(row["warehouse_id"]), str(row["actual_warehouse_id"])):
-            items.append(row)
+            items.append(display_supply_warehouse(row))
     return result(items, page["next_cursor"], period_basis="supply_creation_moscow")
 
 
@@ -272,10 +283,10 @@ def _stats(name, args, request, *, exact_day=False, feed_start=None):
             ttl=1800,
         )
     except finance_gate.GateError as exc:
-        if sale or exc.reason != "retry_time_unknown":
+        if exc.reason != "retry_time_unknown":
             raise
-        delay = request.recover_interrupted_orders() if hasattr(request, "recover_interrupted_orders") else None
-        if "cursor" in args:
+        delay = request.recover_interrupted_statistics(name) if hasattr(request, "recover_interrupted_statistics") else None
+        if sale or "cursor" in args:
             if delay is not None:
                 raise finance_gate.GateError("cooldown", delay) from None
             raise

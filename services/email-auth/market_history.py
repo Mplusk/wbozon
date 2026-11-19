@@ -230,11 +230,17 @@ def historical_read(history, owner, name, args):
     pages = history.read_days(owner, name, args["date_from"], args["date_to"])
     days = days_between(args["date_from"], args["date_to"])
     missing = [d for d in days if d not in pages]
+    posting_days = []
+    if name == "ozon_sku_daily" and missing and not args.get("include_funnel"):
+        supplemental = history.read_days(owner, "ozon_posting_sku_daily", args["date_from"], args["date_to"])
+        posting_days = [d for d in missing if d in supplemental]
+        pages.update({d: supplemental[d] for d in posting_days})
     offset, limit = args.get("offset", 0), args.get("limit", 100)
     selected = []
     unresolved = 0
     check_article = name in ("ozon_sku_daily", "wb_orders") and "article" in args
-    for _, records in pages.values():
+    for day in sorted(pages):
+        _, records = pages[day]
         for row in records:
             if check_article and not row.get("article"):
                 selector = "nm_id" if name == "wb_orders" else "sku"
@@ -270,7 +276,10 @@ def historical_read(history, owner, name, args):
         source="daily_archive",
         missing_dates=missing,
         requested_days=len(days),
-        archived_days=len(pages),
+        archived_days=len(pages)-len(posting_days),
+        **({"posting_archive_days": posting_days, "days_without_either_source": [d for d in missing if d not in pages],
+            "posting_metrics": ["posting_units", "posting_item_value"], "analytics_missing_dates": missing}
+           if posting_days else {}),
         **({"issues": ["archived_article_identity_missing"], "unresolved_article_rows": unresolved}
            if unresolved else {}),
         data_as_of=min((s for s, _ in pages.values()), default=None),

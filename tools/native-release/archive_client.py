@@ -14,6 +14,7 @@ def main():
     datasets = (
         "wb_orders",
         "ozon_sku_daily",
+        "ozon_posting_sku_daily",
         "wb_sales",
         "wb_finance_report",
         "ozon_availability",
@@ -35,7 +36,7 @@ def main():
             )
             reply = connection.getresponse()
             raw = reply.read(2048)
-            if reply.status in (401, 403):
+            if reply.status == 401:
                 return
             status = json.loads(raw).get("status") if reply.status == 200 else str(reply.status)
             print(

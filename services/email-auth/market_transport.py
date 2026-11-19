@@ -238,11 +238,12 @@ class Wire:
         raw = self.cached(_id([self.scope, name, args]))
         return json.loads(raw) if raw is not None else {}
 
-    def recover_interrupted_orders(self):
-        """Give a lost WB statistics GET one full documented refill interval before a new read."""
-        if self.provider != "wb":
+    def recover_interrupted_statistics(self, name="wb_orders"):
+        """Rearm only interrupted, idempotent WB statistics reads at their published interval."""
+        if self.provider != "wb" or name not in ("wb_orders", "wb_sales"):
             return None
-        url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
+        path = "/api/v1/supplier/" + ("orders" if name == "wb_orders" else "sales")
+        url = "https://statistics-api.wildberries.ru" + path
         root = str(Path(self.gate_dir).parent / ".market-method-gates")
         key = finance_gate._key(market_cooldown.method_key("wb", self.creds, url))
         # An operator-reported 429 (including one with no reset) and an active request
@@ -255,13 +256,14 @@ class Wire:
         with finance_gate._lock(root, key) as created:
             if finance_gate._read_state(root, key, created)["status"] != "in_flight":
                 return None
-            slot = _id([self.scope, "statistics-api.wildberries.ru", "/api/v1/supplier/orders"])
+            slot = _id([self.scope, "statistics-api.wildberries.ru", path])
             with self.db() as db:
                 row = db.execute("SELECT until_at,unknown FROM quota WHERE k=?", (slot,)).fetchone()
             if not row or row[1]:
                 return None
             now = time.time()
-            interval = 60 if _wb_personal(self.creds["api_token"]) else 10800
+            basic_interval = 10800 if name == "wb_orders" else 7200
+            interval = 60 if _wb_personal(self.creds["api_token"]) else basic_interval
             delay = max(interval, math.ceil(row[0] - now))
             if delay > finance_gate.MAX_RETRY_SECONDS:
                 return None

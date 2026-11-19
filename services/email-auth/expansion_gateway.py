@@ -83,9 +83,9 @@ class CategoryWire(Wire):
         self.category_keys=creds.get("category_keys",{})
         self.sources={}
 
-    def recover_interrupted_orders(self):
+    def recover_interrupted_statistics(self, name="wb_orders"):
         source = self.sources.get("wb_statistics")
-        return source.recover_interrupted_orders() if source else super().recover_interrupted_orders()
+        return source.recover_interrupted_statistics(name) if source else super().recover_interrupted_statistics(name)
 
     def __call__(self,method,url,**params):
         category=market_health.HOST_KEYS.get(urlsplit(url).hostname.split(".")[0])
@@ -215,10 +215,23 @@ def _finance_by_report(args, wire):
 
     with src.progress("wb-finance-by-report-v1", [args.get("article"), args.get("nm_id"),
                                                   args.get("sku"), start.isoformat(), end.isoformat()]) as (previous, save):
-        state = previous or {"reports": None, "index": 0, "cursor": 0, "rows": [], "unallocated": 0}
+        now = time.time()
+        refresh_interval = 86400 if end < datetime.now(market_specs.MOSCOW).date()-timedelta(days=7) else 1800
+        initial = {"reports": None, "index": 0, "cursor": 0, "rows": [], "unallocated": 0}
+        state = previous or initial
+        if state.get("verified_at") and now >= state["verified_at"] + refresh_interval:
+            state = dict(initial, last_ready=state["last_ready"])
+            save(state, 30*86400)
+        def refreshing(status, delay=None):
+            snapshot = state.get("last_ready")
+            if snapshot:
+                return dict(snapshot, refresh_status="pending", refresh_reason=status, retry_after_seconds=delay)
+            return market_specs.result([], complete=False, status=status, retry_after_seconds=delay)
         if state["reports"] is None:
-            result = read("wb_post_api_finance_sales_reports_list", {"body": {"dateFrom": monday.isoformat(),
-                          "dateTo": sunday.isoformat(), "limit": 1000, "period": "weekly"}})
+            result = market_composites.observed(lambda: read("wb_post_api_finance_sales_reports_list",
+                        {"body": {"dateFrom": monday.isoformat(), "dateTo": sunday.isoformat(), "limit": 1000, "period": "weekly"}}))
+            if result.get("http_status") not in (200, 204) or "data" not in result:
+                return refreshing(result.get("status", "report_list_unavailable"), result.get("retry_after_seconds"))
             records = market_specs.rows(result["data"] or [])
             if len(records) == 1000:
                 return market_specs.result([], complete=False, status="report_list_truncated")
@@ -231,7 +244,7 @@ def _finance_by_report(args, wire):
                 if hi >= start and lo <= end:
                     reports[rid] = [rid, lo.isoformat(), hi.isoformat()]
             state["reports"] = list(reports.values())
-            save(state, 1800)
+            save(state, 30*86400 if state.get("last_ready") else 86400)
         failure = {}
         for _ in range(8):
             if state["index"] == len(state["reports"]) or time.monotonic() + 2 >= src.deadline:
@@ -264,22 +277,36 @@ def _finance_by_report(args, wire):
                 break
             if len(state["rows"]) > 20000:
                 return market_specs.result([], complete=False, status="narrow_period_or_select_article")
-            save(state, 86400)
+            save(state, 30*86400 if state.get("last_ready") else 86400)
         covered = set()
         for _, lo, hi in state["reports"][:state["index"]]:
             covered.update(market_history.days_between(max(start.isoformat(),lo), min(end.isoformat(),hi)))
         wanted = market_history.days_between(start.isoformat(), end.isoformat())
         missing = [d for d in wanted if d not in covered]
         done = state["index"] == len(state["reports"])
-        if done:
-            save(state, 1800)
         complete = done and not missing
-        return market_specs.result(wb_expansion.finance_summary(state["rows"]), complete=complete,
+        if complete and state.get("verified_at"):
+            return state["last_ready"]
+        if not complete and state.get("last_ready"):
+            if done:
+                state["reports"] = None
+                state.update(index=0, cursor=0, rows=[], unallocated=0)
+                save(state, 30*86400)
+            return refreshing(failure.get("status", "partial_report_coverage" if done else "pending"),
+                              failure.get("retry_after_seconds"))
+        response = market_specs.result(wb_expansion.finance_summary(state["rows"]), complete=complete,
                     status="ready" if complete else failure.get("status", "partial_report_coverage" if done else "pending"),
                     source="wb_financial_reports_by_id", summary_scope="requested_period" if complete else "observed_rows_only",
                     rows_observed=len(state["rows"]), reports_completed=state["index"], reports_listed=len(state["reports"]),
                     missing_dates=missing, unallocated_rows=state["unallocated"],
                     retry_after_seconds=failure.get("retry_after_seconds"), period_from=start.isoformat(), period_to=end.isoformat())
+        if complete:
+            response.update(data_as_of=market_history.utc(), refresh_status="ready")
+            state.update(verified_at=now, last_ready=response)
+            save(state, 30*86400)
+        elif done:
+            save(state, 1800)
+        return response
 
 
 def _finance_period(args, wire):
@@ -778,6 +805,24 @@ def execute(name, args, creds, directory, deadline):
                         for row in data["items"]:
                             if str(row.get("sku")) in selected:
                                 row["article"] = row["offer_id"] = args["article"]
+                elif name == "ozon_sku_daily":
+                    try:
+                        data = ozon_expansion.read(name, args, wire)
+                    except (finance_gate.GateError, urllib.error.HTTPError) as exc:
+                        if isinstance(exc, urllib.error.HTTPError) and exc.code != 429:
+                            raise
+                        history = market_history.History(directory)
+                        owner = market_history.scope("ozon", wire.creds)
+                        if not history.authorized(wire.creds, owner):
+                            raise
+                        archived = market_history.historical_read(history, owner, name, args)
+                        if not archived["archived_days"] and not archived.get("posting_archive_days"):
+                            raise
+                        if isinstance(exc, urllib.error.HTTPError):
+                            exc.close()
+                        archived.update(live_analytics_status=exc.reason if isinstance(exc, finance_gate.GateError) else "rate_limited",
+                                        read_only=True, tool=name, untrusted_data=True)
+                        return archived
                 else:
                     data = ozon_expansion.read(name, args, wire)
             except urllib.error.HTTPError as exc:

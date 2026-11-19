@@ -429,6 +429,44 @@ def _reuse_completed_orders(state, wire, key):
     state["orders_source"] = "previous_complete_snapshot_same_account_article_and_day"
 
 
+def _use_wb_order_archive(state, wire, article, nm, since, through):
+    if state["done"]["orders"] or not hasattr(wire, "gate_dir"):
+        return
+    import market_history
+    history = market_history.History(wire.gate_dir)
+    owner = market_history.scope("wb", wire.creds)
+    required = market_history.days_between(since, through)
+    if not history.authorized(wire.creds, owner) or not set(required) <= history.coverage(owner, "wb_orders").keys():
+        return
+    rows = []
+    for offset in range(0, len(required), 7):
+        week = required[offset:offset+7]
+        pages = history.read_days(owner, "wb_orders", week[0], week[-1])
+        if len(pages) != len(week):
+            return
+        for _, records in pages.values():
+            for row in records:
+                code = row.get("article")
+                same_nm = nm is not None and str(row.get("nm_id")) == str(nm)
+                if (code == article and (nm is None or same_nm)) or (same_nm and not code):
+                    rows.append(row)
+                elif not code and (nm is None or not row.get("nm_id")):
+                    return
+        if len(rows) > 50000:
+            return
+    state["locations"] = {k: v for k, v in state["locations"].items() if v["stock"]}
+    for location in state["locations"].values():
+        location.update(daily={}, days_with_cancellations={}, unknown_cancellation_days={})
+    state.update(orders={}, seller_warehouse_orders={}, order_coverage=[since, through],
+                 orders_source="verified_daily_order_archive")
+    state["issues"].difference_update({"inconsistent_order_revision", "missing_order_id", "unknown_fulfillment_scheme",
+                                       "missing_order_date_or_units", "order_volume_exceeds_planning_bound"})
+    state["anonymous_wb_demand"] = any(row.get("warehouse") == "Склад WB" and
+                                       row.get("warehouse_type") == "Склад WB" for row in rows)
+    _scan(state, "orders", {"items": rows}, "wb", since, through)
+    state["done"]["orders"] = True
+
+
 def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
     since = (as_of - timedelta(days=89)).isoformat()
     key = [provider, article, nm, as_of.isoformat()]
@@ -451,6 +489,8 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
         state["issues"] = set(state["issues"])
         state["orders_preliminary"] = provider == "wb"
         _reuse_completed_orders(state, wire, key)
+        if provider == "wb":
+            _use_wb_order_archive(state, wire, article, nm, since, as_of.isoformat())
 
         def checkpoint():
             save(

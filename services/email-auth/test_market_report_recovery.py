@@ -15,6 +15,7 @@ import finance_gate
 import market_archive
 import market_cooldown
 import market_health
+import market_history
 import market_specs
 import market_transport
 import ozon_expansion
@@ -187,6 +188,45 @@ class Recovery(unittest.TestCase):
         self.assertEqual((old["items"],old["data_as_of"],old["refresh_status"]), (first["items"],first["data_as_of"],"pending"))
         self.assertEqual((new["complete"],new["items"],new["refresh_status"]), (True,[],"ready"))
 
+    def test_unavailable_warehouse_directory_keeps_ready_goods_and_reported_id(self):
+        wire = ResumeWire()
+        args = dict(article="A", date_from="2026-10-01", date_to="2026-10-31")
+        headers = market_specs.result([dict(supply_id=i, preorder_id=None) for i in (1, 2)])
+        goods = market_specs.result([dict(quantity=77, accepted_quantity=77)])
+        detail = lambda parent, _: dict(parent, warehouse=None, warehouse_id=3026, actual_warehouse_id=3026)
+        with patch.object(wb_expansion, "supply_headers", return_value=headers), patch.object(
+                wb_expansion, "_goods", return_value=goods), patch.object(wb_expansion, "supply_detail",
+                side_effect=detail), patch.object(wb_expansion, "_warehouse_directory", return_value={
+                    "warehouses_status":"unavailable", "warehouse_catalog_http_status":503}) as lookup:
+            report = supply_history.report("wb_supplies", args, wire)
+            repeat = supply_history.report("wb_supplies", args, wire)
+        self.assertTrue(report["complete"])
+        self.assertEqual(report["items"], repeat["items"])
+        self.assertEqual(lookup.call_count, 1)
+        for row in report["items"]:
+            self.assertEqual((row["warehouse"], row["warehouse_name"], row["warehouse_basis"]),
+                             ("Склад WB №3026", None, "reported_id_only"))
+
+    def test_postings_archive_requires_both_schemes_and_keeps_financial_metrics_separate(self):
+        class PostingWire(ResumeWire):
+            provider, creds = "ozon", {"client_id":"1", "api_key":"fixture"}
+            def __call__(self, method, url, **kwargs):
+                scheme = "FBO" if "/fbo/" in url else "FBS"
+                day_field = "created_at" if scheme == "FBO" else "in_process_at"
+                item = {"sku":1, "offer_id":"01", "quantity":2, "price":{"amount":"12.50","currency":"RUB"}}
+                return {"postings":[{"posting_number":scheme, day_field:"2026-11-15T06:00:00Z", "products":[item]}], "has_next":False}
+        stored = {}
+        history = SimpleNamespace(save_day=lambda owner, name, day, rows, stamp: stored.update({day:(stamp,rows)}),
+                                  confirm=lambda *_:None,
+                                  read_days=lambda _,name,*dates: stored if name=="ozon_posting_sku_daily" else {})
+        self.assertEqual(market_archive.collect_posting_days(PostingWire(), history, "2026-11-15"), "complete")
+        report = market_history.historical_read(history,"owner","ozon_sku_daily",
+                        {"date_from":"2026-11-09","date_to":"2026-11-15","article":"01"})
+        self.assertEqual((len(report["posting_archive_days"]),report["archived_days"],report["complete"]), (7,0,False))
+        self.assertEqual({r["date_basis"] for r in report["items"]},{"created_at_utc","in_process_at_utc"})
+        self.assertTrue(all(r["posting_units"]==2 and r["posting_item_value"]=="25.00" and
+                            r["ordered_units"] is None and r["revenue"] is None for r in report["items"]))
+
     def test_only_an_interrupted_wb_orders_read_gets_a_bounded_refill(self):
         url = wb_expansion.STAT + "orders"
         creds = {"api_token":"x." + base64.urlsafe_b64encode(b'{"acc":3}').decode().rstrip("=") + ".x"}
@@ -204,7 +244,7 @@ class Recovery(unittest.TestCase):
                     raise exc
                 with self.assertRaises(type(exc)):
                     finance_gate.run(gate, guard, fail)
-                delay = wire.recover_interrupted_orders()
+                delay = wire.recover_interrupted_statistics()
                 self.assertEqual(delay, 60 if interrupted else None)
                 with self.assertRaises(finance_gate.GateError) as blocked:
                     finance_gate.run(gate,guard,lambda: self.fail("early read"))
@@ -238,6 +278,29 @@ class Recovery(unittest.TestCase):
             last = expansion_gateway._finance_by_report(args, wire)
         self.assertTrue(last["complete"])
         self.assertEqual((last["rows_observed"],last["items"][0]["sold_units"]), (1,1))
+        retained = next(iter(wire.records.values()))
+        with patch.object(expansion_gateway,"Wire",return_value=wire), patch("market_catalog.transfer",
+                side_effect=finance_gate.GateError("cooldown",60)), patch.object(expansion_gateway.time,"time",
+                return_value=retained["verified_at"]+86401):
+            cached = expansion_gateway._finance_by_report(args, wire)
+        self.assertEqual((cached["complete"],cached["refresh_status"],cached["data_as_of"],cached["items"]),
+                         (True,"pending",last["data_as_of"],last["items"]))
+
+    def test_weekly_order_archive_waits_for_terminal_page_and_reconciles_revisions(self):
+        wire, saved = ResumeWire(), {}
+        wire.provider, wire.creds = "wb", {"api_token":"fixture"}
+        day = (datetime.now(market_specs.MOSCOW).date()-timedelta(days=1)).isoformat()
+        history = SimpleNamespace(save_day=lambda owner,name,key,rows,stamp:saved.update({key:rows}), confirm=lambda *_:None)
+        old = dict(date=day, last_change=day+"T01:00:00+03:00", srid="order1", cancelled=False)
+        new = dict(old, last_change=day+"T01:01:00+03:00", cancelled=True)
+        with patch.object(wb_expansion,"_stats",side_effect=[market_specs.result([old],"cursor"),
+                market_specs.result([new],"cursor2"),market_specs.result([])]) as read:
+            self.assertEqual(market_archive.collect(wire,history,"wb_orders",day),"pending")
+            self.assertEqual(market_archive.collect(wire,history,"wb_orders",day),"pending")
+            self.assertEqual(saved,{})
+            self.assertEqual(market_archive.collect(wire,history,"wb_orders",day),"complete")
+        self.assertEqual((len(saved),saved[day]),(7,[new]))
+        self.assertTrue(all(not call.kwargs["exact_day"] for call in read.call_args_list))
 
     def test_seven_archived_ozon_days_come_from_one_complete_page(self):
         wire, saved = ResumeWire(), {}

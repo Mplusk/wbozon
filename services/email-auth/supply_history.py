@@ -173,6 +173,7 @@ def report(name, args, wire):
         # Names are enriched separately. A waiting detail must not discard goods or block discovery.
         if not oz:
             catalog = None
+            directory_attempted = False
             for index, match in enumerate(state["supplies"]):
                 if match.get("warehouse") or match.get("detail_checked") or time.monotonic() + 2 >= wire.deadline:
                     continue
@@ -181,17 +182,17 @@ def report(name, args, wire):
                     break
                 warehouse_id = detail["warehouse_id"] or detail["actual_warehouse_id"]
                 if not detail["warehouse"] and warehouse_id:
-                    if catalog is None:
+                    if not directory_attempted:
+                        directory_attempted = True
                         catalog = fetch(wb_expansion._warehouse_directory, {"include_warehouses": True}, wire, {})
-                    if not catalog or "warehouses" not in catalog:
-                        if catalog:
-                            delays.append({"status": "warehouse_directory_unavailable",
-                                           "http_status": catalog.get("warehouse_catalog_http_status")})
-                        break
-                    names = {r["name"] for r in catalog["warehouses"] if str(r["warehouse_id"]) == str(warehouse_id) and r["name"]}
+                    names = {r["name"] for r in (catalog or {}).get("warehouses", [])
+                             if str(r["warehouse_id"]) == str(warehouse_id) and r["name"]}
                     if len(names) == 1:
-                        detail.update(warehouse=names.pop(), warehouse_basis="directory_by_id")
-                state["supplies"][index] = dict(detail, detail_checked=True)
+                        name_from_id = names.pop()
+                        detail.update(warehouse=name_from_id, warehouse_name=name_from_id, warehouse_basis="directory_by_id")
+                    else:
+                        detail["warehouse_name_status"] = (catalog or {}).get("warehouses_status", "unavailable")
+                state["supplies"][index] = dict(wb_expansion.display_supply_warehouse(detail), detail_checked=True)
                 save(state, 30 * 86400)
         done = state["last_page"] and not state["queue"]
         details_done = oz or all(s.get("warehouse") or s.get("detail_checked") for s in state["supplies"])
