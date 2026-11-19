@@ -251,7 +251,7 @@ def project_response(operation, args, data, creds):
         return ozon_posting_status.project_candidates(args, data, creds)
     if operation == 'ozon_orders_analytics':
         return _project_orders_analytics(args, data, creds)
-    parent = data.get('result', data)
+    parent = data.get('result') if operation=='ozon_products' else data.get('result',data)
     if not isinstance(parent, dict) or not isinstance(parent.get('items'), list):
         raise ValueError('Unexpected Ozon schema')
     rows = parent['items']

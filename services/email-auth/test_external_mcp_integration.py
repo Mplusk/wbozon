@@ -156,7 +156,8 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
         self.assertEqual(info['retry_after_seconds'],45)
         second=json.loads(self.mcp(message,token)['body'])['result']
         info=json.loads(second['content'][0]['text'])
-        self.assertEqual(info['reason'],'cooldown')
+        self.assertEqual(info['reason'],'local_limiter')
+        self.assertIsNone(info['http_status'])
         self.assertTrue(1 <= info['retry_after_seconds'] <= 45)
         bridge=self.request('/api/read','POST',{'operation':'ozon_accrual_types','arguments':{}},auth=self.token)
         self.assertTrue(bridge['status'].startswith('429'))
@@ -174,11 +175,12 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
         self.app.gateway=gateway
         message={'jsonrpc':'2.0','id':7,'method':'tools/call',
                  'params':{'name':'ozon_accrual_types','arguments':{}}}
-        for _ in range(2):
+        for attempt in range(2):
             result=json.loads(self.mcp(message,token)['body'])['result']
             info=json.loads(result['content'][0]['text'])
-            self.assertEqual(info['reason'],'retry_time_unknown')
-            self.assertIsNone(info['retry_after_seconds'])
+            self.assertEqual(info['http_status'],None if attempt else 429)
+            self.assertEqual(info.get('reason'),'local_limiter' if attempt else None)
+            self.assertTrue(1 <= info['retry_after_seconds'] <= 60)
         self.assertEqual(len(calls),1)
 
     def test_retry_interval_matching_secret_is_not_exposed_by_mcp_or_api(self):
@@ -195,8 +197,8 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
             self.assertEqual(info['reason'],'retry_interval_unavailable')
             self.assertNotIn('45',response['body'])
             bridge=self.request('/api/read','POST',{'operation':'ozon_accrual_types','arguments':{}},auth=self.token)
-        self.assertNotIn('Retry-After',bridge['headers'])
-        self.assertIsNone(json.loads(bridge['body'])['retry_after_seconds'])
+        self.assertEqual(bridge['headers'].get('Retry-After'),'60')
+        self.assertEqual(json.loads(bridge['body'])['retry_after_seconds'],60)
         self.assertNotIn('45',bridge['body'])
 
     def test_known_oversized_provider_response_is_reported_without_locking_retries(self):
@@ -316,7 +318,8 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
             second=json.loads(self.mcp({'jsonrpc':'2.0','id':8,'method':'tools/call',
                 'params':{'name':'ozon_accrual_types','arguments':{}}},token)['body'])['result']
             info=json.loads(second['content'][0]['text'])
-            self.assertEqual(info['reason'],'cooldown')
+            self.assertEqual(info['reason'],'local_limiter')
+            self.assertIsNone(info['http_status'])
             self.assertEqual(len(calls),index+1)
             self.assertNotIn('synthetic-private',json.dumps([first,second]))
 

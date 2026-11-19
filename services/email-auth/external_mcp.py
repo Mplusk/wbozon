@@ -169,7 +169,7 @@ class MCPToolError(Exception):
         if retry_after_seconds is not None and (code != 'rate_limited' or type(retry_after_seconds) is not int or
                                                  not 0 <= retry_after_seconds <= 2147483647):
             raise ValueError('Invalid retry interval')
-        if reason is not None and reason not in ('busy','cooldown','retry_time_unknown','storage_unavailable','retry_interval_unavailable'):
+        if reason is not None and reason not in ('busy','cooldown','local_limiter','retry_time_unknown','storage_unavailable','retry_interval_unavailable'):
             raise ValueError('Invalid error reason')
         self.code = code
         self.retry_after_seconds = retry_after_seconds

@@ -472,14 +472,20 @@ def run(root, client_id, callback, secret_values=(), *, before_send=None, read_r
                     delay, source = READ_RECOVERY_SECONDS, 'verified_recovery'
                 # A provider key can be entirely numeric. Do not persist a
                 # retry value whose decimal representation reproduces it.
-                if delay is not None and any(isinstance(secret,str) and secret and secret in str(delay)
-                                             for secret in secret_values):
-                    delay, source = None, 'unknown'
+                hidden=delay is not None and any(isinstance(secret,str) and secret and secret in str(delay) for secret in secret_values)
+                if hidden:
+                    # Choose a conservative public-independent bucket for a read,
+                    # preserving the real deadline without storing credential digits.
+                    safe_buckets=(d*10**n for n in range(10) for d in range(1,10))
+                    minimum=max(READ_RECOVERY_SECONDS,delay)
+                    delay=next((v for v in safe_buckets if minimum<=v<=MAX_RETRY_SECONDS and
+                                not any(isinstance(s,str) and s and s in str(v) for s in secret_values)),None) if read_recovery else None
+                    source='verified_recovery' if delay is not None else 'unknown'
                 next_state = ({'version':1,'status':'retry','at_wall':now_wall,
                                'at_monotonic':now_mono,'delay':delay,'source':source,'boot':boot}
                               if delay is not None else {'version':1,'status':'retry_unknown'})
                 _write_client_state(root, key, next_state)
-                exc.retry_after_seconds, exc.retry_after_source = delay, source
+                exc.retry_after_seconds, exc.retry_after_source = (None,'unknown') if hidden else (delay,source)
             else:
                 _write_client_state(root, key, {'version':1,'status':'idle'})
             raise

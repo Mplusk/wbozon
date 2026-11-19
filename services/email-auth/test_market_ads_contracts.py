@@ -274,7 +274,7 @@ class OzonPerformanceContracts(unittest.TestCase):
         wire._http_cache = lambda _key, _binary: None
         wire.cached = lambda _key: None
         wire.store = lambda *_args, **_kwargs: None
-        wire._admit = lambda *_args: None
+        wire._admit = lambda *_args, **_options: None
         with self.assertRaises(ValueError):
             ozon_performance.read(ARGS, wire, CREDS)
         try:
@@ -305,7 +305,7 @@ class OzonPerformanceContracts(unittest.TestCase):
         wire._http_cache = lambda _key, _binary: None
         wire.cached = lambda _key: None
         wire.store = lambda *_args, **_kwargs: None
-        wire._admit = lambda *_args: None
+        wire._admit = lambda *_args, **_options: None
         body = {'campaigns': ['12'], 'dateFrom': '2026-10-01',
                 'dateTo': '2026-10-03', 'groupBy': 'DATE'}
         with patch('market_transport.time.time', return_value=1_800_000_000):
@@ -345,7 +345,7 @@ class OzonPerformanceContracts(unittest.TestCase):
         wire._http_cache = lambda _key, _binary: None
         wire.cached = lambda _key: None
         wire.store = lambda *_args, **_kwargs: None
-        wire._admit = lambda *_args: None
+        wire._admit = lambda *_args, **_options: None
         body = {'campaigns': ['12'], 'dateFrom': '2026-10-01',
                 'dateTo': '2026-10-03', 'groupBy': 'DATE'}
         with patch('market_transport.time.time', return_value=1_800_000_000):
@@ -381,7 +381,7 @@ class OzonPerformanceContracts(unittest.TestCase):
                 wire._http_cache = lambda _key, _binary: None
                 wire.cached = lambda _key: None
                 wire.store = lambda *_args, **_kwargs: None
-                wire._admit = lambda *_args: None
+                wire._admit = lambda *_args, **_options: None
                 with self.assertRaises(urllib.error.HTTPError):
                     wire('POST', BASE + '/statistics', body=body, ttl=3600, job=True)
                 with self.assertRaises(finance_gate.GateError):
@@ -414,7 +414,7 @@ class OzonPerformanceContracts(unittest.TestCase):
         wire.deadline, wire.token, wire.opener = time.monotonic() + 30, None, Opener()
         wire.aead = AESGCM(bytes(32))
         wire.db = lambda: db
-        wire._admit = lambda *_args: None
+        wire._admit = lambda *_args, **_options: None
         first = ozon_performance.read(ARGS, wire, CREDS)
         self.assertEqual(first['provider_status'], 'ERROR')
         body = {'campaigns': ['12'], 'dateFrom': '2026-10-01',
