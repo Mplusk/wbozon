@@ -356,8 +356,9 @@ def _read_article_summary(args,creds,deadline):
 
 PROVIDER_DEADLINE_SECONDS = 20
 PROVIDER_STARTUP_SECONDS = 30
-PREPARED_OPERATIONS = frozenset(('market_api_read','market_api_propose','ozon_products','ozon_prices',
-                                 'wb_products','wb_prices','wb_commissions','wb_box_tariffs'))
+REPORT_WORKERS = (frozenset(market_specs.TOOLS) - finance_gate.FINANCE_OPERATIONS - {'mcp_health'}) | {'archive_market_day'}
+PREPARED_OPERATIONS = REPORT_WORKERS | frozenset(('market_api_read','market_api_propose','ozon_products',
+    'ozon_prices','wb_products','wb_prices','wb_commissions','wb_box_tariffs'))
 PROVIDER_WORKER = os.path.realpath(__file__)
 
 def _prepare_provider_worker(operation):
@@ -367,6 +368,17 @@ def _prepare_provider_worker(operation):
         import market_catalog
         if operation == 'market_api_propose':
             import market_actions
+    elif operation in REPORT_WORKERS:
+        # Only code, trust roots and the cache cipher are loaded before readiness.
+        # No vault, database, credentials or outbound request is needed here.
+        import expansion_gateway
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        if _worker_cli:
+            # Composite finance calls reuse the read functions in this worker
+            # instead of importing the web application a second time.
+            sys.modules.setdefault('portal', sys.modules[__name__])
+        if operation == 'archive_market_day':
+            import market_archive
     elif operation.startswith('ozon_'):
         import ozon_mcp
     else:
@@ -689,9 +701,23 @@ class Portal:
                 if account:
                     try:
                         data=self.read_gateway(name,probe,account)
-                        detail={k:data.get(k) for k in ('status','complete','data_as_of','http_status','task_id')}
-                    except (TimeoutError,urllib.error.URLError,finance_gate.GateError):
-                        detail={'status':'probe_failed'}
+                        detail={k:data.get(k) for k in ('status','complete','data_as_of','http_status','task_id',
+                                                        'source','retry_after_seconds','refresh_status')}
+                        if detail['status'] is None and isinstance(detail['complete'], bool):
+                            detail['status'] = 'ready' if detail['complete'] else 'partial'
+                    except finance_gate.GateError as exc:
+                        detail=dict(status=exc.reason, probe_origin='local_gate', http_status=None,
+                                    retry_after_seconds=exc.retry_after_seconds)
+                    except urllib.error.HTTPError as exc:
+                        detail=dict(status='rate_limited' if exc.code == 429 else 'http_error',
+                                    http_status=exc.code, retry_after_seconds=getattr(exc,'retry_after_seconds',None))
+                        exc.close()
+                    except TimeoutError as exc:
+                        detail = dict(status='provider_timeout', http_status=None, **{
+                            k:v for k,v in getattr(exc,'diagnostic',{}).items()
+                            if k in ('provider_method','retry_after_seconds','retry_basis')})
+                    except urllib.error.URLError:
+                        detail={'status':'transport_error','http_status':None}
             report=market_health.read(self.vault,self.finance_gate_dir,args,external_mcp.TOOL_NAMES,expansion_gateway.credentials)
             if detail: report['probe']=detail
             return report
@@ -721,7 +747,21 @@ class Portal:
     def _dispatch_read(self, operation, args, creds):
         if operation not in finance_gate.FINANCE_OPERATIONS:
             if self.gateway is provider_read:
-                return provider_read(operation,args,creds,finance_gate_dir=self.finance_gate_dir)
+                try:
+                    return provider_read(operation,args,creds,finance_gate_dir=self.finance_gate_dir)
+                except (TimeoutError, finance_gate.GateError) as exc:
+                    if operation != 'wb_supplies' or (isinstance(exc, finance_gate.GateError)
+                            and exc.reason not in ('busy', 'cooldown', 'retry_time_unknown')):
+                        raise
+                    import supply_history
+                    market_specs.validate(operation, args)
+                    wire = expansion_gateway.make_wire('wb', creds, self.finance_gate_dir, time.monotonic())
+                    page = supply_history.saved_wb_page(args, wire)
+                    if page is None:
+                        raise
+                    return dict(page, tool=operation, read_only=True, untrusted_data=True,
+                                refresh_reason=exc.reason if isinstance(exc, finance_gate.GateError) else 'provider_timeout',
+                                retry_after_seconds=getattr(exc, 'retry_after_seconds', None))
             return self.gateway(operation,args,creds)
         finance_request_preflight(operation,args,creds)
         if self.gateway is provider_read:

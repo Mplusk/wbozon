@@ -737,15 +737,30 @@ def execute(name, args, creds, directory, deadline):
             if name in ("wb_orders","wb_sales","ozon_sku_daily","wb_finance_report"):
                 first=date.fromisoformat(args["date_from"])
                 last=date.fromisoformat(args["date_to"])
-                if (args.get("archive") or (last-first).days>=90 or
-                    (p=="wb" and name!="wb_finance_report" and first<datetime.now(market_specs.MOSCOW).date()-timedelta(days=90))):
+                today = datetime.now(market_specs.MOSCOW).date()
+                archive_required = (args.get("archive") or (last-first).days>=90 or
+                    (p=="wb" and name!="wb_finance_report" and first<today-timedelta(days=90)))
+                closed_orders = name == "wb_orders" and last < today and "cursor" not in args and "archive" not in args
+                if archive_required or closed_orders:
                     archive=market_history.History(directory)
                     owner=market_history.scope(p,wire.creds)
-                    if not archive.authorized(wire.creds,owner):
+                    authorized = archive.authorized(wire.creds,owner)
+                    if archive_required and not authorized:
                         return market_specs.result([],complete=False,data_as_of=None,status="archive_access_not_yet_verified")
-                    data=market_history.historical_read(archive,owner,name,args)
-                    data.update(tool=name,read_only=True,untrusted_data=True)
-                    return data
+                    if authorized:
+                        use_archive = archive_required
+                        if not use_archive:
+                            coverage = archive.coverage(owner, name)
+                            use_archive = all(day in coverage for day in market_history.days_between(args["date_from"], args["date_to"]))
+                        if use_archive:
+                            data=market_history.historical_read(archive,owner,name,args)
+                            data.update(tool=name,read_only=True,untrusted_data=True)
+                            if name == "wb_orders":
+                                covered = not data["missing_dates"] and not data.get("issues")
+                                data.update(date_basis="event_date_moscow", statistics_status="preliminary", cursor_parameter="offset",
+                                            status="ready" if covered else "partial",
+                                            summary_scope="returned_page" if data["next_cursor"] is not None else "requested_period" if covered else "observed_period")
+                            return data
             try:
                 if name in ("wb_supplies","ozon_supply_orders") and "article" in args:
                     import supply_history

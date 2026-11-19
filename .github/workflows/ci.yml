@@ -316,6 +316,9 @@ jobs:
           order_archive="$RUNNER_TEMP/marketplace-order-archive/service"
           mkdir -p "$order_archive"
           git archive 7b606bf1a1126fe912980aa6dd487c61e745b65b:services/email-auth | tar -x -C "$order_archive"
+          finance_costs="$RUNNER_TEMP/marketplace-finance-costs/service"
+          mkdir -p "$finance_costs"
+          git archive c60452d10141a5fd50563b41f01b4cf0870648bf:services/email-auth | tar -x -C "$finance_costs"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09 \
@@ -328,6 +331,7 @@ jobs:
             --successor 8c4fb1f5ae6aa0b18ff93324f8c0dc05074ff074 "$recovery" \
             --successor d0af460f912a6582f76bbf3036ef0757d6d2d60e "$snapshot" \
             --successor 7b606bf1a1126fe912980aa6dd487c61e745b65b "$order_archive" \
+            --successor c60452d10141a5fd50563b41f01b4cf0870648bf "$finance_costs" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -365,7 +369,9 @@ jobs:
           check_pair "$recovery" "$snapshot"
           order_archive="$RUNNER_TEMP/marketplace-order-archive/service"
           check_pair "$snapshot" "$order_archive"
-          check_pair "$order_archive" "$packaged"
+          finance_costs="$RUNNER_TEMP/marketplace-finance-costs/service"
+          check_pair "$order_archive" "$finance_costs"
+          check_pair "$finance_costs" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

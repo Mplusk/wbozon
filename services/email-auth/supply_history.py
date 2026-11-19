@@ -9,14 +9,34 @@ import ozon_expansion
 from market_specs import result
 
 
-def report(name, args, wire):
-    oz = name == "ozon_supply_orders"
-    article = args["article"]
-    filters = {
+def _filters(args):
+    return {
         k: v
         for k, v in args.items()
         if k in ("date_from", "date_to", "states", "warehouse_id", "status_ids")
     }
+
+
+def saved_wb_page(args, wire):
+    """Read a previously completed page without holding the live refresh lock."""
+    if "article" not in args:
+        query = {k: v for k, v in args.items() if k != "mode"}
+        saved = wire.progress_snapshot("wb-supply-list-snapshot-v1", query)
+        if saved.get("page", {}).get("status") == "ready":
+            return dict(saved["page"], refresh_status="pending")
+        return None
+    filters = _filters(args)
+    state = wire.progress_snapshot("article-supplies-v2", ["wb_supplies", args["article"], filters])
+    finished = bool(state.get("finished_at"))
+    if not finished and not state.get("last_ready"):
+        return None
+    return _supply_page(False, args, filters, state, finished, finished, [], refreshing=True)
+
+
+def report(name, args, wire):
+    oz = name == "ozon_supply_orders"
+    article = args["article"]
+    filters = _filters(args)
     with wire.progress("article-supplies-v2", [name, article, filters]) as (saved, save):
         empty = {
             "list_cursor": None,
@@ -201,25 +221,26 @@ def report(name, args, wire):
             state["finished_at"] = time.time()
             state.pop("last_ready", None)
             save(state, 30 * 86400)
-        snapshot = state.get("last_ready") if not ready else None
-        records = snapshot["items"] if snapshot else state["supplies"]
-        as_of = snapshot["at"] if snapshot else state.get("finished_at")
-        selected = [s for s in records if oz or "warehouse_id" not in args or str(args["warehouse_id"]) in
-                    (str(s.get("warehouse_id")), str(s.get("actual_warehouse_id")))]
-        offset, limit = args.get("offset", 0), args.get("limit", 100)
-        more = offset + limit < len(selected)
-        return result(
-            selected[offset : offset + limit],
-            offset + limit if more else None,
-            complete=(ready or bool(snapshot)) and not more,
-            status="ready" if ready or snapshot else "pending",
-            scanned_supplies=snapshot.get("scanned") if snapshot else state.get("scanned"), matched_supplies=len(selected),
-            composition_complete=done or bool(snapshot), warehouses_checked=details_done or bool(snapshot), pending_sources=delays,
-            **({"data_as_of": datetime.fromtimestamp(as_of, timezone.utc).isoformat()} if as_of else {}),
-            refresh_status="pending" if snapshot else "ready" if ready else "initial_scan",
-            refresh_matched_supplies=len(state["supplies"]),
-            resume="repeat_same_arguments",
-            period=filters,
-            article=article,
-            quantity_unit="pcs",
-        )
+        return _supply_page(oz, args, filters, state, done, details_done, delays)
+
+
+def _supply_page(oz, args, filters, state, done, details_done, delays, *, refreshing=False):
+    ready = done and details_done
+    snapshot = state.get("last_ready") if not ready else None
+    records = snapshot["items"] if snapshot else state["supplies"]
+    as_of = snapshot["at"] if snapshot else state.get("finished_at")
+    selected = [s for s in records if oz or "warehouse_id" not in args or str(args["warehouse_id"]) in
+                (str(s.get("warehouse_id")), str(s.get("actual_warehouse_id")))]
+    offset, limit = args.get("offset", 0), args.get("limit", 100)
+    more = offset + limit < len(selected)
+    return result(
+        selected[offset : offset + limit], offset + limit if more else None,
+        complete=(ready or bool(snapshot)) and not more,
+        status="ready" if ready or snapshot else "pending",
+        scanned_supplies=snapshot.get("scanned") if snapshot else state.get("scanned"), matched_supplies=len(selected),
+        composition_complete=done or bool(snapshot), warehouses_checked=details_done or bool(snapshot), pending_sources=delays,
+        **({"data_as_of": datetime.fromtimestamp(as_of, timezone.utc).isoformat()} if as_of else {}),
+        refresh_status="pending" if snapshot or refreshing else "ready" if ready else "initial_scan",
+        refresh_matched_supplies=len(state["supplies"]), resume="repeat_same_arguments",
+        period=filters, article=args["article"], quantity_unit="pcs",
+    )

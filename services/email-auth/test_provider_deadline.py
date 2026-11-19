@@ -69,7 +69,10 @@ print(json.dumps({'kind':'ok','result':{'private':request['creds']['api_token']=
             with (patch.dict(os.environ, {'MCP_PREPARE_MARKET_WORKERS':'1'}),
                   patch('portal.PROVIDER_WORKER',str(worker)), patch('portal.PROVIDER_STARTUP_SECONDS',10),
                   patch('portal.PROVIDER_DEADLINE_SECONDS',0.4)):
-                self.assertEqual(provider_read('wb_prices',{'limit':1},{'api_token':'test-private'}),{'private':True})
+                for operation in ('wb_prices', 'supply_plan', 'unit_economics', 'wb_supplies',
+                                  'ozon_sku_daily', 'wb_funnel', 'archive_market_day'):
+                    with self.subTest(operation=operation):
+                        self.assertEqual(provider_read(operation,{'limit':1},{'api_token':'test-private'}),{'private':True})
                 with self.assertRaises(TimeoutError):
                     provider_read('wb_prices',{'limit':2},{'api_token':'test-private'})
 

@@ -40,6 +40,79 @@ class ResumeWire:
 
 
 class Recovery(unittest.TestCase):
+    def test_closed_wb_orders_use_only_verified_complete_days_and_preserve_live_continuation(self):
+        import time
+        creds = {"api_token":"test-account"}
+        end = (datetime.now(market_specs.MOSCOW).date() - timedelta(days=3))
+        first = end - timedelta(days=1)
+        args = {"article":"A","date_from":first.isoformat(),"date_to":end.isoformat(),"group_by":"day"}
+        with TemporaryDirectory() as temp:
+            directory=str(Path(temp,"gates"))
+            history=market_history.History(directory)
+            owner=market_history.scope("wb",creds)
+            history.confirm(creds,owner)
+            row = {"article":"A","date":first.isoformat()+"T13:00:00+03:00","quantity":1,
+                   "cancelled":False,"srid":"order","region":"R","warehouse":"W"}
+            history.save_day(owner,"wb_orders",first.isoformat(),[row],market_history.utc())
+            def read(query):
+                return expansion_gateway.execute("wb_orders",query,creds,directory,time.monotonic()+10)
+            with patch.object(expansion_gateway,"_wb_daily_totals",side_effect=AssertionError("requires live summary")):
+                with self.assertRaisesRegex(AssertionError,"requires live"):
+                    read(args)
+                history.save_day(owner,"wb_orders",end.isoformat(),[],market_history.utc())
+                data=read(args)
+                self.assertEqual((data["source"],data["status"],data["archived_days"]),("daily_archive","ready",2))
+                self.assertEqual([i["ordered_units"] for i in data["items"]],[1,0])
+                with self.assertRaisesRegex(AssertionError,"requires live"):
+                    read(dict(args,archive=False))
+            with patch.object(wb_expansion,"read",side_effect=AssertionError("live cursor")):
+                raw=dict(args);raw.pop("group_by")
+                self.assertEqual(read(raw)["items"],[row])
+                with self.assertRaisesRegex(AssertionError,"live cursor"):
+                    read(dict(raw,cursor=first.isoformat()+"|100"))
+
+    def test_health_probe_distinguishes_local_hold_from_report_and_http_response(self):
+        import portal
+        from unittest.mock import Mock
+        app = object.__new__(portal.Portal)
+        app.vault,app.gateway,app.finance_gate_dir = object(),object(),"/fixture"
+        app._observe = Mock()
+        args={"tool_name":"wb_orders","probe_arguments":{"date_from":"2026-10-01","date_to":"2026-10-02"}}
+        with patch.object(expansion_gateway,"credentials",return_value={"api_token":"fixture"}), \
+                patch.object(market_health,"read",side_effect=lambda *a:{}):
+            app._dispatch_read = Mock(side_effect=finance_gate.GateError("cooldown",30))
+            probe=app.read_gateway("mcp_health",args,{})["probe"]
+            self.assertEqual((probe["probe_origin"],probe["http_status"],probe["retry_after_seconds"]),("local_gate",None,30))
+            app._dispatch_read = Mock(side_effect=urllib.error.HTTPError("",429,"",{},None))
+            self.assertEqual(app.read_gateway("mcp_health",args,{})["probe"]["http_status"],429)
+            app._dispatch_read = Mock(return_value={"complete":True,"source":"daily_archive"})
+            probe=app.read_gateway("mcp_health",args,{})["probe"]
+            self.assertEqual((probe["status"],probe["source"]),("ready","daily_archive"))
+
+    def test_portal_can_serve_completed_supplies_when_refresh_worker_expires(self):
+        import portal
+        from unittest.mock import Mock
+        args = {"article":"A","date_from":"2026-09-01","date_to":"2026-09-30","limit":1,"offset":1}
+        stamp = 1790000000.0
+        state = {"supplies": [], "last_ready": {"at": stamp, "scanned": 7,
+                 "items": [{"supply_id": 10}, {"supply_id": 11}]}}
+        wire = Mock()
+        wire.progress_snapshot.return_value = state
+        with patch.object(portal, "provider_read", side_effect=TimeoutError()) as reader, \
+                patch.object(expansion_gateway, "make_wire", return_value=wire):
+            app = SimpleNamespace(gateway=reader, finance_gate_dir="/fixture")
+            page = portal.Portal._dispatch_read(app, "wb_supplies", args, {"api_token":"fixture"})
+            self.assertEqual((page["status"],page["refresh_status"],page["items"]),("ready","pending",[{"supply_id":11}]))
+            self.assertEqual(page["refresh_reason"],"provider_timeout")
+            wire.progress_snapshot.assert_called_once_with("article-supplies-v2",["wb_supplies","A",
+                {"date_from":"2026-09-01","date_to":"2026-09-30"}])
+            wire.progress_snapshot.return_value = {}
+            with self.assertRaises(TimeoutError):
+                portal.Portal._dispatch_read(app,"wb_supplies",args,{"api_token":"different"})
+            reader.side_effect = finance_gate.GateError("storage_unavailable")
+            with self.assertRaises(finance_gate.GateError):
+                portal.Portal._dispatch_read(app,"wb_supplies",args,{"api_token":"fixture"})
+
     def test_actual_last_mile_type_names_are_separate_from_main_logistics(self):
         dictionary = {"types":[
             {"id":1, "name":"LastMileCourier", "description":"Доставка до места выдачи", "category":"other"},

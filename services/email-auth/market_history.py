@@ -260,12 +260,13 @@ def historical_read(history, owner, name, args):
                 r.get("article"),
                 r["date"][:10],
                 r.get("warehouse"),
+                r.get("region"),
                 r.get("event_type", order_event(r.get("cancelled"))),
             )
             groups[key] = groups.get(key, 0) + r["quantity"]
         selected = [
-            dict(article=a, date=d, warehouse=w, event=e, units=n)
-            for (a, d, w, e), n in sorted(groups.items(), key=str)
+            dict(article=a, date=d, warehouse=w, region=region, event=e, units=n)
+            for (a, d, w, region, e), n in sorted(groups.items(), key=str)
         ]
     more = offset + limit < len(selected)
     provisional = (datetime.now(MOSCOW).date() - timedelta(days=1)).isoformat()
