@@ -18,6 +18,8 @@ DATASETS = (
     "ozon_posting_sku_daily",
     "wb_availability",
     "ozon_availability",
+    "wb_warehouse_daily",
+    "wb_funnel_daily",
 )
 
 
@@ -97,7 +99,7 @@ def collect_posting_days(wire, history, day):
 
 def target_day(history, owner, name, today):
     coverage = history.coverage(owner, name)
-    if name.endswith("availability"):
+    if name.endswith("availability") or name=="wb_warehouse_daily":
         return today.isoformat() if today.isoformat() not in coverage else None
     for n in range(1, 90):
         day = (today - timedelta(days=n)).isoformat()
@@ -156,6 +158,17 @@ def collect(wire, history, name, day):
             if state.get("task_id"):
                 query["task_id"] = state["task_id"]
             page = wb_expansion.read("wb_stocks", query, wire)
+        elif name == "wb_warehouse_daily":
+            import market_catalog
+            from market_specs import result
+            creds=getattr(wire,"category_keys",{}).get("wb_analytics",wire.creds)
+            source=market_catalog.transfer("market_api_read",{"operation_id":"wb_stats_stocks",
+                "input":{"body":{"limit":1000,"offset":state["offset"]}}},creds,wire.gate_dir,wire.deadline)
+            items=source["data"]["data"]["items"]
+            page=result(items,state["offset"]+1000 if len(items)==1000 else None)
+        elif name == "wb_funnel_daily":
+            page=wb_expansion._funnel(dict(query,offset=state["offset"]),wire)
+            for row in page["items"]:row["date"]=day
         elif name == "ozon_sku_daily":
             query.update(date_from=week_start, limit=1000)
             page = ozon_expansion._daily(dict(query, offset=state["offset"]), wire)
@@ -191,7 +204,7 @@ def collect(wire, history, name, day):
             return "day_exceeds_row_bound"
         if page["complete"]:
             if (
-                name.endswith("availability")
+                (name.endswith("availability") or name=="wb_warehouse_daily")
                 and day
                 != datetime.now(timezone.utc if wire.provider == "ozon" else MOSCOW).date().isoformat()
             ):

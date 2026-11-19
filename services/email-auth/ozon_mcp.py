@@ -251,7 +251,7 @@ def project_response(operation, args, data, creds):
         return ozon_posting_status.project_candidates(args, data, creds)
     if operation == 'ozon_orders_analytics':
         return _project_orders_analytics(args, data, creds)
-    parent = data.get('result') if operation == 'ozon_products' else data
+    parent = data.get('result', data)
     if not isinstance(parent, dict) or not isinstance(parent.get('items'), list):
         raise ValueError('Unexpected Ozon schema')
     rows = parent['items']
@@ -307,6 +307,11 @@ def project_response(operation, args, data, creds):
     if cursor is not None and api_key and api_key in cursor: raise ValueError('Unsafe provider cursor')
     result = {'items': out, cursor_key: cursor, 'first_page_only': not bool(args.get(cursor_key)),
               'read_only': True, 'untrusted_data': True}
+    total = parent.get('total_items', parent.get('total'))
+    if total is not None and (type(total) is not int or total < 0):
+        raise ValueError('Invalid Ozon total_items')
+    exhausted = (not args.get(cursor_key) and total == len(rows)) or (not missing_cursor and not cursor)
+    result.update(total_items=total, complete=exhausted, next_cursor=None if exhausted else cursor)
     if operation == 'ozon_products':
         result['pagination_state'] = ('cursor_missing' if missing_cursor else
                                       'empty_cursor' if not cursor else

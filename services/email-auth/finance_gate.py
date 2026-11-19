@@ -24,6 +24,7 @@ FINANCE_OPERATIONS = frozenset(('ozon_accrual_types', 'ozon_posting_accruals', '
                                 'ozon_realization_article_month', 'ozon_accrual_day', 'ozon_return_events',
                                 'ozon_unallocated_accruals','ozon_cash_flow'))
 MAX_RETRY_SECONDS = 2147483647
+READ_RECOVERY_SECONDS = 60
 
 
 class GateError(Exception):
@@ -431,18 +432,30 @@ def schedule_verified_recovery(root, client_id, wait_seconds):
                                'source':'verified_recovery','boot':boot})
 
 
-def run(root, client_id, callback, secret_values=(), *, before_send=None):
+def run(root, client_id, callback, secret_values=(), *, before_send=None, read_recovery=False):
     """Execute one request or fail closed; never sleep or retry the provider."""
     key = _key(client_id)
     root = _root(root)
     _ensure_client(root,key,create=True)
     with _lock(root, key) as created:
         state = _read_state(root, key, created)
-        if state['status'] in ('in_flight', 'retry_unknown'):
-            raise GateError('retry_time_unknown')
         boot = _boot_identity()
+        if state['status'] in ('in_flight', 'retry_unknown'):
+            if read_recovery:
+                _write_client_state(root,key,{'version':1,'status':'retry','at_wall':time.time(),
+                    'at_monotonic':time.monotonic(),'delay':READ_RECOVERY_SECONDS,'source':'verified_recovery','boot':boot})
+                raise GateError('busy',READ_RECOVERY_SECONDS)
+            raise GateError('retry_time_unknown')
         if state['status'] == 'retry':
-            remaining = _remaining(state, time.time(), time.monotonic(), boot)
+            try:
+                remaining = _remaining(state, time.time(), time.monotonic(), boot)
+            except GateError:
+                if not read_recovery: raise
+                # Re-anchor the remaining provider deadline to this boot under the same lock.
+                remaining = max(0,min(state['delay'],math.ceil(max(state['at_wall']+state['delay']-time.time(),
+                                                                   state['delay']-time.monotonic()))))
+                _write_client_state(root,key,dict(version=1,status='retry',at_wall=time.time(),
+                    at_monotonic=time.monotonic(),delay=remaining,source=state['source'],boot=boot))
             if remaining: raise GateError('cooldown', remaining)
         # Local quotas and report reservations can reject without sending any HTTP.
         # A crash after a successful reservation still leaves its durable job marker.
@@ -455,6 +468,8 @@ def run(root, client_id, callback, secret_values=(), *, before_send=None):
             if exc.code == 429:
                 now_wall, now_mono = time.time(), time.monotonic()
                 delay, source = parse_retry_after(exc.headers, now_wall)
+                if delay is None and read_recovery and _single_header(exc.headers,'Retry-After') is None:
+                    delay, source = READ_RECOVERY_SECONDS, 'verified_recovery'
                 # A provider key can be entirely numeric. Do not persist a
                 # retry value whose decimal representation reproduces it.
                 if delay is not None and any(isinstance(secret,str) and secret and secret in str(delay)

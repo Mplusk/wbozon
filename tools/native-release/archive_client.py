@@ -19,6 +19,8 @@ def main():
         "wb_finance_report",
         "ozon_availability",
         "wb_availability",
+        "wb_warehouse_daily",
+        "wb_funnel_daily",
     )
     for dataset in datasets:
         connection = http.client.HTTPConnection("127.0.0.1", settings["port"], timeout=50)

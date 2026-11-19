@@ -366,7 +366,7 @@ def transfer(tool, arguments, creds, directory, deadline, *, csv_download=False)
     value=interval.get('personal' if market_transport._wb_personal(creds.get('api_token','')) else 'basic',0)
     def prepare():
         if value:
-            wire.admit_catalog(row['host'],row.get('official_path',row['path']),row['quota_group'],value)
+            wire.admit_catalog(row['host'],row.get('official_path',row['path']),row['quota_group'],value,read_recovery=tool=='market_api_read')
     def open_request():
         remaining = deadline-time.monotonic()
         if remaining<0.2:
@@ -376,16 +376,17 @@ def transfer(tool, arguments, creds, directory, deadline, *, csv_download=False)
         # The shared quota guard accepts the vendor token under api_token. Only
         # the HTTP builder uses the dedicated Digital credential and audience.
         guard_credentials={'api_token':token} if row['host']==DIGITAL_HOST and token else creds
-        return market_cooldown.request(directory,row['market'],guard_credentials,request,open_request,before_send=prepare)
+        return market_cooldown.request(directory,row['market'],guard_credentials,request,open_request,
+                                       before_send=prepare,read_recovery=tool=='market_api_read')
     # The original Ozon finance reader shares an account-wide gate across
     # endpoints. A new route must observe its outstanding Retry-After too.
     use_finance = row['market']=='ozon' and ('/finance/' in row['path'] or '/report/realization/' in row['path'])
     def send():
         if use_finance:
-            return finance_gate.run(directory,creds['client_id'],paced,(creds['api_key'],))
+            return finance_gate.run(directory,creds['client_id'],paced,(creds['api_key'],),read_recovery=tool=='market_api_read')
         if row['market']=='wb' and ('{' in row['path'] or row.get('quota_group','').startswith('wb-group-')):
             group=row['host']+':'+row.get('quota_group',row['path'])
-            return finance_gate.run(str(Path(directory).parent/'.catalog-method-gates'),group,paced,(token,))
+            return finance_gate.run(str(Path(directory).parent/'.catalog-method-gates'),group,paced,(token,),read_recovery=tool=='market_api_read')
         return paced()
     with send() as response:
         status = response.status

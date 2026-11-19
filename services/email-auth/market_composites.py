@@ -29,7 +29,8 @@ def observed(fn):
             retry_after_seconds=delay,
         )
     except finance_gate.GateError as exc:
-        return result([], complete=False, status=exc.reason, retry_after_seconds=exc.retry_after_seconds)
+        return result([], complete=False, status=exc.reason, retry_after_seconds=exc.retry_after_seconds,
+                      http_status=None,reason="local_limiter" if exc.reason in ("cooldown","busy","retry_time_unknown") else exc.reason)
     except (KeyError, TypeError, ValueError, ArithmeticError):
         return result([], complete=False, status="provider_response_invalid")
     except (
@@ -503,6 +504,15 @@ def _period_metrics(provider, args, page):
 
 
 def _ozon_comparison_page(query, wire):
+    if hasattr(wire,"gate_dir"):
+        history=market_history.History(wire.gate_dir)
+        pages=history.verified_days("ozon",wire.creds,"ozon_posting_sku_daily",query["date_from"],query["date_to"])
+        dates=market_history.days_between(query["date_from"],query["date_to"])
+        if all(d in pages for d in dates):
+            records=[r for d in dates for r in pages[d][1] if r.get("article")==query["article"]]
+            return result([dict(r,ordered_units=r.get("posting_units"),revenue=r.get("posting_item_value")) for r in records],
+                          source="ozon_posting_sku_daily", date_basis="posting_creation_utc",
+                          amount_basis="posting_item_value", archived_dates=dates)
     if (date.fromisoformat(query["date_to"]) - date.fromisoformat(query["date_from"])).days >= 90:
         return result([], complete=False, status="period_exceeds_analytics_window")
     page = observed(lambda: ozon_expansion.read("ozon_sku_daily", query, wire))
@@ -597,9 +607,34 @@ def comparison(args, wires, mapping):
         for q in queries:
             page = shared
             if page is None:
-                page = (_ozon_comparison_page(q, wire) if provider == "ozon"
-                        else observed(lambda: wb_expansion.read("wb_funnel", q, wire)))
-            periods.append(_period_metrics(provider, q, page))
+                if provider=="ozon":page=_ozon_comparison_page(q,wire)
+                else:
+                    page=None
+                    if hasattr(wire,"gate_dir"):
+                        db=market_history.History(wire.gate_dir)
+                        daily=db.verified_days("wb",wire.creds,"wb_funnel_daily",q["date_from"],q["date_to"])
+                        per_article=db.verified_days("wb",wire.creds,"wb_funnel_nm_"+str(identity["nm_id"]),q["date_from"],q["date_to"])
+                        daily={**per_article,**daily}
+                        days=market_history.days_between(q["date_from"],q["date_to"])
+                        if all(d in daily for d in days):
+                            records=[r for d in days for r in daily[d][1] if str(r.get("nm_id"))==str(identity["nm_id"])]
+                            page=result(records,source="wb_funnel_daily",archived_dates=days)
+                        elif time.monotonic()+5<wire.deadline:
+                            import seller_views
+                            account=dict(wire.creds,category_keys=getattr(wire,"category_keys",{}))
+                            query={k:q[k] for k in ("date_from","date_to","nm_id","article") if k in q}
+                            recent=observed(lambda:seller_views.execute("wb_funnel_history",
+                                dict(query,mode="details",limit=100),account,wire.gate_dir,min(wire.deadline-2,time.monotonic()+3)))
+                            if recent.get("complete"):
+                                page=result(recent["items"],source="wb_funnel_daily",archived_dates=days)
+                    if page is None:page=observed(lambda:wb_expansion.read("wb_funnel",q,wire))
+            metrics=_period_metrics(provider,q,page)
+            if page.get("source") in ("ozon_posting_sku_daily","wb_funnel_daily"):
+                metrics.update(source=page["source"],date_basis=page.get("date_basis","order_date_moscow"),
+                               archived_days=len(page["archived_dates"]),amount_basis=page.get("amount_basis"))
+                if not page["items"] and page.get("complete"):
+                    metrics.update(ordered_units=0,ordered_amount=0)
+            periods.append(metrics)
         periods_by_market[provider] = identity, queries, periods
 
     for provider, (identity, queries, periods) in periods_by_market.items():
@@ -671,9 +706,20 @@ def comparison(args, wires, mapping):
                 rating_basis="reviews_published_in_period_in_returned_sample",
             )
         )
+    hypotheses=[]
+    for market in data:
+        change=market["changes"].get("ordered_units",{}).get("absolute")
+        if change is None:continue
+        if change<0:
+            views=market["changes"].get("views",{}).get("absolute")
+            reason="lower_card_traffic" if views is not None and views<0 else "fewer_ordered_units"
+            hypotheses.append({"marketplace":market["marketplace"],"hypothesis":reason,"ordered_units_change":change,
+                "views_change":views,"evidence":[market["previous"]["source"],market["current"]["source"]],
+                "certainty":"observed_change_cause_unconfirmed"})
+        else:hypotheses.append({"marketplace":market["marketplace"],"observation":"no_decrease_in_ordered_units","ordered_units_change":change})
     return result(
         data,
         complete=all(r["previous"].get("complete") and r["current"].get("complete") for r in data),
         basis="calendar_period_order_analytics",
-        causal_diagnosis=None,
+        causal_diagnosis={"observations":hypotheses,"status":"reported" if hypotheses else "insufficient_comparable_data"},
     )

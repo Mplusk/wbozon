@@ -478,7 +478,7 @@ def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=Non
 def _finance_read_with_retry(root, creds, read, deadline, *, allow_retry=True):
     """One bounded retry only after a known short 429 and the shared cooldown."""
     def attempt():
-        return finance_gate.run(root,creds.get('client_id'),read,(creds.get('api_key'),))
+        return finance_gate.run(root,creds.get('client_id'),read,(creds.get('api_key'),),read_recovery=True)
     try:
         return attempt()
     except urllib.error.HTTPError as exc:
@@ -711,7 +711,7 @@ class Portal:
                             detail['status'] = 'ready' if detail['complete'] else 'partial'
                     except finance_gate.GateError as exc:
                         detail=dict(status=exc.reason, probe_origin='local_gate', http_status=None,
-                                    retry_after_seconds=exc.retry_after_seconds)
+                                    reason='local_limiter', retry_after_seconds=exc.retry_after_seconds)
                     except urllib.error.HTTPError as exc:
                         detail=dict(status='rate_limited' if exc.code == 429 else 'http_error',
                                     http_status=exc.code, retry_after_seconds=getattr(exc,'retry_after_seconds',None))
@@ -725,6 +725,24 @@ class Portal:
             report=market_health.read(self.vault,self.finance_gate_dir,args,external_mcp.TOOL_NAMES,expansion_gateway.credentials)
             report["seller_capabilities"]=market_specs.seller_reports.capabilities(self.vault,self.finance_gate_dir,
                     args.get("refresh_capabilities",False),self.read_gateway)
+            caps=report["seller_capabilities"]
+            for token in report.get("tokens",[]):
+                if token["category"]=="Ozon Seller":
+                    token.update(allowed_methods=caps["ozon_roles"].get("allowed_methods"),roles_status=caps["ozon_roles"]["status"])
+                if token["category"]=="WB общий":
+                    token["subscriptions"]={"jam":caps["wb_jam"]}
+            if args.get("refresh_capabilities"):
+                from market_composites import observed
+                name="wb_seller_information"
+                route,_=market_specs.seller_reports.request(name,{"report":"news"})
+                account=market_catalog.read_credentials(self.vault,route)
+                if account:
+                    day=(datetime.now(timezone.utc)-market_specs.timedelta(days=30)).date().isoformat()
+                    news=observed(lambda:self.read_gateway(name,{"report":"news","input":{"query":{"from":day}}},account))
+                    items=(news.get("data") or {}).get("data") or []
+                    report.setdefault("api_updates",{})["wb_news"]={"status":news.get("status"),"source":route["path"],
+                        "data_as_of":news.get("data_as_of"),"items":[{k:item.get(k) for k in ("id","date","header")} for item in items
+                            if "api" in (str(item.get("header"))+" "+str(item.get("content"))).casefold()][:50]}
             if detail: report['probe']=detail
             return report
         try:
@@ -776,7 +794,7 @@ class Portal:
             return provider_read(operation,args,creds,finance_gate_dir=self.finance_gate_dir)
         # Test/injected gateways use the same contract and serialization.
         return finance_gate.run(self.finance_gate_dir,creds.get('client_id'),
-                                lambda:self.gateway(operation,args,creds),(creds.get('api_key'),))
+                                lambda:self.gateway(operation,args,creds),(creds.get('api_key'),),read_recovery=True)
     def request_budget(self, provider, now):
         """Read-only local limiter snapshot. It neither reserves nor grants a request."""
         if provider not in CHECK_OPERATIONS: raise ValueError('Invalid provider')
@@ -813,10 +831,15 @@ class Portal:
         if path in OAUTH_PATHS:
             return oauth_mcp.handle(e,start,self.oauth,self.external_keys,self.login.origin)
         if path=='/mcp':
+            current_access=None
             def authenticate(token):
+                nonlocal current_access
                 key_id=self.external_keys.check_token(token)
                 grant=(key_id,external_keys.access_for_key(key_id)) if key_id else self.oauth.verify_access(token,self.login.origin+'/mcp')
-                return grant if grant and self.external_keys.mark_used(grant[0],self.login.clock()) else None
+                if grant and self.external_keys.mark_used(grant[0],self.login.clock()):
+                    current_access=grant[1]
+                    return grant
+                return None
             def execute(key_id,operation,args):
                 creds={}
                 try:
@@ -830,6 +853,24 @@ class Portal:
                         return market_actions.Store(self).propose(key_id,args)
                     if operation=='market_api_status':
                         return market_actions.Store(self).status(key_id,args['proposal_id'])
+                    if operation=="mcp_health" and current_access=="all":
+                        selected=args.get("tool_name")
+                        if not selected or selected in avito_mcp.PUBLIC_CONTRACTS:
+                            account=self.vault.read("avito")
+                            hist=market_history.History(self.finance_gate_dir)
+                            items=[dict(tool=n,category="Avito",**(hist.check(account,n) if account else
+                                {"status":"not_configured","last_checked_at":None})) for n in sorted(avito_mcp.PUBLIC_CONTRACTS) if selected in (None,n)]
+                            if selected:
+                                result=market_specs.result(items,tool_count=len(items))
+                                if "probe_arguments" in args and account:
+                                    from market_composites import observed
+                                    avito_mcp.validate(selected,args["probe_arguments"])
+                                    probe=observed(lambda:self.read_gateway(selected,args["probe_arguments"],account))
+                                    result["probe"]={k:probe.get(k) for k in ("status","complete","data_as_of","http_status")}
+                            else:
+                                result=self.read_gateway(operation,args,{})
+                                result["items"].extend(items);result["tool_count"]+=len(items)
+                            return result
                     if operation in market_specs.seller_reports.GROUPS:
                         route, inputs=market_specs.seller_reports.request(operation,args)
                         if inputs is None:
@@ -837,8 +878,10 @@ class Portal:
                         creds=market_catalog.read_credentials(self.vault,route)
                     else:
                         creds=(market_catalog.read_credentials(self.vault,market_catalog.routes()[args['operation_id']]) if operation=='market_api_read'
-                           else self.vault.read('avito') if operation in avito_mcp.CONTRACTS else
+                           else self.vault.read('avito') if operation in avito_mcp.PUBLIC_CONTRACTS else
                            expansion_gateway.credentials(self.vault,operation))
+                        if current_access=="all" and operation in ("article_map","unit_economics","sales_drop_check"):
+                            creds=dict(creds or {},avito=self.vault.read("avito"))
                     if not creds and operation!='mcp_health': raise external_mcp.MCPToolError('not_configured')
                     return self.read_gateway(operation,args,creds)
                 except market_actions.ActionError as exc:
@@ -856,14 +899,15 @@ class Portal:
                     raw_delay=delay
                     delay=public_retry_delay(delay,creds)
                     exc.close()
-                    guarded=operation in finance_gate.FINANCE_OPERATIONS or operation in avito_mcp.CONTRACTS
+                    guarded=operation in finance_gate.FINANCE_OPERATIONS or operation in avito_mcp.PUBLIC_CONTRACTS
                     reason='retry_time_unknown' if exc.code==429 and delay is None and guarded else None
                     if raw_delay is not None and delay is None: reason='retry_interval_unavailable'
                     raise external_mcp.MCPToolError(code,retry_after_seconds=delay,reason=reason) from None
                 except finance_gate.GateError as exc:
                     code='rate_limited' if exc.reason in ('busy','cooldown','retry_time_unknown') else 'unavailable'
                     delay=public_retry_delay(exc.retry_after_seconds,creds)
-                    reason='retry_interval_unavailable' if exc.retry_after_seconds is not None and delay is None else exc.reason
+                    reason=('retry_interval_unavailable' if exc.retry_after_seconds is not None and delay is None else
+                            'local_limiter' if code=='rate_limited' and operation!='market_api_propose' else exc.reason)
                     raise external_mcp.MCPToolError(code,retry_after_seconds=delay,reason=reason) from None
                 except finance_gate.ProviderResponseTooLarge:
                     raise external_mcp.MCPToolError('provider_response_too_large') from None

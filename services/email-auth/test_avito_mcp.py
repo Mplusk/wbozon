@@ -97,7 +97,8 @@ class SellerAPI(unittest.TestCase):
                     with self.assertRaises(expected) as raised:
                         avito_mcp.read("avito_get_items_info",{},creds,self.dir,time.monotonic()+12)
                     if attempt:
-                        self.assertEqual(raised.exception.reason,"cooldown" if headers else "retry_time_unknown")
+                        self.assertEqual(raised.exception.reason,"cooldown")
+                        self.assertGreater(raised.exception.retry_after_seconds,0)
                 self.assertEqual(http.call_count,2)
 
     def test_no_custom_account_urls_or_write_commands(self):
@@ -201,7 +202,7 @@ class KeyAccess(unittest.TestCase):
             names={v["name"] for v in tools}
             self.assertEqual("avito_get_orders" in names,show_avito)
             self.assertEqual("mcp_health" in names,show_legacy)
-            self.assertEqual(len(names),(len(avito_mcp.CONTRACTS) if show_avito else 0)+(len(external_mcp.TOOLS) if show_legacy else 0))
+            self.assertEqual(len(names),(len(avito_mcp.PUBLIC_CONTRACTS) if show_avito else 0)+(len(external_mcp.TOOLS) if show_legacy else 0))
             for name, permitted in (("avito_get_orders",show_avito),("ozon_products",show_legacy)):
                 data=self.rpc(token,"tools/call",name=name,arguments={})
                 if permitted:

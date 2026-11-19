@@ -52,7 +52,7 @@ class MethodLimited(finance_gate.GateError, finance_gate.KnownProviderResponseEr
     """No HTTP request was sent by this attempt. Retain its own method deadline."""
 
 
-def _analytics_slot(directory, credentials):
+def _analytics_slot(directory, credentials, *, read_recovery=False):
     # Preserve the existing credential-scoped report records and include their
     # previous requests in the seller-wide rolling 24 hour window after upgrade.
     folder = Path(directory).parent / '.market-reports'
@@ -85,10 +85,12 @@ def _analytics_slot(directory, credentials):
     # Commit a legacy import even when it fills the entire window.
     if len(remaining) >= 50:
         delay = max(1, math.ceil(sorted(remaining)[len(remaining) - 50]))
+        if read_recovery:
+            raise MethodLimited('cooldown',delay)
         raise urllib.error.HTTPError('', 429, 'Analytics daily limit', {'Retry-After': str(delay)}, None)
 
 
-def request(directory, provider, credentials, req, send, *, before_send=None):
+def request(directory, provider, credentials, req, send, *, before_send=None, read_recovery=False):
     if BOOTSTRAP_HOLD is not None:
         try:
             BOOTSTRAP_HOLD.lstat()
@@ -105,7 +107,7 @@ def request(directory, provider, credentials, req, send, *, before_send=None):
         if before_send is not None:
             before_send()
         if provider == 'ozon' and urlsplit(url).path == '/v1/analytics/data':
-            _analytics_slot(directory, credentials)
+            _analytics_slot(directory, credentials, read_recovery=read_recovery)
 
     def open_http():
         try:
@@ -119,9 +121,15 @@ def request(directory, provider, credentials, req, send, *, before_send=None):
 
     root = str(Path(directory).parent / '.market-method-gates')
     try:
-        return finance_gate.run(root, method_key(provider, credentials, url), open_http,
-            (credentials.get('api_key'), credentials.get('api_token'), credentials.get('client_secret')),
-            before_send=prepare)
+        key=method_key(provider,credentials,url)
+        # Keep method-specific Retry-After across releases. Serialize sending to a
+        # seller host, without sharing one method's deadline with unrelated methods.
+        host_key=finance_gate._key(json.dumps(json.loads(key)[:3]))
+        queue=finance_gate._root(str(Path(directory).parent/'.market-host-queues'))
+        with finance_gate._lock(queue,host_key):
+            return finance_gate.run(root,key,open_http,
+                (credentials.get('api_key'), credentials.get('api_token'), credentials.get('client_secret')),
+                before_send=prepare, read_recovery=read_recovery)
     except finance_gate.GateError as exc:
         if exc.reason in ('busy', 'cooldown', 'retry_time_unknown'):
             raise MethodLimited(exc.reason, exc.retry_after_seconds) from None
@@ -135,4 +143,4 @@ def legacy_open(opener, req, timeout):
         return opener.open(req, timeout=timeout)
     directory, credentials = active
     provider = 'wb' if 'api_token' in credentials else 'ozon'
-    return request(directory, provider, credentials, req, lambda: opener.open(req, timeout=timeout))
+    return request(directory, provider, credentials, req, lambda: opener.open(req, timeout=timeout),read_recovery=True)

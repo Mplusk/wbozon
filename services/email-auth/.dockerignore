@@ -14,6 +14,12 @@
 !ozon_supply_allocation.py
 !market_specs.py
 !seller_reports.py
+!avito_views.py
+!seller_views.py
+!seller_ozon_views.py
+!seller_wb_views.py
+!seller_workbooks.py
+!seller_insights.py
 !avito_mcp.py
 !avito_contracts.json
 !market_catalog.py

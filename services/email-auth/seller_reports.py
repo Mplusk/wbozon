@@ -199,7 +199,7 @@ def capabilities(vault, directory, refresh, read):
             continue
         wire = Wire(route["market"], creds, directory, time.monotonic()+12)
         identity = [route["operation_id"]]
-        old = wire.progress_snapshot("seller-capabilities-v1",identity)
+        old = wire.progress_snapshot("seller-capabilities-v2",identity)
         row = old or {"status":"not_checked"}
         if refresh:
             try:
@@ -211,8 +211,9 @@ def capabilities(vault, directory, refresh, read):
                     roles=data["roles"]
                     if not all(isinstance(r,dict) and isinstance(r.get("name"),str) and isinstance(r.get("methods"),list) for r in roles):
                         raise ValueError("Unexpected roles")
+                    methods=sorted({m for r in roles for m in r["methods"] if isinstance(m,str)})
                     row={"status":"ready","role_names":[r["name"] for r in roles],
-                         "allowed_method_count":len({m for r in roles for m in r["methods"] if isinstance(m,str)}),
+                         "allowed_method_count":len(methods),"allowed_methods":methods,
                          "expires_at":data.get("expires_at")}
                 elif key == "wb_jam" and (data is None or isinstance(data,dict)):
                     details=(data or {}).get("data",data) or {}
@@ -226,7 +227,7 @@ def capabilities(vault, directory, refresh, read):
                     raise ValueError("Unexpected reply")
                 if row.get("status")=="ready" and "refresh_status" not in row:
                     row.update(checked_at=fetched.get("fetched_at") or datetime.now(timezone.utc).isoformat(),http_status=http)
-                    with wire.progress("seller-capabilities-v1",identity) as (_,save):
+                    with wire.progress("seller-capabilities-v2",identity) as (_,save):
                         save(row,7*86400)
             except (finance_gate.GateError, TimeoutError, urllib.error.URLError, ValueError) as exc:
                 row=dict(row, refresh_status="unavailable", http_status=getattr(exc,"code",None),
@@ -238,7 +239,7 @@ def capabilities(vault, directory, refresh, read):
                     exc.close()
                 if row.get("status")=="access_denied":
                     row["checked_at"] = datetime.now(timezone.utc).isoformat()
-                    with wire.progress("seller-capabilities-v1",identity) as (_,save):
+                    with wire.progress("seller-capabilities-v2",identity) as (_,save):
                         save(row, 3600)
         results[key]=dict(row, source=route["path"])
     return results

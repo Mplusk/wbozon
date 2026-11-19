@@ -49,6 +49,8 @@ FIELDS = {
     "is_preorder": {"type": "boolean"},
     "states": array(TEXT, 12),
     "report_scope": choices("unanswered", "answered", "archive"),
+    "review_status": choices("ALL","NEW","VIEWED","PROCESSED"),
+    "include_count": {"type":"boolean"},
     "task_id": TEXT,
     "download_id": DOWNLOAD_ID,
     "wb_stock_history_id": DOWNLOAD_ID,
@@ -56,7 +58,7 @@ FIELDS = {
     "include_funnel": {"type": "boolean"},
     "include_order_share": {"type": "boolean"},
     "include_warehouses": {"type": "boolean"},
-    "report": choices("auto", "campaigns", "statistics", "spend_ledger"),
+    "report": choices("auto", "campaigns", "statistics", "spend_ledger", "clusters", "bids", "balance"),
     "cluster_type": choices("CLUSTER_TYPE_OZON", "CLUSTER_TYPE_CIS"),
     "horizon_days": integer(1, 365),
     "lead_time_days": integer(0, 365),
@@ -69,7 +71,7 @@ FIELDS = {
     "previous_from": DATE, "previous_to": DATE,
     "query": TEXT, "nm_ids": array(ID, 50), "vendor_codes": array(TEXT, 50),
     "group_by": choices("day", "week"),
-    "retention_type": choices("all", "penalty", "deduction"),
+    "retention_type": choices("all", "penalty", "deduction","measurement_penalty","measurement","antifraud"),
     "return_status": choices("archive", "active"),
     "snapshot_time": TEXT,
     "document": choices("spend", "payments", "documents"),
@@ -80,7 +82,7 @@ FIELDS = {
     "archive": {"type":"boolean"},
     "mapping": {
         "type": "object",
-        "properties": {"ozon_offer_id": TEXT, "wb_vendor_code": TEXT, "wb_nm_id": ID},
+        "properties": {"ozon_offer_id": TEXT, "wb_vendor_code": TEXT, "wb_nm_id": ID,"avito_item_id":ID},
         "required": ["ozon_offer_id", "wb_vendor_code"],
         "additionalProperties": False,
     },
@@ -191,7 +193,7 @@ TOOLS = {
     ),
     "ozon_reviews": (
         "Отзывы и оценки Ozon по периоду и SKU. Требуется доступ к управлению отзывами.",
-        "date_from date_to sku article limit cursor",
+        "date_from date_to sku article limit cursor review_status include_count",
         "date_from date_to",
     ),
     "ozon_rating": ("Текущие группы рейтингов продавца Ozon и индекс локализации по датам.", "", ""),
@@ -216,12 +218,17 @@ TOOLS = {
 
 
 import seller_reports
+import seller_views
 
 for _group, (_description, _) in seller_reports.GROUPS.items():
     TOOLS[_group] = (_description + " Укажите report для схемы, добавьте input для чтения.", "", "")
+for _view, (_description, _keys, _enums) in seller_views.VIEWS.items():
+    TOOLS[_view]=(_description, "", "")
 
 
 def schema(name):
+    if name in seller_views.VIEWS:
+        return seller_views.schema(name)
     if name in seller_reports.GROUPS:
         return seller_reports.schema(name)
     _, keys, required = TOOLS[name]
@@ -266,6 +273,9 @@ def _valid(value, spec):
 
 
 def validate(name, args):
+    if name in seller_views.VIEWS:
+        seller_views.validate(name,args)
+        return
     if name in seller_reports.GROUPS:
         seller_reports.request(name,args)
         return
@@ -309,8 +319,6 @@ def validate(name, args):
             raise ValueError("Period out of range")
     if name == "ozon_supply_items" and ("supply_id" in args) != ("order_id" in args):
         raise ValueError("Both supply and order required for acceptance")
-    if name == "ozon_reviews" and args.get("limit", 20) < 20:
-        raise ValueError("Ozon returns a minimum of 20 reviews per page")
     if name == "ozon_ads" and len(args.get("campaign_ids", [])) > 10:
         raise ValueError("At most ten campaigns per report")
     if args.get("include_order_share") and (

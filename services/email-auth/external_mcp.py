@@ -181,6 +181,7 @@ def _tool_error(code, retry_after_seconds=None, reason=None, diagnostic=None):
     if code=='provider_timeout' and diagnostic: details.update(diagnostic)
     if code == 'rate_limited':
         details['retry_after_seconds']=retry_after_seconds
+        details['http_status']=None if reason=='local_limiter' else 429
         if reason == 'retry_time_unknown':
             details['message']='Время повтора неизвестно; автоматический повтор остановлен.'
         elif reason == 'retry_interval_unavailable':
@@ -320,7 +321,7 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
             catalog.append(item)
         if access in ('avito','all'):
             catalog.extend(_tool(name, op['description'], op['properties'], op.get('required', ()))
-                           for name, op in avito_mcp.CONTRACTS.items())
+                           for name, op in avito_mcp.PUBLIC_CONTRACTS.items())
         result = {'tools':catalog}
         if modern:
             result.update(ttlMs=0,cacheScope='private')
@@ -329,11 +330,11 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
         if not isinstance(name,str) or not (
                 (access in ('marketplaces','all') and name in TOOL_NAMES) or
                 name in market_catalog.available(access) or
-                (access in ('avito','all') and name in avito_mcp.CONTRACTS)):
+                (access in ('avito','all') and name in avito_mcp.PUBLIC_CONTRACTS)):
             return rpc_error(-32602,'Unknown tool',ident)
         try:
             if name in market_catalog.PUBLIC_TOOLS: market_catalog.validate(name,args)
-            elif name in avito_mcp.CONTRACTS: avito_mcp.validate(name,args)
+            elif name in avito_mcp.PUBLIC_CONTRACTS: avito_mcp.validate(name,args)
             elif name in market_specs.TOOLS: market_specs.validate(name,args)
             elif name in ozon_mcp.OPERATIONS: ozon_mcp.validate_args(name,args)
             else:

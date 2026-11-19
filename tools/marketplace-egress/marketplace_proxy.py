@@ -12,7 +12,7 @@ import time
 
 HOST = '127.0.0.1'
 PORT = 18761
-ALLOWED = frozenset(('api-seller.ozon.ru', 'discounts-prices-api.wildberries.ru',
+ALLOWED = frozenset(('api-seller.ozon.ru', 'ir-20.ozone.ru', 'cdn1.ozone.ru', 'discounts-prices-api.wildberries.ru',
                      'content-api.wildberries.ru', 'common-api.wildberries.ru',
                      'seller-analytics-api.wildberries.ru','supplies-api.wildberries.ru',
                      'statistics-api.wildberries.ru','finance-api.wildberries.ru','feedbacks-api.wildberries.ru',

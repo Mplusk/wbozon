@@ -65,7 +65,11 @@ def admission(service, work, phase, state):
         state['legacy_names'] = sorted(listed(bearer))
     legacy = set(state['legacy_names'])
     assert 'ozon_products' in legacy and not any(n.startswith('avito_') for n in legacy)
-    assert listed(state['legacy'][1]) == listed(state['old_oauth']['access_token']) == legacy
+    marketplaces = listed(state['legacy'][1])
+    assert marketplaces == listed(state['old_oauth']['access_token'])
+    assert legacy <= marketplaces and not any(n.startswith('avito_') for n in marketplaces)
+    if phase in ('legacy','rollback'):
+        assert marketplaces == legacy
     if phase == 'issue':
         state['scoped'] = {}
         for access in (('catalog_read','catalog_operations') if state.get('catalog') else ('avito','all')):
@@ -87,7 +91,7 @@ def admission(service, work, phase, state):
                 expected=set(market_catalog.available(access))
             else:
                 import avito_mcp
-                expected = set(avito_mcp.CONTRACTS) | (legacy if access == 'all' else set())
+                expected = set(getattr(avito_mcp,'PUBLIC_CONTRACTS',avito_mcp.CONTRACTS)) | (marketplaces if access == 'all' else set())
             assert listed(bearer) == listed(tokens['access_token']) == expected
             if phase == 'resume':
                 new = refresh(tokens)

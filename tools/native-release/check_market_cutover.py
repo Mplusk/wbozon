@@ -208,7 +208,15 @@ def _profile_count(data):
     return sum(line == 'ozon ' + PROFILE for line in path.read_text(encoding='utf-8').splitlines())
 
 
-def _blocked(result, *, unknown=False, minimum=1):
+def bounded_reads(service):
+    return 'READ_RECOVERY_SECONDS = 60' in (Path(service)/'finance_gate.py').read_text(encoding='utf8')
+
+
+def _blocked(result, *, unknown=False, minimum=1, recoverable=False):
+    if recoverable and result.get('kind')=='gate' and result.get('reason') in ('busy','cooldown'):
+        delay=result.get('retry_after_seconds')
+        assert type(delay) is int and delay>=minimum, result
+        return
     if result.get('kind') == 'gate':
         if unknown:
             assert result.get('reason') == 'retry_time_unknown', result
@@ -245,12 +253,13 @@ def _exercise(python, source, source_mode, target, target_mode, data, provider, 
                                       (17, 10000, BOOT, True)):
         result = _probe(python, target, data, target_mode, provider=provider, tick=tick, wall=wall,
                         boot=boot, rotated=rotated)
-        _blocked(result, unknown=unknown, minimum=RETRY - tick)
+        _blocked(result, unknown=unknown, minimum=RETRY - tick,
+                 recoverable=bounded_reads(target) or (bounded_reads(source) and reply=='unknown429'))
         assert _attempt_count(data) == 1, 'provider contacted before cooldown ended'
     if not unknown:
         result = _probe(python, target, data, target_mode, provider=provider, tick=17,
                         boot='b' * 64, rotated=2)
-        _blocked(result, unknown=True)
+        _blocked(result, unknown=True,minimum=RETRY-17,recoverable=bounded_reads(target))
         assert _attempt_count(data) == 1, 'provider contacted with unknown post-boot cooldown'
         result = _probe(python, target, data, target_mode, provider=provider, tick=RETRY + 1)
         _success(result, provider, target_mode)
@@ -258,8 +267,12 @@ def _exercise(python, source, source_mode, target, target_mode, data, provider, 
     else:
         result = _probe(python, target, data, target_mode, provider=provider,
                         tick=86401, rotated=True)
-        _blocked(result, unknown=True)
-        assert _attempt_count(data) == 1, 'provider contacted with unknown cooldown'
+        if bounded_reads(target) or (bounded_reads(source) and reply=='unknown429'):
+            _success(result,provider,target_mode)
+            assert _target_count(data,provider)==2, 'read did not resume at the end of the recovery interval'
+        else:
+            _blocked(result, unknown=True)
+            assert _attempt_count(data) == 1, 'provider contacted with unknown cooldown'
 
 
 def _profile_exercise(python, source, target, data):

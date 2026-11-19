@@ -270,8 +270,10 @@ def _stocks(name, args, request):
                 "limit": args.get("limit", 50),
             },
         )
+        raw = raw.get("result",raw)
         data = []
-        for card in rows(raw.get("items")):
+        cards = rows(raw.get("items"))
+        for card in cards:
             for stock in rows(card.get("stocks")):
                 row = dict(
                     _identity(card),
@@ -283,7 +285,12 @@ def _stocks(name, args, request):
                 if matches(row, args):
                     data.append(row)
         cursor, done = _page(raw, args.get("cursor"))
-        return result(data, cursor, complete=done, quantity_unit="pcs")
+        total = raw.get("total_items", raw.get("total"))
+        if total is not None and (type(total) is not int or total < 0):
+            raise ValueError("Invalid Ozon total_items")
+        if not args.get("cursor") and total == len(cards):
+            cursor,done=None,True
+        return result(data, cursor, complete=done, quantity_unit="pcs", total_items=total)
     if "date_from" in args:
         return request.stock_history(args)
     skus = args.get("skus", [args["sku"]] if "sku" in args else [])
@@ -848,6 +855,14 @@ def read(name, args, request):
         total = raw.get("total")
         if type(total) is not int or total < 0:
             raise ValueError("Invalid Ozon locality total")
+        if items and getattr(request,"gate_dir",None):
+            from market_composites import observed
+            directory=observed(lambda:request("POST",BASE+"/v2/cluster/list",ttl=86400))
+            names={str(c["macrolocal_cluster_id"]):c["data"]["macrolocal_cluster"]["name"]
+                   for c in directory.get("result") or [] if (c.get("data") or {}).get("macrolocal_cluster")}
+            for item in items:
+                item["cluster_name"]=names.get(str(item["cluster_id"]))
+                item["cluster_name_status"]="reported" if item["cluster_name"] else "directory_unavailable"
         return result(items,offset+len(page) if page and offset+len(page)<total else None,
                       complete=offset+len(page)>=total,source=path, time_coverage="actual_delivery_duration_unavailable_in_current_seller_schema",
                       provider_notice=retirement)
@@ -878,19 +893,23 @@ def read(name, args, request):
         if "article" in args and not skus:
             return result([], complete=False, issues=["article_identity_unavailable"])
         if skus:
-            filters["skus"] = skus
+            filters["skus"] = list(map(str,skus))
+        if "review_status" in args:
+            filters["status"] = args["review_status"]
         raw = request(
             "POST",
             BASE + "/v2/review/list",
             body={
                 "filters": filters,
                 "last_id": args.get("cursor", ""),
-                "limit": args.get("limit", 50),
+                "limit": max(20,args.get("limit", 50)),
                 "sort_dir": "DESC",
             },
         )
         data = []
-        for r in rows(raw.get("reviews")):
+        reviews=rows(raw.get("reviews"))
+        requested=args.get("limit",50)
+        for r in reviews[:requested]:
             if skus and str(r.get("sku")) not in set(map(str, skus)):
                 continue
             stamp = iso(r.get("published_at"))
@@ -907,11 +926,15 @@ def read(name, args, request):
                 )
         rated = [r["rating"] for r in data if type(r["rating"]) is int and 1 <= r["rating"] <= 5]
         cursor, done = _page(raw, args.get("cursor"))
+        if len(reviews)>requested:
+            cursor,done=reviews[requested-1]["id"],False
+        counts=request("POST",BASE+"/v2/review/count",ttl=300) if args.get("include_count") else None
         return result(
             data,
             cursor,
             complete=done,
-            mean_rating=sum(rated) / len(rated) if rated else None,
+            mean_rating=round(sum(rated)/len(rated),4) if rated else None,
+            **({"account_review_counts":counts,"count_scope":"all_seller_reviews"} if counts is not None else {}),
             rating_scope="returned_page",
         )
     if name == "ozon_rating":

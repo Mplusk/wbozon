@@ -16,6 +16,8 @@ import market_transport
 
 BASE = "https://api.avito.ru"
 CONTRACTS = json.loads(Path(__file__).with_name("avito_contracts.json").read_text(encoding="utf-8"))
+import avito_views
+PUBLIC_CONTRACTS = {**CONTRACTS,**avito_views.contracts(CONTRACTS)}
 MAX_REPORT = 1024 * 1024
 SAFE_PATH_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 SENSITIVE_FIELDS = {
@@ -66,13 +68,19 @@ def _check(value, schema):
 
 
 def input_schema(name):
-    op = CONTRACTS[name]
+    op = PUBLIC_CONTRACTS[name]
     return {"type": "object", "properties": op["properties"], "required": op.get("required", []),
             "additionalProperties": False}
 
 
 def validate(name, arguments):
     _check(arguments, input_schema(name))
+    if name not in CONTRACTS:
+        if ("date_from" in arguments)!=("date_to" in arguments) or ("offset" in arguments and "cursor" in arguments):
+            raise ValueError("Invalid seller view range or cursor")
+        if "date_from" in arguments and not 0<=(date.fromisoformat(arguments["date_to"])-date.fromisoformat(arguments["date_from"])).days<366:
+            raise ValueError("Invalid seller view date range")
+        return
     for key in CONTRACTS[name].get("path_params", ()):
         if not SAFE_PATH_VALUE.fullmatch(str(arguments[key])):
             raise ValueError("Invalid path parameter")
@@ -195,6 +203,9 @@ def _pagination(name, args, data):
 
 
 def read(name, args, creds, directory, deadline):
+    if name not in CONTRACTS and name in PUBLIC_CONTRACTS:
+        validate(name,args)
+        return avito_views.read(name,args,creds,directory,deadline)
     validate(name, args)
     client = creds.get("client_id")
     secret = creds.get("client_secret")
@@ -210,7 +221,7 @@ def read(name, args, creds, directory, deadline):
             if remaining < 0.2:
                 raise finance_gate.LocalPreparationTimeout("Read deadline reached")
             return wire.opener.open(request, timeout=min(6, remaining))
-        response = finance_gate.run(gate_dir, seller+":"+operation, open_response, (client, secret))
+        response = finance_gate.run(gate_dir, seller+":"+operation, open_response, (client, secret),read_recovery=operation!="token")
         with response:
             raw = response.read(MAX_REPORT + 1)
         if len(raw) > MAX_REPORT:

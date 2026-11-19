@@ -341,7 +341,7 @@ def state_child():
             history.record(CREDS, 'ozon_turnover', 'ok')
             status, health = request(app, '/api/read', {'operation': 'mcp_health',
                                                         'arguments': {'tool_name': 'ozon_turnover'}}, BRIDGE_TOKEN)
-            if status != 200 or health['tool_count'] != 58 or health['items'][0]['status'] != 'ok':
+            if status != 200 or health['tool_count'] != len(catalog['result']['tools']) or health['items'][0]['status'] != 'ok':
                 raise AssertionError('real MCP health gateway did not read the saved observation')
         elif stage == 'restored':
             if wire.cached('v2-cache') != b'{"origin":"v2"}':
@@ -373,7 +373,7 @@ def state_child():
                 raise AssertionError('tool status did not survive rollback')
             status, health = request(app, '/api/read', {'operation': 'mcp_health',
                                                         'arguments': {'tool_name': 'ozon_turnover'}}, BRIDGE_TOKEN)
-            if status != 200 or health['tool_count'] != 58 or health['items'][0]['status'] != 'ok':
+            if status != 200 or health['tool_count'] != len(catalog['result']['tools']) or health['items'][0]['status'] != 'ok':
                 raise AssertionError('real MCP health gateway did not survive rollback')
             history.save_day('synthetic-owner', 'wb_orders', '2026-11-18',
                              [{'article': 'private-synthetic-history', 'quantity': 3}],
@@ -454,6 +454,10 @@ def check_history_key_loss(python, service, data, root):
         raise AssertionError('history key loss changed the original archive or installed a replacement key')
 
 
+SELLER_GROUPS = frozenset(('ozon_fbo_reports', 'ozon_fbs_reports', 'ozon_price_and_promotion_reports', 'ozon_product_reports', 'ozon_seller_information', 'ozon_settlement_reports', 'wb_csv_reports', 'wb_inventory_reports', 'wb_product_reports', 'wb_promotion_reports', 'wb_seller_information', 'wb_settlement_reports', 'wb_tariff_reports'))
+V3_SELLER_VIEWS = frozenset(('ozon_balance', 'ozon_buyout', 'ozon_card_quality', 'ozon_compensations', 'ozon_competitor_prices', 'ozon_fbs_errors', 'ozon_fbs_orders', 'ozon_fbs_stocks', 'ozon_market', 'ozon_promotions', 'ozon_questions', 'ozon_removals', 'ozon_supply_acts', 'ozon_supply_slots', 'ozon_wrong_volume', 'wb_balance', 'wb_card_issues', 'wb_claims', 'wb_funnel_history', 'wb_promotions', 'wb_questions', 'wb_seller_info', 'wb_stocks_history', 'wb_tariffs'))
+
+
 def check_state(python, old, new, root, *, previous_is_v2=False):
     data = root / 'state'
     data.mkdir(mode=0o700)
@@ -470,8 +474,12 @@ def check_state(python, old, new, root, *, previous_is_v2=False):
     previous_history_key = history_key.read_bytes() if previous_is_v2 else None
     upgraded = run_state(python, new, data, 'candidate', previous_is_v2=previous_is_v2)
     if previous_is_v2:
-        if len(first['names']) != 58 or upgraded['names'] != first['names']:
-            raise AssertionError('next release must retain the exact 58-tool v2 catalogue')
+        before_names, after_names = set(first['names']), set(upgraded['names'])
+        if len(before_names - SELLER_GROUPS - V3_SELLER_VIEWS) != 58 or not before_names <= after_names:
+            raise AssertionError('previous marketplace tools disappeared')
+        additions = after_names - before_names
+        if additions not in (frozenset(), SELLER_GROUPS, V3_SELLER_VIEWS, SELLER_GROUPS | V3_SELLER_VIEWS):
+            raise AssertionError('unexpected or incomplete marketplace tool additions')
     else:
         if len(first['names']) != 46 or len(upgraded['names']) != 58 or set(upgraded['names']) - set(first['names']) != NEW_TOOLS:
             raise AssertionError('expected 46 existing and 12 additional MCP tools')
@@ -675,7 +683,8 @@ def check_category_wire(python, old, new, root):
                                 capture_output=True, env=env, timeout=25)
         if result.returncode:
             raise AssertionError('category cooldown probe failed: ' + result.stderr)
-        replay._blocked(json.loads(result.stdout), unknown=reply == 'unknown429', minimum=43)
+        replay._blocked(json.loads(result.stdout), unknown=reply == 'unknown429', minimum=43,
+                        recoverable=replay.bounded_reads(new))
         if replay._attempt_count(data) != 1:
             raise AssertionError('another WB category key bypassed the existing cooldown')
         reverse = root / ('category-reverse-' + reply)
@@ -686,7 +695,7 @@ def check_category_wire(python, old, new, root):
         if result.returncode or json.loads(result.stdout) != {'kind': 'http', 'status': 429}:
             raise AssertionError('category fixture did not get a 429: ' + result.stderr)
         outcome = replay._probe(python, old, reverse, 'legacy', provider='wb', tick=17, rotated=True)
-        replay._blocked(outcome, unknown=reply == 'unknown429', minimum=43)
+        replay._blocked(outcome, unknown=reply == 'unknown429', minimum=43,recoverable=replay.bounded_reads(new))
         if replay._attempt_count(reverse) != 1:
             raise AssertionError('rollback bypassed the WB category cooldown')
     print('PASS separate WB category key honors account cooldown in both directions', flush=True)
@@ -705,12 +714,13 @@ def check_finance(python, old, new, root):
                 raise AssertionError('unexpected initial finance request count')
             for wall, boot, rotated in ((17, replay.BOOT, False), (10000, replay.BOOT, True)):
                 outcome = run_finance(python, target, data, tick=17, wall=wall, boot=boot, rotated=rotated)
-                replay._blocked(outcome, unknown=reply != 'known429', minimum=43)
+                replay._blocked(outcome, unknown=reply != 'known429', minimum=43,
+                                recoverable=replay.bounded_reads(target) or (replay.bounded_reads(source) and reply=='unknown429'))
                 if attempts.read_text(encoding='ascii').count('attempt') != 1:
                     raise AssertionError('finance provider contacted before the retry deadline')
             if reply == 'known429':
                 outcome = run_finance(python, target, data, tick=17, boot='b' * 64, rotated=True)
-                replay._blocked(outcome, unknown=True)
+                replay._blocked(outcome, unknown=True,minimum=43,recoverable=replay.bounded_reads(target))
                 if attempts.read_text(encoding='ascii').count('attempt') != 1:
                     raise AssertionError('finance provider contacted after reboot with unknown deadline')
                 outcome = run_finance(python, target, data, tick=61)
@@ -718,9 +728,17 @@ def check_finance(python, old, new, root):
                     raise AssertionError('finance read did not resume after the known deadline')
             else:
                 outcome = run_finance(python, target, data, tick=86401, rotated=True)
-                replay._blocked(outcome, unknown=True)
-                if attempts.read_text(encoding='ascii').count('attempt') != 1:
-                    raise AssertionError('finance unknown outcome was repeated')
+                if replay.bounded_reads(target) or (replay.bounded_reads(source) and reply=='unknown429'):
+                    if outcome.get('kind')=='gate':
+                        # Both the method and account can have independent interrupted reads.
+                        replay._blocked(outcome,unknown=True,recoverable=True)
+                        assert attempts.read_text(encoding='ascii').count('attempt')==1
+                        outcome=run_finance(python,target,data,tick=86501,rotated=True)
+                    assert outcome.get('kind')=='ok' and attempts.read_text(encoding='ascii').count('attempt')==2, outcome
+                else:
+                    replay._blocked(outcome, unknown=True)
+                    if attempts.read_text(encoding='ascii').count('attempt') != 1:
+                        raise AssertionError('finance unknown outcome was repeated')
     print('PASS Ozon finance worker retry state survives forward and rollback', flush=True)
 
 

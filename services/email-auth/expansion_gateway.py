@@ -719,13 +719,22 @@ def _summary(name, data):
 
 
 def execute(name, args, creds, directory, deadline):
+    if name in market_specs.seller_views.VIEWS:
+        return market_specs.seller_views.execute(name,args,creds,directory,deadline)
+    if (name=="wb_retentions" and args.get("retention_type","all")!="penalty" or
+            name=="wb_ads" and (args.get("report") in ("clusters","bids","balance") or
+                (args.get("nm_id") or args.get("article")) and not args.get("campaign_ids") and args.get("report","auto") in ("auto","statistics"))):
+        import seller_wb_views
+        market_specs.validate(name,args)
+        reader=market_specs.seller_views.Reader(name,args,creds,directory,deadline)
+        return market_specs.seller_views.render(reader,seller_wb_views.retentions if name=="wb_retentions" else seller_wb_views.advertising)
     if name in market_specs.seller_reports.GROUPS:
         return market_specs.seller_reports.execute(name,args,creds,directory,deadline)
     market_specs.validate(name, args)
     with localcontext() as ctx:
         ctx.prec = 128
         if name in market_health.COMPOSITE:
-            wires = {p: make_wire(p,c,directory,deadline) for p,c in creds.items() if p!="performance"}
+            wires = {p: make_wire(p,c,directory,deadline) for p,c in creds.items() if p in ("ozon","wb")}
             if name in ("unit_economics","sales_drop_check") and "performance" in creds:
                 wires["performance"]=Wire("performance",creds["performance"],directory,deadline)
             mapping=_mapping(args,directory)
@@ -757,6 +766,8 @@ def execute(name, args, creds, directory, deadline):
                     data["mapping_basis"] = "seller_configured_codes_and_financial_row_identifiers" if catalog_issues and selectors and mapping and "mapping" not in args else "verified_catalogs"
                     if missing:
                         data["status"] = "partial_catalog_identity" if verified else "catalog_identity_unavailable"
+            import seller_insights
+            seller_insights.enrich(name,args,data,wires,mapping,creds,directory,deadline)
             used_wires=list(wires.values())
         else:
             p = provider(name)
@@ -898,6 +909,7 @@ def execute(name, args, creds, directory, deadline):
                     status="provider_access_denied",
                     http_status=exc.code,
                     required_category=getattr(exc, "required_category", category),
+                    **({"required_subscription":"Управление отзывами или Premium Pro"} if name=="ozon_reviews" else {}),
                     message="Проверьте доступ текущего ключа к категории "
                     + str(getattr(exc, "required_category", category) or "WB API"),
                 )
@@ -912,6 +924,10 @@ def execute(name, args, creds, directory, deadline):
                 )
             if p != "performance":
                 _enrich(name, args, data, wire)
+                if name=="ozon_supply_orders" and args.get("article"):
+                    for supply in data["items"]:
+                        actual,declared=supply.get("accepted_units"),supply.get("declared_units")
+                        supply["acceptance_difference_units"]=actual-declared if type(actual) is int and type(declared) is int else None
             elif seller_wire:
                 _enrich(name, args, data, seller_wire)
             if args.get("include_order_share"):

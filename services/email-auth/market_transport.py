@@ -66,7 +66,9 @@ SELLER_READS = frozenset(
         "/v4/posting/fbs/list",
         "/v1/finance/cash-flow-statement/list",
         "/v1/cluster/list",
+        "/v2/cluster/list",
         "/v2/review/list",
+        "/v2/review/count",
         "/v1/rating/summary",
         "/v1/seller/info",
     )
@@ -541,7 +543,7 @@ class Wire:
             quantity_unit="pcs",
         )
 
-    def _admit(self, key, interval, cabinet_key=None):
+    def _admit(self, key, interval, cabinet_key=None, *, read_recovery=False):
         keys = (key, cabinet_key or key)
         while True:
             with self.db() as db:
@@ -553,7 +555,12 @@ class Wire:
                     "SELECT MAX(until_at),MAX(unknown) FROM quota WHERE k IN (?,?)", keys
                 ).fetchone()
                 if unknown:
-                    raise finance_gate.GateError("retry_time_unknown")
+                    if not read_recovery:
+                        raise finance_gate.GateError("retry_time_unknown")
+                    until=max(until or 0,now+60)
+                    db.execute("UPDATE quota SET unknown=0,until_at=MAX(until_at,?) WHERE k IN (?,?)", (until,*keys))
+                    if cabinet_key:
+                        db.execute("UPDATE quota SET unknown=0,until_at=MAX(until_at,?) WHERE k IN (SELECT k FROM wb_feed_slots)",(until,))
                 wait = max(0, (until or 0) - now)
                 if not wait:
                     db.executemany("INSERT OR REPLACE INTO quota VALUES(?,?,0)",
@@ -564,6 +571,8 @@ class Wire:
                     return
             if wait>2 or not self.wait(wait):
                 delay = math.ceil(wait)
+                if read_recovery:
+                    raise market_cooldown.MethodLimited('cooldown',delay)
                 raise urllib.error.HTTPError(
                     "", 429, "Method request interval", {"Retry-After": str(delay)}, None
                 )
@@ -571,7 +580,7 @@ class Wire:
     def _analytics_budget(self):
         market_cooldown._analytics_slot(self.gate_dir, self.creds)
 
-    def admit_catalog(self, host, path, group, interval):
+    def admit_catalog(self, host, path, group, interval, *, read_recovery=False):
         # Match the existing reports' credential slot and the documented
         # shared bucket, which also survives a token change in this cabinet.
         legacy=path
@@ -587,7 +596,10 @@ class Wire:
             now=time.time()
             until,unknown=db.execute('SELECT MAX(until_at),MAX(unknown) FROM quota WHERE k IN (?,?)',keys).fetchone()
             if unknown:
-                raise finance_gate.GateError('retry_time_unknown')
+                if not read_recovery:raise finance_gate.GateError('retry_time_unknown')
+                until=max(until or 0,now+60)
+                db.executemany('UPDATE quota SET unknown=0,until_at=MAX(until_at,?) WHERE k=?',[(until,k) for k in keys])
+                db.commit()
             if until and until>now:
                 raise finance_gate.GateError('cooldown',max(1,math.ceil(until-now)))
             db.executemany('INSERT OR REPLACE INTO quota VALUES(?,?,0)',[(k,now+interval) for k in keys])
@@ -695,7 +707,7 @@ class Wire:
             data=_json(body).encode() if body is not None else None,
         )
         def prepare():
-            self._admit(quota, interval, cabinet_quota)
+            self._admit(quota, interval, cabinet_quota,read_recovery=not job and not token_request)
             if ttl and not job:
                 hit = self._http_cache(key, binary)
                 if hit is not None:
@@ -716,6 +728,7 @@ class Wire:
             try:
                 response_context = market_cooldown.request(
                     self.gate_dir, self.provider, self.creds, req, send, before_send=prepare,
+                    read_recovery=not job and not token_request,
                 )
                 with response_context as response:
                     try:

@@ -35,13 +35,13 @@ HOST_KEYS = {
 WB_TOOLS = {
     name: key
     for key, names in {
-        "wb_finance": "wb_finance_report wb_retentions",
+        "wb_finance": "wb_finance_report wb_balance",
         "wb_statistics": "wb_orders wb_sales",
         "wb_content": "wb_products",
         "wb_prices_key": "wb_prices",
         "wb_supply": "wb_supply_goods wb_supplies",
         "wb_feedback": "wb_feedbacks",
-        "wb_analytics": "wb_funnel wb_paid_storage wb_stocks wb_region_sales wb_returns_report wb_acceptance_report wb_sales_summary wb_search_queries",
+        "wb_analytics": "wb_funnel wb_paid_storage wb_stocks wb_region_sales wb_returns_report wb_acceptance_report wb_sales_summary wb_search_queries wb_warehouse_daily wb_funnel_daily wb_stocks_history wb_funnel_history wb_retentions wb_card_issues",
         "wb_advert": "wb_ads wb_ads_finance",
     }.items()
     for name in names.split()

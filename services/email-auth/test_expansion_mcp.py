@@ -265,7 +265,7 @@ class ExpansionMCPTests(unittest.TestCase):
 
         # POSIX file ownership/locking is exercised by the Linux CI suite.
         gate = (
-            patch("finance_gate.run", side_effect=lambda root, client, read, secrets: read())
+            patch("finance_gate.run", side_effect=lambda root, client, read, secrets, **options: read())
             if os.name == "nt"
             else nullcontext()
         )
@@ -338,7 +338,7 @@ class ExpansionMCPTests(unittest.TestCase):
 
 class ReportHistoryTests(unittest.TestCase):
     def test_order_feed_paces_rotated_tokens_and_preserves_previous_release_slot(self):
-        def gate(directory, provider, credentials, request, send, *, before_send):
+        def gate(directory, provider, credentials, request, send, *, before_send, read_recovery=False):
             before_send()
             return send()
 
@@ -352,11 +352,11 @@ class ReportHistoryTests(unittest.TestCase):
             with first.db() as db:
                 db.execute("INSERT INTO quota VALUES(?,?,0)", (legacy, time.time() + 300))
             with patch.object(first.opener, "open") as http, patch.object(rotated.opener, "open") as rotated_http:
-                with self.assertRaises(urllib.error.HTTPError) as old_slot:
+                with self.assertRaises(market_transport.finance_gate.GateError) as old_slot:
                     rotated("POST", endpoint, body={}, interval=60, basic_interval=10800)
-                self.assertEqual(old_slot.exception.code, 429)
+                self.assertEqual(old_slot.exception.reason, "cooldown")
                 http.assert_not_called()
-                with self.assertRaises(urllib.error.HTTPError):
+                with self.assertRaises(market_transport.finance_gate.GateError):
                     first("POST", endpoint, body={}, interval=60, basic_interval=10800)
                 rotated_http.assert_not_called()
                 with first.db() as db:
@@ -364,9 +364,9 @@ class ReportHistoryTests(unittest.TestCase):
                 response = http.return_value.__enter__.return_value
                 response.status, response.read.return_value = 200, b"{}"
                 first("POST", endpoint, body={}, interval=60, basic_interval=10800)
-                with self.assertRaises(urllib.error.HTTPError) as paced:
+                with self.assertRaises(market_transport.finance_gate.GateError) as paced:
                     rotated("POST", endpoint, body={}, interval=60, basic_interval=10800)
-                self.assertGreater(int(paced.exception.headers["Retry-After"]), 10790)
+                self.assertGreater(paced.exception.retry_after_seconds, 10790)
                 rotated_http.assert_not_called()
                 with first.db() as db:
                     old_until, = db.execute("SELECT until_at FROM quota WHERE k=?", (legacy,)).fetchone()
