@@ -10,8 +10,12 @@ health response. Branch builds do not activate production.
 The SSH deploy key runs only dispatch.py. It submits the GitHub job's temporary
 read token on stdin to a root-owned transient systemd service. The host verifies
 the run, successful jobs, current main, artifact digest, Git source and pinned
-wheels. It installs the native runtime offline and executes candidate tests under
-the dedicated wbozon-test identity with private networking and bounded tmpfs.
+wheels. The builder runs the full unit suite in the packaged Linux environment.
+The host installs that same wheelhouse offline and checks catalogue permissions,
+owner approval, OAuth revocation, cross-process cooldowns and worker cancellation
+inside the installed environment. A separate Gunicorn smoke test covers startup,
+session authentication, CSRF, encrypted storage and shutdown. Both host checks
+run as wbozon-test with private networking and bounded tmpfs.
 The controller and its trust policy are installed separately by the administrator.
 
 Before stopping the portal, the controller fences new connections on its two

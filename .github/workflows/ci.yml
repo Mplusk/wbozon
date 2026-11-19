@@ -191,6 +191,15 @@ jobs:
             "$bundle/bootstrap/pip-26.3-py3-none-any.whl" install --isolated --no-index --find-links "$bundle/wheelhouse" \
             --require-hashes -r "$bundle/requirements-offline.lock"
           (cd "$bundle/service" && PYTHONDONTWRITEBYTECODE=1 "$venv/bin/python" -m unittest -q)
+          (cd "$bundle/service" && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$GITHUB_WORKSPACE/tools/native-release" "$venv/bin/python" - <<'PY'
+          import unittest
+          from build_release import CATALOG_HOST_TESTS
+          loader = unittest.TestLoader()
+          for name in CATALOG_HOST_TESTS:
+              if not loader.loadTestsFromName(name).countTestCases() or loader.errors:
+                  raise SystemExit(f"Missing production check: {name}")
+          PY
+          )
           PYTHONDONTWRITEBYTECODE=1 "$venv/bin/python" "$bundle/test_native.py"
       - name: Exercise draining and crash recovery on a separate local systemd portal
         shell: bash

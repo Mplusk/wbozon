@@ -12,6 +12,18 @@ import github_artifact
 RELEASES = pathlib.Path('/opt/3dprinta-portal/releases')
 CANDIDATES = pathlib.Path('/var/lib/3dprinta-native-deployer/candidates')
 
+# The host admits only artifacts whose full packaged suite passed in GitHub.
+# Exercise the OS and gateway boundaries again with the actual installed venv.
+CATALOG_HOST_TESTS = (
+    'test_market_catalog.CatalogTests',
+    'test_external_mcp_integration.ExternalMCPIntegrationTests.test_generated_mcp_token_is_separate_from_existing_api_and_revoked',
+    'test_oauth_mcp.Tests.test_code_pkce_is_single_use_and_parent_revocation_invalidates_every_token',
+    'test_finance_gate.FinanceGateTests.test_cooldown_is_enforced_after_a_fresh_process_starts',
+    'test_finance_gate.FinanceGateTests.test_killed_process_leaves_uncertain_state',
+    'test_finance_gate.FinanceGateTests.test_worker_preserves_429_header_without_provider_body',
+    'test_provider_deadline.ProviderDeadlineTests.test_hung_worker_is_killed_at_deadline',
+)
+
 
 class BuildError(Exception):
     pass
@@ -174,7 +186,9 @@ def prepare(files, release, work, *, run_id, attempt, release_gid):
         os.chmod(path, 0o750 if stat.S_ISDIR(info.st_mode) or info.st_mode & 0o111 else 0o640)
     before = inventory(release)
     prefix = 'wbozon-test-' + run_id + '-' + attempt
-    _sandbox(release, prefix + '-unit', [str(python), '-m', 'unittest', '-q'], release / 'service',
+    # Older releases predate the catalogue and retain their original host checks.
+    tests = CATALOG_HOST_TESTS if 'service/market_catalog.py' in files else ()
+    _sandbox(release, prefix + '-unit', [str(python), '-m', 'unittest', '-q', *tests], release / 'service',
              runtime_seconds=720)
     _sandbox(release, prefix + '-smoke', [str(python), str(release / 'test_native.py')], '/tmp',
              runtime_seconds=300)

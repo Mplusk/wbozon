@@ -12,17 +12,18 @@ with tempfile.TemporaryDirectory() as tmp:
         path=root/name;path.write_bytes(value);path.chmod(0o600);env[name]=str(path)
     with socket.socket() as s:s.bind(('127.0.0.1',0));port=s.getsockname()[1]
     process=subprocess.Popen([str(pathlib.Path(sys.executable).parent/'gunicorn'),'--config','gunicorn.conf.py','--bind',f'127.0.0.1:{port}','portal:create_portal()'],cwd=base/'service',env=env,start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    def request(path,method='GET',data=None,headers=None):
+    def request(path,method='GET',data=None,headers=None,timeout=10):
         h={'Host':'3dprinta.shop',**(headers or {})}
         req=urllib.request.Request(f'http://127.0.0.1:{port}'+path,data=data,headers=h,method=method)
         try:
-            with urllib.request.urlopen(req,timeout=3) as r:return r.status,r.read()
+            with urllib.request.urlopen(req,timeout=timeout) as r:return r.status,r.read()
         except urllib.error.HTTPError as e:return e.code,e.read()
     try:
-        for _ in range(50):
+        ready_by=time.monotonic()+60
+        while (remaining:=ready_by-time.monotonic())>0:
             if process.poll() is not None:raise RuntimeError('runtime exited')
             try:
-                if request('/')[0]==200:break
+                if request('/',timeout=min(3,remaining))[0]==200:break
             except OSError:pass
             time.sleep(.1)
         else:raise RuntimeError('runtime readiness timeout')
