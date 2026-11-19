@@ -5,6 +5,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 import re
 import urllib.error
+import time as clock
 
 import finance_gate
 from market_history import order_event
@@ -114,6 +115,30 @@ def _supplies(args, request):
                 str(row["warehouse_id"]), str(row["actual_warehouse_id"])):
             items.append(row)
     return result(items, page["next_cursor"], period_basis="supply_creation_moscow")
+
+
+def supply_listing(args, wire):
+    if not hasattr(wire, "progress"):
+        return _supplies(args, wire)
+    query = {k: v for k, v in args.items() if k != "mode"}
+    with wire.progress("wb-supply-list-snapshot-v1", query) as (saved, save):
+        now = clock.time()
+        if saved and now < saved["at"] + 1800:
+            return saved["page"]
+        try:
+            page = _supplies(args, wire)
+        except (finance_gate.GateError, TimeoutError, urllib.error.URLError) as exc:
+            if not saved or (isinstance(exc, urllib.error.HTTPError) and exc.code != 429):
+                raise
+            delay = exc.headers.get("Retry-After") if isinstance(exc, urllib.error.HTTPError) else getattr(exc, "retry_after_seconds", None)
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+            return dict(saved["page"], refresh_status="pending", retry_after_seconds=delay)
+        if page.get("issues"):
+            return dict(saved["page"], refresh_status="pending", retry_after_seconds=page.get("retry_after_seconds")) if saved else page
+        page.update(status="ready", refresh_status="ready", data_as_of=page["observed_at"])
+        save({"at": now, "page": page}, 30 * 86400)
+        return page
 
 
 def _goods(args, request, *, include_packages=True):
@@ -247,11 +272,19 @@ def _stats(name, args, request, *, exact_day=False, feed_start=None):
             ttl=1800,
         )
     except finance_gate.GateError as exc:
-        if sale or exc.reason != "retry_time_unknown" or "cursor" in args:
+        if sale or exc.reason != "retry_time_unknown":
+            raise
+        delay = request.recover_interrupted_orders() if hasattr(request, "recover_interrupted_orders") else None
+        if "cursor" in args:
+            if delay is not None:
+                raise finance_gate.GateError("cooldown", delay) from None
             raise
         fallback = feed_orders(feed_args, request)
         if fallback.get("status") in ("exact_nm_id_required", "barcode_unavailable_in_order_feed"):
-            fallback.update(fallback_status=fallback["status"], status=exc.reason)
+            fallback.update(fallback_status=fallback["status"], status="cooldown" if delay else exc.reason,
+                            retry_after_seconds=delay)
+        if delay is not None:
+            fallback["statistics_recovery_after_seconds"] = delay
         return fallback
     page = rows(data)
     limit = args.get("limit", 100)
@@ -932,7 +965,7 @@ def read(name, args, request):
     if name in READERS:
         return READERS[name](args,request)
     if name == "wb_supplies":
-        return _supplies(args, request)
+        return supply_listing(args, request)
     if name == "wb_supply_goods":
         return _goods(args, request)
     if name in ("wb_orders", "wb_sales"):

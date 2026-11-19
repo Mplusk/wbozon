@@ -83,6 +83,10 @@ class CategoryWire(Wire):
         self.category_keys=creds.get("category_keys",{})
         self.sources={}
 
+    def recover_interrupted_orders(self):
+        source = self.sources.get("wb_statistics")
+        return source.recover_interrupted_orders() if source else super().recover_interrupted_orders()
+
     def __call__(self,method,url,**params):
         category=market_health.HOST_KEYS.get(urlsplit(url).hostname.split(".")[0])
         chosen=self.category_keys.get(category)
@@ -671,8 +675,22 @@ def execute(name, args, creds, directory, deadline):
                     data=identity
                 else:
                     verified, selectors, missing = market_composites.verified_accounts(args, wires, mapping, identity)
+                    catalog_issues = dict(missing)
+                    # Historical settlement lines identify the seller's own codes, including retired cards.
+                    # Only the private seller mapping can supply a selector when the current catalog is unavailable.
+                    if mapping and "mapping" not in args:
+                        for p, field in (("ozon", "ozon_offer_id"), ("wb", "wb_vendor_code")):
+                            if p in missing and p in wires and mapping.get(field) and (p != "wb" or mapping.get("wb_nm_id")):
+                                verified[p], selectors[field] = wires[p], mapping[field]
+                                if p == "wb":
+                                    selectors["wb_nm_id"] = mapping["wb_nm_id"]
+                                elif "performance" in wires:
+                                    verified["performance"] = wires["performance"]
+                                missing.pop(p)
                     data = market_composites.accounting(args, verified, selectors, _finance_period, regulated_ozon)
                     data.update(report="unit_economics", mapping=selectors or None, unavailable_marketplaces=missing)
+                    data["catalog_verification_issues"] = catalog_issues
+                    data["mapping_basis"] = "seller_configured_codes_and_financial_row_identifiers" if catalog_issues and selectors and mapping and "mapping" not in args else "verified_catalogs"
                     if missing:
                         data["status"] = "partial_catalog_identity" if verified else "catalog_identity_unavailable"
             used_wires=list(wires.values())

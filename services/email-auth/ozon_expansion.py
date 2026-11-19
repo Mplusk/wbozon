@@ -7,6 +7,7 @@ from decimal import Decimal, localcontext
 import urllib.error
 
 import market_cooldown
+import finance_gate
 import ozon_fbo
 import ozon_details
 from market_specs import iso, matches, money, result, rows, select, validate
@@ -417,19 +418,93 @@ def _daily(args, request):
     )
 
 
-def _geo(args, request):
+def _postings_page(args, request, *, delivered=False):
     start, end = _range(args)
-    raw = request(
+    filters = {"since": start, "to": end}
+    if delivered:
+        filters["statuses"] = ["delivered"]
+    return request(
         "POST",
         BASE + "/v3/posting/fbo/list",
         body={
-            "filter": {"since": start, "to": end},
+            "filter": filters,
             "cursor": args.get("cursor", ""),
             "limit": args.get("limit", 100),
             "sort_dir": "ASC",
             "with": {"analytics_data": True, "financial_data": True, "legal_info": False},
         },
     )
+
+
+def delivered_economics(period, article, wire):
+    """Separate FBO posting cohort with its own date, quantity and currency evidence."""
+    with wire.progress("fbo-delivered-economics-v1", [article, period]) as (saved, save):
+        state = saved or {"cursor": None, "cursors": [], "seen": [], "positions": [], "done": False}
+        pending = {}
+        for _ in range(4):
+            if state["done"]:
+                break
+            args = dict(period, limit=100)
+            if state["cursor"]:
+                args["cursor"] = state["cursor"]
+            try:
+                raw = _postings_page(args, wire, delivered=True)
+            except finance_gate.GateError as exc:
+                pending = {"status": exc.reason, "retry_after_seconds": exc.retry_after_seconds}
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code != 429:
+                    raise
+                pending = {"status": "cooldown", "retry_after_seconds": exc.headers.get("Retry-After")}
+                exc.close()
+                break
+            for posting in rows(raw.get("postings")):
+                number = posting.get("posting_number")
+                if not number or number in state["seen"] or posting.get("status") != "delivered":
+                    raise ValueError("Unexpected delivered posting")
+                state["seen"].append(number)
+                lines = rows((posting.get("financial_data") or {}).get("products", []))
+                for product in rows(posting.get("products")):
+                    if not product.get("offer_id"):
+                        raise ValueError("Missing posting product identity")
+                    if product["offer_id"] != article:
+                        continue
+                    quantity, sku = product.get("quantity"), product.get("sku")
+                    if type(quantity) is not int or quantity <= 0 or not sku:
+                        raise ValueError("Missing delivered quantity or SKU")
+                    price = product.get("price") or {}
+                    matched = [r for r in lines if str(r.get("product_id")) == str(sku)]
+                    # V3 financial products have no quantity and no payout currency.
+                    # Single-unit lines allow a direct commission per unit in its stated currency.
+                    fee = (matched[0].get("commission") or {}) if len(matched) == 1 and quantity == 1 else {}
+                    state["positions"].append([quantity,price.get("currency"),price.get("amount"),
+                                               fee.get("currency"),fee.get("amount")])
+            cursor, done = _page(raw, state["cursor"])
+            if not done and (not cursor or cursor in state["cursors"]):
+                raise ValueError("Nonadvancing FBO posting page")
+            if cursor:
+                state["cursors"].append(cursor)
+            if len(state["seen"]) > 20000 or len(state["positions"]) > 20000:
+                return result([], complete=False, status="posting_volume_exceeds_bound")
+            state.update(cursor=cursor, done=done)
+            save(state, 1800 if done else 86400)
+        totals, fees = {}, {}
+        for qty, currency, price, fee_ccy, fee in state["positions"]:
+            for groups, code, value in ((totals,currency,price),(fees,fee_ccy,fee)):
+                if code and money(value) is not None:
+                    amount, units = groups.get(code,(Decimal(0),0))
+                    groups[code] = (amount + money(value)*qty, units+qty)
+        def amounts(groups):
+            return {ccy: {"amount": str(amount), "covered_units": count,
+                          "per_covered_unit": format(amount/count, ".4f")} for ccy,(amount,count) in groups.items()}
+        return dict(source="/v3/posting/fbo/list", complete=state["done"], period=period,
+                    date_basis="posting_creation_utc", fulfillment="FBO", current_status="delivered",
+                    observed_delivered_units=sum(p[0] for p in state["positions"]), item_prices=amounts(totals),
+                    commissions=amounts(fees), included_in_realization=False, **pending)
+
+
+def _geo(args, request):
+    raw = _postings_page(args, request)
     items, issues = [], set()
     article_skus = None
     for p in rows(raw.get("postings")):

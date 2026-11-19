@@ -233,6 +233,43 @@ class Wire:
         finally:
             db.close()
 
+    def progress_snapshot(self, name, args):
+        """Read one complete, unexpired SQLite checkpoint without holding another scan lock."""
+        raw = self.cached(_id([self.scope, name, args]))
+        return json.loads(raw) if raw is not None else {}
+
+    def recover_interrupted_orders(self):
+        """Give a lost WB statistics GET one full documented refill interval before a new read."""
+        if self.provider != "wb":
+            return None
+        url = "https://statistics-api.wildberries.ru/api/v1/supplier/orders"
+        root = str(Path(self.gate_dir).parent / ".market-method-gates")
+        key = finance_gate._key(market_cooldown.method_key("wb", self.creds, url))
+        # An operator-reported 429 (including one with no reset) and an active request
+        # must never be shortened. The same on-disk lock is used by every release.
+        root = finance_gate._root(root)
+        try:
+            finance_gate._ensure_client(root, key, create=False)
+        except ValueError:
+            return None
+        with finance_gate._lock(root, key) as created:
+            if finance_gate._read_state(root, key, created)["status"] != "in_flight":
+                return None
+            slot = _id([self.scope, "statistics-api.wildberries.ru", "/api/v1/supplier/orders"])
+            with self.db() as db:
+                row = db.execute("SELECT until_at,unknown FROM quota WHERE k=?", (slot,)).fetchone()
+            if not row or row[1]:
+                return None
+            now = time.time()
+            interval = 60 if _wb_personal(self.creds["api_token"]) else 10800
+            delay = max(interval, math.ceil(row[0] - now))
+            if delay > finance_gate.MAX_RETRY_SECONDS:
+                return None
+            finance_gate._write_client_state(root, key, {"version":1,"status":"retry","at_wall":now,
+                "at_monotonic":time.monotonic(),"boot":finance_gate._boot_identity(),"delay":delay,
+                "source":"verified_recovery"})
+            return delay
+
     @contextlib.contextmanager
     def progress(self, name, args):
         """Serialize a resumable scan across workers. Kernel releases the lock after a crash."""
@@ -253,9 +290,8 @@ class Wire:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     raise finance_gate.GateError("busy", 1) from None
-            raw = self.cached(key)
             yield (
-                json.loads(raw) if raw is not None else {},
+                self.progress_snapshot(name, args),
                 lambda data, ttl: self.store(key, _json(data).encode(), ttl),
             )
 

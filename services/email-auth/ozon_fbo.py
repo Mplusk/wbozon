@@ -125,6 +125,8 @@ def _orders(args, data, issues):
         tags = _object(row.get('order_tags'))
         dropoff = _object(row.get('dropoff_warehouse'))
         slot = _object(row.get('timeslot'))
+        if 'value' in slot:
+            slot = _object(slot.get('value'))
         window, tz = _object(slot.get('timeslot')), _object(slot.get('timezone_info'))
         supplies = None
         if row.get('supplies') is not None:

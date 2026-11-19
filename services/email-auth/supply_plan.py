@@ -5,6 +5,9 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_CEILING
 from hashlib import sha256
+import json
+import copy
+from pathlib import Path
 import urllib.error
 
 import finance_gate
@@ -348,6 +351,84 @@ def _wholesale(state, planning):
             by_day[day] = by_day.get(day, 0) + count
 
 
+def _seller_wholesale(wire, state, provider, article, since, through):
+    if not hasattr(wire, "gate_dir"):
+        return []
+    path = Path(wire.gate_dir).parent / "supply-order-adjustments.json"
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(65537)
+    except FileNotFoundError:
+        return []
+    if len(raw) > 65536:
+        raise ValueError("Supply adjustments exceed the configured bound")
+    config = json.loads(raw)
+    if config.get("version") != 1 or not isinstance(config.get("entries"), list):
+        raise ValueError("Invalid supply adjustments")
+    evidence, seen = [], set()
+    for entry in config["entries"]:
+        if entry["marketplace"] != provider or entry["article"] != article or not since <= entry["date"] <= through:
+            continue
+        location, day, units = str(entry["warehouse"]), entry["date"], entry["units"]
+        if (location, day) in seen or type(units) is not int or units <= 0 or not entry.get("source"):
+            raise ValueError("Invalid seller wholesale observation")
+        seen.add((location, day))
+        loc = state["locations"].get(location)
+        gross = loc["daily"].get(day, 0) if loc else 0
+        covered = state["done"]["orders"] or (state.get("order_coverage") and state["order_coverage"][0] <= day <= state["order_coverage"][1])
+        verified = bool(covered and gross >= units)
+        previous = loc["wholesale_daily"].get(day, 0) if loc else 0
+        if verified:
+            # The same wholesale purchase may already have been recognized by order ID.
+            loc["wholesale_daily"][day] = max(units, previous)
+        evidence.append({"warehouse": location, "date": day, "units": units, "source": entry["source"],
+                         "observed_units": gross, "already_classified": previous, "applied": verified})
+    return evidence
+
+
+def _archived_stock(provider, article, nm, wire, day):
+    if not hasattr(wire, "gate_dir"):
+        return None
+    import market_history
+    history = market_history.History(wire.gate_dir)
+    archived = history.verified_days(provider, wire.creds, provider + "_availability", day, day)
+    if day not in archived:
+        return None
+    stamp, records = archived[day]
+    # A missing seller code could conceal another position of this product.
+    if any(not r.get("article") and (provider == "ozon" or nm is None or r.get("nm_id") is None
+                                     or str(r["nm_id"]) == str(nm)) for r in records):
+        return None
+    selected = [r for r in records if r.get("article") == article and
+                (provider == "ozon" or nm is None or str(r.get("nm_id")) == str(nm))]
+    if not selected:
+        return None
+    return result(selected, stock_source="verified_daily_availability", stock_observed_at=stamp)
+
+
+def _reuse_completed_orders(state, wire, key):
+    if state["done"]["orders"] or state["orders"] or not hasattr(wire, "progress_snapshot"):
+        return
+    prior = wire.progress_snapshot("supply-plan-v2", key)
+    if not prior or not prior["done"]["orders"] or prior.get("issues"):
+        return
+    state["orders"] = copy.deepcopy(prior["orders"])
+    for name in ("seller_warehouse_orders", "order_groups"):
+        if name in prior:
+            state[name] = copy.deepcopy(prior[name])
+    for ident, previous in prior["locations"].items():
+        if not previous.get("daily"):
+            continue
+        loc = state["locations"].setdefault(ident, {
+            "warehouse": previous.get("warehouse"), "warehouse_id": previous.get("warehouse_id"),
+            "cluster_id": None, "cluster": None, "stock": {},
+        })
+        for field in ("daily","days_with_cancellations","unknown_cancellation_days"):
+            loc[field] = copy.deepcopy(previous.get(field, {}))
+    state["done"]["orders"] = True
+    state["orders_source"] = "previous_complete_snapshot_same_account_article_and_day"
+
+
 def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
     since = (as_of - timedelta(days=89)).isoformat()
     key = [provider, article, nm, as_of.isoformat()]
@@ -369,6 +450,7 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
         }
         state["issues"] = set(state["issues"])
         state["orders_preliminary"] = provider == "wb"
+        _reuse_completed_orders(state, wire, key)
 
         def checkpoint():
             save(
@@ -395,7 +477,12 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
                 if section == "stock" and state["stock_task_id"]:
                     args["task_id"] = state["stock_task_id"]
                 try:
-                    if provider == "ozon":
+                    snapshot = None
+                    if section == "stock" and cursor is None:
+                        snapshot = _archived_stock(provider, article, nm, wire, (as_of + timedelta(days=1)).isoformat())
+                    if snapshot is not None:
+                        page = snapshot
+                    elif provider == "ozon":
                         page = ozon_expansion.read(
                             "ozon_stocks_by_cluster" if section == "stock" else "ozon_fbo_postings_geo",
                             args,
@@ -430,6 +517,9 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
                     break
                 if page.get("task_id"):
                     state["stock_task_id"] = page["task_id"]
+                if section == "stock" and page.get("complete"):
+                    state["stock_source"] = page.get("stock_source", "marketplace_report")
+                    state["stock_observed_at"] = page.get("stock_observed_at") or page.get("observed_at")
                 if page.get("status") in ("pending", "report_unavailable", "outside_provider_retention"):
                     pending.append(
                         {
@@ -478,11 +568,13 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
                     checkpoint()
                     break
                 checkpoint()
+        wholesale_evidence = []
         if planning is not None:
             state["planning"]=planning
             for loc in state["locations"].values():
                 loc.update(wholesale_daily={},known_stock_days=[],stockout_days=[])
             _wholesale(state, planning)
+            wholesale_evidence = _seller_wholesale(wire, state, provider, article, since, as_of.isoformat())
             if hasattr(wire,"gate_dir"):
                 import market_history
                 records=market_history.History(wire.gate_dir).verified_days(provider,wire.creds,provider+"_availability",since,as_of.isoformat())
@@ -520,6 +612,10 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
         clusters = _clusters(state, horizon, as_of, unmapped) if provider == "ozon" else []
         destinations = clusters if provider == "ozon" else locations
         missing_total_stock = [k for k in missing_stock if not (state.get("anonymous_wb_demand") and k == "Склад WB")]
+        if state.get("stock_source") == "verified_daily_availability":
+            # The collector only publishes an exhausted account-wide inventory. All its rows
+            # contribute to the seller total even when some order warehouses have no stock row.
+            missing_total_stock = []
         total = _market_total(state, horizon, as_of, missing_total_stock)
         if provider=="wb" and planning is not None and hasattr(wire,"deadline") and state["done"]["stock"]:
             import supply_history
@@ -564,12 +660,28 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
         total["ship_without_transfers_if_inbound_arrives"] = shipment_total(
             "recommendation_if_inbound_arrives"
         )
+        all_wb_orders = None
+        if provider == "wb" and nm and not state["done"]["orders"] and hasattr(wire, "deadline"):
+            from market_composites import observed
+            wide = observed(lambda: wb_expansion._funnel(
+                {"article": article, "nm_id": nm, "date_from": since, "date_to": as_of.isoformat(), "limit": 100}, wire))
+            rows = wide.get("items", [])
+            count = rows[0].get("order_count") if wide.get("complete") and len(rows) == 1 else None
+            all_wb_orders = {"ordered_units": count if type(count) is int and count >= 0 else None,
+                             "period_from": since, "period_to": as_of.isoformat(), "fulfillment": "all",
+                             "source": "/api/analytics/v3/sales-funnel/products",
+                             "status": wide.get("status", "reported" if count is not None else "unknown"),
+                             "retry_after_seconds": wide.get("retry_after_seconds")}
         return {
             "marketplace": provider,
             "article": article,
             "complete": complete,
             "source_complete": state["done"],
+            "stock_source": state.get("stock_source"), "stock_observed_at": state.get("stock_observed_at"),
             "orders_coverage": state.get("order_coverage") or ([since, as_of.isoformat()] if state["done"]["orders"] else None),
+            "orders_source": state.get("orders_source", "marketplace_report"),
+            **({"all_wb_orders_90_days": all_wb_orders} if all_wb_orders is not None else {}),
+            "seller_wholesale_observations": wholesale_evidence,
             "warehouse_demand_attribution": "marketplace_only" if state.get("anonymous_wb_demand") else "reported_warehouses",
             "issues": sorted(
                 state["issues"]

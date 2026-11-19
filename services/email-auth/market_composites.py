@@ -217,6 +217,7 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
     sources = {}
     if "wb" in wires:
         article = mapping["wb_vendor_code"]
+        selector = {"article": article, "nm_id": mapping["wb_nm_id"]}
         history = market_history.History(wires["wb"].gate_dir)
         days = history.verified_days(
             "wb", wires["wb"].creds, "wb_finance_report", period["date_from"], period["date_to"]
@@ -224,12 +225,13 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
         if len(days) == (end - start).days + 1:
             data = result(
                 wb_expansion.finance_summary(
-                    [r for _, records in days.values() for r in records if r.get("article") == article]
+                    [r for _, records in days.values() for r in records
+                     if r.get("article") == article and str(r.get("nm_id")) == str(selector["nm_id"])]
                 ),
                 status="archived",
             )
         else:
-            data = observed(lambda: wb_finance(dict(period, article=article, limit=100), wires["wb"]))
+            data = observed(lambda: wb_finance(dict(period, **selector, limit=100), wires["wb"]))
         sources["wb"] = {
             k: data.get(k)
             for k in (
@@ -370,6 +372,9 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
             ads_status=ad.get("status"),
             accrual_status=accrual.get("status"),
         )
+        if units is None and data.get("status") in ("retry_time_unknown","cooldown","provider_access_denied","source_unavailable"):
+            sources["ozon"]["delivered_postings"] = observed(
+                lambda: ozon_expansion.delivered_economics(period, article, wires["ozon"]))
     return result(
         items,
         complete=False,
