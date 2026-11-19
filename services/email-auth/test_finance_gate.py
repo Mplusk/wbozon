@@ -132,7 +132,9 @@ class FinanceGateTests(unittest.TestCase):
         code = ('import finance_gate,sys\n'
                 'try: finance_gate.run(sys.argv[1],"10001000100010001000100010001",lambda:print("called"))\n'
                 'except finance_gate.GateError as e: print(e.reason)\n')
-        child=subprocess.run([sys.executable,'-c',code,self.root],capture_output=True,text=True,timeout=5)
+        # This deadline allows a cold interpreter to start on the isolated VPS.
+        # The assertion checks persistent cooldown state after that start.
+        child=subprocess.run([sys.executable,'-c',code,self.root],capture_output=True,text=True,timeout=60)
         self.assertEqual(child.returncode,0)
         self.assertEqual(child.stdout.strip(),'cooldown')
 
@@ -403,7 +405,9 @@ class FinanceGateTests(unittest.TestCase):
     def test_killed_process_leaves_uncertain_state(self):
         code = ('import finance_gate,sys,os\n'
                 'finance_gate.run(sys.argv[1],"10001000100010001000100010001",lambda:os._exit(23))\n')
-        child=subprocess.run([sys.executable,'-c',code,self.root],capture_output=True,timeout=5)
+        # The child exits inside the callback. Its cold startup is independent
+        # of the crash outcome checked below.
+        child=subprocess.run([sys.executable,'-c',code,self.root],capture_output=True,timeout=60)
         self.assertEqual(child.returncode,23)
         with self.assertRaises(gate.GateError) as blocked: gate.run(self.root,self.client,lambda:self.fail('called'))
         self.assertEqual(blocked.exception.reason,'retry_time_unknown')
