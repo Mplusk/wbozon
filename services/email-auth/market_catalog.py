@@ -131,7 +131,7 @@ def _check(value, schema, definitions, depth=0):
     types = {'array':list,'object':dict,'boolean':bool,'integer':int,'number':(int,float),'string':str,'null':type(None)}
     if kind and (not isinstance(value,types[kind]) or (kind in ('number','integer') and type(value) is bool)):
         raise ValueError('Input type mismatch')
-    if 'enum' in schema and value not in schema['enum']:
+    if schema.get('enum') is not None and value not in schema['enum']:
         raise ValueError('Unexpected enum value')
     if isinstance(value,dict):
         fields = schema.get('properties',{})
@@ -333,11 +333,19 @@ def build_request(row, inputs, credentials):
     return urllib.request.Request(url,data=data,method=row['method'],headers=headers)
 
 
-def transfer(tool, arguments, creds, directory, deadline):
+def transfer(tool, arguments, creds, directory, deadline, *, csv_download=False):
     validate(tool,arguments)
     row = find_route(arguments['operation_id'])
+    if csv_download and (tool != 'market_api_read' or row['operation_id'] != 'wb_get_api_nm_report_downloads_file_downloadid'):
+        raise ValueError('Unexpected report download')
     request = build_request(row,arguments['input'],creds)
     wire = market_transport.Wire(row['market'],creds,directory,deadline)
+    if csv_download:
+        cache_key = wire._key('GET', request.full_url, None, None)
+        cached = wire._http_cache(cache_key, binary=True)
+        if cached is not None:
+            observed = wire.fetch_times[-1]
+            return cached, datetime.fromtimestamp(observed,timezone.utc).isoformat() if observed else None
     token=creds.get('digital_token') or creds.get('api_token') or creds.get('api_key')
     interval=row.get('interval_seconds',{})
     saved_jobs=('/api/v1/warehouse_remains','/api/v1/paid_storage','/api/v1/acceptance_report')
@@ -383,7 +391,8 @@ def transfer(tool, arguments, creds, directory, deadline):
         status = response.status
         media = response.headers.get_content_type()
         content_range=response.headers.get('Content-Range','')
-        raw = response.read(MAX_BYTES+1)
+        budget = market_transport.MAX_REPORT if csv_download else MAX_BYTES
+        raw = response.read(budget+1)
     result = {'operation_id':row['operation_id'],'http_status':status,'fetched_at':datetime.now(timezone.utc).isoformat()}
     if (row['host']==DIGITAL_HOST and row['path']=='/api/v1/content/download/{uri}'
             and re.fullmatch(r'bytes [0-9]{1,19}-[0-9]{1,19}/(?:[0-9]{1,19}|\*)',content_range)):
@@ -392,12 +401,17 @@ def transfer(tool, arguments, creds, directory, deadline):
     # write response. It can be asynchronous; acceptance is not fulfilment.
     if tool=='market_api_propose':
         result.update(provider_acknowledged=True,operation_status='unknown')
-    if len(raw)>MAX_BYTES:
+    if len(raw)>budget:
         if tool=='market_api_propose':
             return dict(result,response_truncated=True)
         raise finance_gate.ProviderResponseTooLarge('Use smaller page or period')
     if raw and token and token.encode() in raw:
         raise finance_gate.ProviderResponseInvalid('Unsafe marketplace response')
+    if csv_download:
+        if status != 200 or media not in ('application/zip','application/octet-stream','text/csv'):
+            raise finance_gate.ProviderResponseInvalid('Unexpected CSV response')
+        wire.store(cache_key, raw, 900, fetched=time.time())
+        return raw,result['fetched_at']
     if not raw:
         result['data'] = None
     elif media=='application/json' or media.endswith('+json') or raw.lstrip().startswith((b'{',b'[')):

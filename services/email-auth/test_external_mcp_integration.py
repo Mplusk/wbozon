@@ -47,6 +47,14 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
         result['body']=b''.join(self.app(env,start)).decode()
         return result
 
+    def test_authenticated_seller_read_queries_are_not_rate_limited_at_thirty(self):
+        _,token=self.app.external_keys.create("Read reports",secrets.token_urlsafe(16),self.app.login.clock(),"marketplaces")
+        query={"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"ozon_fbo_reports","arguments":{"report":"macroclusters"}}}
+        for _ in range(35):
+            response=json.loads(self.mcp(query, token)['body'])['result']
+            self.assertEqual(json.loads(response['content'][0]['text'])['status'],'schema')
+
     def test_session_origin_and_csrf_are_required(self):
         form=self.creation_form()
         for kwargs in ({'cookie':False},{'origin':False},

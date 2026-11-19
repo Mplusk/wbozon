@@ -177,7 +177,8 @@ class Recovery(unittest.TestCase):
         import portal
         from unittest.mock import Mock
         app = object.__new__(portal.Portal)
-        app.vault,app.gateway,app.finance_gate_dir = object(),object(),"/fixture"
+        app.vault,app.gateway,app.finance_gate_dir = Mock(),object(),"/fixture"
+        app.vault.read.return_value = None
         app._observe = Mock()
         args={"tool_name":"wb_orders","probe_arguments":{"date_from":"2026-10-01","date_to":"2026-10-02"}}
         with patch.object(expansion_gateway,"credentials",return_value={"api_token":"fixture"}), \

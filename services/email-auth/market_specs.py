@@ -25,6 +25,7 @@ ID = {
 }
 TEXT = {"type": "string", "minLength": 1, "maxLength": 256}
 DATE = {"type": "string", "format": "date"}
+DOWNLOAD_ID = {"type": "string", "pattern": r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$", "maxLength": 36}
 OFFSET = integer(0, 10000000)
 FIELDS = {
     "article": TEXT,
@@ -49,6 +50,8 @@ FIELDS = {
     "states": array(TEXT, 12),
     "report_scope": choices("unanswered", "answered", "archive"),
     "task_id": TEXT,
+    "download_id": DOWNLOAD_ID,
+    "wb_stock_history_id": DOWNLOAD_ID,
     "campaign_ids": array(ID, 50),
     "include_funnel": {"type": "boolean"},
     "include_order_share": {"type": "boolean"},
@@ -73,6 +76,7 @@ FIELDS = {
     "search_limit": choices("openCard", "addToCart", "openToCart", "orders", "cartToOrder"),
     "tool_name": {"type":"string", "maxLength":80},
     "probe_arguments":{"type":"object","additionalProperties":True},
+    "refresh_capabilities": {"type":"boolean"},
     "archive": {"type":"boolean"},
     "mapping": {
         "type": "object",
@@ -166,8 +170,8 @@ TOOLS = {
     ),
     "ozon_clusters": ("Кластеры Ozon. По умолчанию показывает количество складов. Для списка складов укажите cluster_id и mode=details.", "cluster_type cluster_id offset limit", ""),
     "wb_funnel": (
-        "Переходы, корзины, заказы и конверсии WB. group_by=week выдаёт одну календарную неделю в пределах периода. Для продолжения передайте next_cursor в cursor.",
-        "date_from date_to article nm_id nm_ids group_by limit offset cursor",
+        "Воронка WB по дням или календарным неделям. Для продолжения передайте next_cursor в cursor. Длинный период доступен по дням через агрегаты WB. Готовый CSV DETAIL_HISTORY_REPORT можно прочитать по download_id и group_by=day.",
+        "date_from date_to article nm_id nm_ids group_by limit offset cursor download_id",
         "date_from date_to",
     ),
     "wb_ads": (
@@ -193,13 +197,13 @@ TOOLS = {
     "ozon_rating": ("Текущие группы рейтингов продавца Ozon и индекс локализации по датам.", "", ""),
     "supply_plan": (
         "План по складам и кластерам с учётом срока доставки и страхового запаса. Отправления одного заказа Ozon объединяются по номеру. min_batch_units — минимальная партия в штуках, по умолчанию 2. Для поставок по одной штуке укажите 1.",
-        "article horizon_days mapping lead_time_days safety_stock_percent bulk_order_min_units min_batch_units",
+        "article horizon_days mapping lead_time_days safety_stock_percent bulk_order_min_units min_batch_units wb_stock_history_id",
         "article horizon_days",
     ),
     "article_map": ("Точные артикулы и все найденные SKU Ozon и nmID WB по артикулу, названию или настроенной паре. Неоднозначные совпадения показаны отдельно.", "article mapping", "article"),
     "unit_economics": ("Расчёт по артикулу за месяц. net_after_expenses показывает сумму после расходов до себестоимости и сумму на проданную единицу. Поле unreconciled перечисляет неподтверждённые расходы. Себестоимость вводится с валютой.", "article month cost_per_unit currency mapping", "article month"),
     "sales_drop_check": ("Сопоставить заказы, воронку, наличие, рекламу и отзывы товара за два периода. Различает наблюдения, пробелы и возможные объяснения.", "article date_from date_to previous_from previous_to mapping", "article date_from date_to previous_from previous_to"),
-    "mcp_health": ("Каталог и результаты последних проверок с текущими токенами. Для активной проверки передайте tool_name и probe_arguments с обычными аргументами инструмента.", "tool_name probe_arguments", ""),
+    "mcp_health": ("Проверки с текущими токенами, разрешения Ozon и подписка WB Джем. Для обновления прав передайте refresh_capabilities. Для проверки метода передайте tool_name и probe_arguments.", "tool_name probe_arguments refresh_capabilities", ""),
     "ozon_stocks_analytics": ("Остатки FBO, транзит, среднесуточные продажи и запас в днях по кластерам и складам. С датами показывает историю снимков.", "sku skus cluster_id warehouse_id article date_from date_to offset limit", ""),
     "ozon_turnover": ("Оборачиваемость, среднесуточные продажи и текущий запас товара из отчёта Ozon.", "sku skus article offset limit", ""),
     "ozon_delivery_time": ("Доля локальных продаж по кластерам назначения. Ozon не публикует фактическую длительность доставки покупателю в этом отчёте.", "date_from date_to article sku cluster_id limit offset", "date_from date_to"),
@@ -211,7 +215,15 @@ TOOLS = {
 }
 
 
+import seller_reports
+
+for _group, (_description, _) in seller_reports.GROUPS.items():
+    TOOLS[_group] = (_description + " Укажите report для схемы, добавьте input для чтения.", "", "")
+
+
 def schema(name):
+    if name in seller_reports.GROUPS:
+        return seller_reports.schema(name)
     _, keys, required = TOOLS[name]
     props = {k: FIELDS[k] for k in (*keys.split(), "mode")}
     return props, required.split()
@@ -254,13 +266,19 @@ def _valid(value, spec):
 
 
 def validate(name, args):
+    if name in seller_reports.GROUPS:
+        seller_reports.request(name,args)
+        return
     props, required = schema(name)
     if not isinstance(args, dict) or not set(required) <= args.keys() <= props.keys():
         raise ValueError("Invalid tool arguments")
     if not all(_valid(value, props[k]) for k, value in args.items()):
         raise ValueError("Invalid parameter value")
-    if name == "wb_funnel" and "cursor" in args and (args.get("group_by") != "week" or "offset" in args):
-        raise ValueError("Use a weekly cursor without offset")
+    if name == "wb_funnel":
+        if "cursor" in args and (not args.get("group_by") or "offset" in args):
+            raise ValueError("Use a grouped funnel cursor without offset")
+        if "download_id" in args and (args.get("group_by") != "day" or "article" in args and "nm_id" not in args):
+            raise ValueError("Use a daily detail CSV with nm_id for a seller article")
     if name == "wb_orders" and "group_by" in args:
         if not ("article" in args or "nm_id" in args) or "cursor" in args or args.get("mode") == "details":
             raise ValueError("Grouped orders require a product selector and summary pagination")

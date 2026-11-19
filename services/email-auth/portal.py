@@ -697,7 +697,11 @@ class Portal:
                 if name in market_specs.TOOLS: market_specs.validate(name,probe)
                 elif name in ozon_mcp.OPERATIONS: ozon_mcp.validate_args(name,probe)
                 else: wb_mcp.validate_args(name,probe)
-                account=expansion_gateway.credentials(self.vault,name)
+                if name in market_specs.seller_reports.GROUPS:
+                    route,_=market_specs.seller_reports.request(name,probe)
+                    account=market_catalog.read_credentials(self.vault,route)
+                else:
+                    account=expansion_gateway.credentials(self.vault,name)
                 if account:
                     try:
                         data=self.read_gateway(name,probe,account)
@@ -719,6 +723,8 @@ class Portal:
                     except urllib.error.URLError:
                         detail={'status':'transport_error','http_status':None}
             report=market_health.read(self.vault,self.finance_gate_dir,args,external_mcp.TOOL_NAMES,expansion_gateway.credentials)
+            report["seller_capabilities"]=market_specs.seller_reports.capabilities(self.vault,self.finance_gate_dir,
+                    args.get("refresh_capabilities",False),self.read_gateway)
             if detail: report['probe']=detail
             return report
         try:
@@ -814,7 +820,7 @@ class Portal:
             def execute(key_id,operation,args):
                 creds={}
                 try:
-                    if not self.login.permit('external-mcp:'+key_id,30,60) or not self.login.permit('api',30,60):
+                    if operation=='market_api_propose' and not self.login.permit('external-mcp:'+key_id,30,60):
                         raise external_mcp.MCPToolError('rate_limited')
                     if operation=='market_api_search':
                         return market_catalog.search(args)
@@ -824,7 +830,13 @@ class Portal:
                         return market_actions.Store(self).propose(key_id,args)
                     if operation=='market_api_status':
                         return market_actions.Store(self).status(key_id,args['proposal_id'])
-                    creds=(market_catalog.read_credentials(self.vault,market_catalog.routes()[args['operation_id']]) if operation=='market_api_read'
+                    if operation in market_specs.seller_reports.GROUPS:
+                        route, inputs=market_specs.seller_reports.request(operation,args)
+                        if inputs is None:
+                            return market_specs.seller_reports.execute(operation,args,{},self.finance_gate_dir,time.monotonic())
+                        creds=market_catalog.read_credentials(self.vault,route)
+                    else:
+                        creds=(market_catalog.read_credentials(self.vault,market_catalog.routes()[args['operation_id']]) if operation=='market_api_read'
                            else self.vault.read('avito') if operation in avito_mcp.CONTRACTS else
                            expansion_gateway.credentials(self.vault,operation))
                     if not creds and operation!='mcp_health': raise external_mcp.MCPToolError('not_configured')
@@ -832,7 +844,7 @@ class Portal:
                 except market_actions.ActionError as exc:
                     return {'status':'action_unavailable','reason':str(exc)}
                 except urllib.error.HTTPError as exc:
-                    if operation=='market_api_read' and exc.code!=429:
+                    if (operation=='market_api_read' or operation in market_specs.seller_reports.GROUPS) and exc.code!=429:
                         status=exc.code
                         exc.close()
                         return {'status':'provider_error','http_status':status,'reason':{400:'invalid_provider_parameters',
@@ -896,7 +908,7 @@ class Portal:
                 stored_operation = operation if operation in BRIDGE_OPERATIONS else 'unknown'
                 try: self.vault.record_bridge_activity(source,stored_operation,outcome,self.login.clock())
                 except Exception: pass
-            if not self.login.permit('api',30,60):
+            if source!='mcp' and not self.login.permit('api',30,60):
                 # The body has not been validated, so do not trust or record its operation.
                 record_bridge('unknown','rate_limited')
                 return reply({'error':'rate_limited'},'429 Too Many Requests',True)

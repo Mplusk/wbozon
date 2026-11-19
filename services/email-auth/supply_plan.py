@@ -288,6 +288,12 @@ def _market_total(state, horizon, as_of, missing_stock):
         _merge_cancellations(group, location)
         for sku, stock in location["stock"].items():
             group["stock"][warehouse + ":" + sku] = stock
+    availability = state.get("wb_stock_evidence", {})
+    if availability:
+        known = set(group.get("known_stock_days", [])) | set(availability.get("known_days", []))
+        unavailable = set(group.get("stockout_days", [])) | set(availability.get("whole_day_stockouts", []))
+        positive = set(availability.get("positive_closing_stock_days", [])) | {d for d,n in group["daily"].items() if n}
+        group.update(known_stock_days=sorted(known | positive), stockout_days=sorted(unavailable - positive))
     row = _locations(dict(state, locations={"total": group}), horizon, as_of)[0]
     for key in ("warehouse", "warehouse_id", "cluster", "cluster_id"):
         row.pop(key)
@@ -745,6 +751,25 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
                 except (finance_gate.GateError, TimeoutError, urllib.error.URLError, finance_gate.ProviderResponseTooLarge,
                         finance_gate.ProviderResponseInvalid) as exc:
                     pending.append({"source": "sellable_warehouse_inventory", "status": getattr(exc, "reason", "unavailable")})
+        if provider=="wb" and planning is not None and nm is not None and hasattr(wire,"creds") and hasattr(wire,"gate_dir"):
+            import seller_reports
+            from market_composites import observed
+            evidence = observed(lambda:seller_reports.availability_days(article,nm,since,as_of.isoformat(),wire))
+            if download_id := planning.get("wb_stock_history_id"):
+                archive = observed(lambda:seller_reports.stock_csv(download_id,article,nm,since,as_of.isoformat(),wire))
+                positive = set()
+                closing = {}
+                for office, days in archive.pop("offices",{}).items():
+                    available = {day for day, value in days.items() if value is not None and value > 0}
+                    positive.update(available)
+                    if office in state["locations"]:
+                        loc = state["locations"][office]
+                        loc["known_stock_days"] = sorted(set(loc["known_stock_days"]) | available)
+                        loc["stockout_days"] = sorted(set(loc["stockout_days"]) - available)
+                    closing[office] = {"observed_days":sum(v is not None for v in days.values()),
+                                       "zero_at_close_days":[d for d,v in days.items() if v == 0]}
+                evidence.update(closing_stock=dict(archive,warehouses=closing),positive_closing_stock_days=sorted(positive))
+            state["wb_stock_evidence"] = evidence
         locations = _locations(state, horizon, as_of)
         if state.get("inventory_source_rows") is not None:
             for row in locations:
@@ -832,6 +857,7 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
                if "inventory_source_rows" in state else {}),
             "orders_coverage": state.get("order_coverage") or ([since, as_of.isoformat()] if state["done"]["orders"] else None),
             "orders_source": state.get("orders_source", "marketplace_report"),
+            **({"wb_stock_history":state["wb_stock_evidence"]} if "wb_stock_evidence" in state else {}),
             **({"all_wb_orders_90_days": all_wb_orders} if all_wb_orders is not None else {}),
             "seller_wholesale_observations": [e for e in wholesale_evidence if not e["confirmed_automatically"]],
             "automatic_wholesale_orders": automatic_wholesale[:50],
@@ -899,7 +925,8 @@ def read(args, wires, mapping):
             report = _platform(
                 provider, mapping[field], mapping.get("wb_nm_id"), wires[provider], horizon, as_of,
                 dict({k:args.get(k,v) for k,v in (("lead_time_days",0),("safety_stock_percent",0),("bulk_order_min_units",10))},
-                     bulk_explicit="bulk_order_min_units" in args)
+                     bulk_explicit="bulk_order_min_units" in args,
+                     **({"wb_stock_history_id":args["wb_stock_history_id"]} if provider=="wb" and "wb_stock_history_id" in args else {}))
             )
         except finance_gate.GateError as exc:
             report = {"marketplace": provider, "complete": False, "status": exc.reason}

@@ -83,40 +83,34 @@ def _ids(args):
 
 
 def funnel_history(args, request):
-    if args["group_by"] == "week":
-        start, end = date.fromisoformat(args["date_from"]), date.fromisoformat(args["date_to"])
-        week_start, offset = start, args.get("offset", 0)
+    if "download_id" in args:
+        from seller_reports import funnel_csv
+        return funnel_csv(args, request)
+    start, end = date.fromisoformat(args["date_from"]), date.fromisoformat(args["date_to"])
+    weekly = args["group_by"] == "week"
+    ids = _ids(args)
+    if weekly or start < datetime.now(MOSCOW).date() - timedelta(days=6) or "cursor" in args or not 1 <= len(ids) <= 20:
+        first, offset = start, args.get("offset", 0)
         if args.get("cursor"):
-            date_text, sep, page = args["cursor"].partition("|")
-            week_start = date.fromisoformat(date_text)
+            date_text, sep, page = str(args["cursor"]).partition("|")
+            first = date.fromisoformat(date_text)
             if (not sep or not page.isascii() or not page.isdecimal() or len(page) > 8
-                    or not start <= week_start <= end or (week_start != start and week_start.weekday() != 0)):
-                raise ValueError("Invalid weekly funnel cursor")
+                    or not start <= first <= end or (weekly and first != start and first.weekday() != 0)):
+                raise ValueError("Invalid funnel cursor")
             offset = int(page)
-        week_end = min(end, week_start + timedelta(days=6-week_start.weekday()))
+        last = min(end, first + timedelta(days=6-first.weekday())) if weekly else first
         query = {k: v for k, v in args.items() if k not in ("group_by", "cursor")}
-        query.update(date_from=week_start.isoformat(), date_to=week_end.isoformat(), offset=offset)
+        query.update(date_from=first.isoformat(), date_to=last.isoformat(), offset=offset)
         page = wb._funnel(query, request)
         next_product = page["next_cursor"]
         if not page["complete"] and next_product is None:
             return page
-        next_week = week_end + timedelta(days=1)
-        cursor = (f"{week_start}|{next_product}" if next_product is not None
-                  else f"{next_week}|0" if next_week <= end else None)
-        return result([dict(row, week_from=week_start.isoformat(), week_to=week_end.isoformat())
-                       for row in page["items"]], cursor, aggregation="week", date_basis="order_date_moscow",
+        following = last + timedelta(days=1)
+        cursor = (f"{first}|{next_product}" if next_product is not None
+                  else f"{following}|0" if following <= end else None)
+        dates = {"week_from": first.isoformat(), "week_to": last.isoformat()} if weekly else {"date": first.isoformat()}
+        return result([dict(row, **dates) for row in page["items"]], cursor, aggregation=args["group_by"], date_basis="order_date_moscow",
                       source="/api/analytics/v3/sales-funnel/products", cursor_parameter="cursor")
-    ids = _ids(args)
-    if not 1 <= len(ids) <= 20:
-        return result([], complete=False, status="select_1_to_20_products")
-    if date.fromisoformat(args["date_from"]) < datetime.now(MOSCOW).date() - timedelta(days=6):
-        return result(
-            [],
-            complete=False,
-            status="outside_funnel_history_window",
-            retention_days=7,
-            alternative="wb_funnel без group_by возвращает агрегат за выбранный период",
-        )
     path = "/api/analytics/v3/sales-funnel/products/history"
     data = request(
         "POST",

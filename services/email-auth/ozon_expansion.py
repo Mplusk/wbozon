@@ -804,6 +804,7 @@ def read(name, args, request):
                  and (not skus or str(row.get("sku")) in set(map(str,skus)))]
         return result(items, offset+limit if len(page)==limit else None, source=path)
     if name == "ozon_delivery_time":
+        retirement = "https://dev.ozon.ru/news/698-Otkliuchenie-metodov-funktsionala-Srednee-vremia-dostavki-v-Seller-API/"
         skus = _report_skus(args, request)
         if "article" in args and not skus:
             return result([], complete=False, issues=["article_identity_unavailable"])
@@ -824,7 +825,7 @@ def read(name, args, request):
                                 total_units=metrics.get("total_quantity"), locality_index=metrics.get("index"),
                                 average_delivery_hours=None)], complete=False, source=path, scope="account_total",
                           issues=["article_sku_or_cluster_required_for_breakdown"],
-                          time_coverage="actual_delivery_duration_unavailable_in_current_seller_schema")
+                          time_coverage="actual_delivery_duration_unavailable_in_current_seller_schema", provider_notice=retirement)
         limit, offset = args.get("limit",100), args.get("offset",0)
         raw = request("POST", BASE+path,body={"filter":filters,"limit":limit,"offset":offset,
                       "sort_by":"LOCALITY","sort_dir":"DESC"},ttl=1800)
@@ -848,7 +849,8 @@ def read(name, args, request):
         if type(total) is not int or total < 0:
             raise ValueError("Invalid Ozon locality total")
         return result(items,offset+len(page) if page and offset+len(page)<total else None,
-                      complete=offset+len(page)>=total,source=path, time_coverage="actual_delivery_duration_unavailable_in_current_seller_schema")
+                      complete=offset+len(page)>=total,source=path, time_coverage="actual_delivery_duration_unavailable_in_current_seller_schema",
+                      provider_notice=retirement)
     if name == "ozon_sku_daily":
         return _daily(args, request)
     if name == "ozon_fbo_postings_geo":

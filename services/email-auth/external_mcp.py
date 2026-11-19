@@ -350,7 +350,7 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
                           else {'content':[{'type':'text','text':text}]})
                 if name in market_specs.TOOLS and data.get('status')=='provider_access_denied':
                     result['isError']=True
-                if name in market_catalog.PUBLIC_TOOLS and data.get('status') in ('action_unavailable','provider_error'):
+                if (name in market_catalog.PUBLIC_TOOLS or name in market_specs.seller_reports.GROUPS) and data.get('status') in ('action_unavailable','provider_error'):
                     result['isError']=True
             except MCPToolError as exc:
                 result = _tool_error(exc.code,exc.retry_after_seconds,exc.reason,getattr(exc,'diagnostic',None))

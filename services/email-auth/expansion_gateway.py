@@ -719,6 +719,8 @@ def _summary(name, data):
 
 
 def execute(name, args, creds, directory, deadline):
+    if name in market_specs.seller_reports.GROUPS:
+        return market_specs.seller_reports.execute(name,args,creds,directory,deadline)
     market_specs.validate(name, args)
     with localcontext() as ctx:
         ctx.prec = 128
