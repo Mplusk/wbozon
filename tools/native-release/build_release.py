@@ -114,7 +114,7 @@ def _command(argv, *, cwd=None, timeout=120, stage='candidate preparation'):
         raise BuildError(f'{stage} failed with exit code {result.returncode}')
 
 
-def _sandbox(release, unit, args, cwd, *, runtime_seconds, cpu_weight=20, cpu_quota=150):
+def _sandbox(release, unit, args, cwd, *, runtime_seconds, cpu_weight=20, cpu_quota=150, single_smoke_worker=False):
     properties = ['--property=User=wbozon-test', '--property=Group=wbozon-test', '--property=ProtectProc=invisible',
                   '--property=PrivateNetwork=yes', '--property=PrivateIPC=yes', '--property=PrivateDevices=yes',
                   '--property=ProtectSystem=strict', '--property=ProtectHome=yes', '--property=NoNewPrivileges=yes',
@@ -129,6 +129,8 @@ def _sandbox(release, unit, args, cwd, *, runtime_seconds, cpu_weight=20, cpu_qu
                   '--property=RuntimeMaxSec=' + str(runtime_seconds)]
     clean = ['/usr/bin/env', '-i', 'HOME=/tmp', 'PATH=/usr/bin:/bin', 'LC_ALL=C.UTF-8',
              'PYTHONDONTWRITEBYTECODE=1']
+    if single_smoke_worker:
+        clean.append('GUNICORN_CMD_ARGS=--workers=1')
     _command(['/usr/bin/systemd-run', '--quiet', '--wait', '--pipe', '--collect', '--unit=' + unit,
               '--working-directory=' + str(cwd), *properties, *clean, *args], timeout=runtime_seconds + 30,
              stage='isolated test unit ' + unit)
@@ -194,7 +196,7 @@ def prepare(files, release, work, *, run_id, attempt, release_gid):
     _sandbox(release, prefix + '-unit', [str(python), '-m', 'unittest', '-q', *tests], release / 'service',
              runtime_seconds=720, **resources)
     _sandbox(release, prefix + '-smoke', [str(python), str(release / 'test_native.py')], '/tmp',
-             runtime_seconds=300, **resources)
+             runtime_seconds=300, single_smoke_worker=bool(tests), **resources)
     if inventory(release) != before:
         raise BuildError('candidate changed during isolated tests')
     for path in [release, *release.rglob('*')]:

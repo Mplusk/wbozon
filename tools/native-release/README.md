@@ -14,8 +14,10 @@ wheels. The builder runs the full unit suite in the packaged Linux environment.
 The host installs that same wheelhouse offline and checks catalogue permissions,
 owner approval, OAuth revocation, cross-process cooldowns and worker cancellation
 inside the installed environment. A separate Gunicorn smoke test covers startup,
-session authentication, CSRF, encrypted storage and shutdown. Both host checks
-run as wbozon-test with private networking and bounded tmpfs.
+session authentication, CSRF, encrypted storage and shutdown. On the VPS this
+synthetic portal uses one worker within its CPU quota. CI tests the packaged
+two-worker configuration, and production readiness verifies both serving workers.
+Both host checks run as wbozon-test with private networking and bounded tmpfs.
 The controller and its trust policy are installed separately by the administrator.
 
 Before stopping the portal, the controller fences new connections on its two

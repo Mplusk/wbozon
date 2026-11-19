@@ -35,7 +35,7 @@ def dispatch():
     unit = 'wbozon-deploy-' + run + '-' + attempt + '.service'
     try:
         result = subprocess.run(['/usr/bin/systemd-run', '--quiet', '--wait', '--collect', '--unit=' + unit,
-            '--property=OnFailure=wbozon-cd-recover.service', '--property=RuntimeMaxSec=25min',
+            '--property=OnFailure=wbozon-cd-recover.service', '--property=RuntimeMaxSec=40min',
             '--property=UMask=0077', '--property=LimitCORE=0', '--property=TasksMax=128',
             '/usr/bin/python3', '-I', CONTROLLER, 'deploy', name], check=False)
         print('Deployment succeeded.' if result.returncode == 0 else 'Deployment failed. Check the deployment unit journal.')

@@ -22,7 +22,8 @@ class BuildInputTests(unittest.TestCase):
     def test_client_waits_for_the_bounded_isolated_test_unit(self):
         release = Path('/opt/test-release')
         collected = Mock(returncode=0, stdout='not-found\n')
-        for seconds, resources in ((300, {}), (720, {}), (300, {'cpu_weight': 200, 'cpu_quota': 75})):
+        for seconds, resources in ((300, {}), (720, {}), (720, {'cpu_weight': 200, 'cpu_quota': 75}),
+                                  (300, {'cpu_weight': 200, 'cpu_quota': 75, 'single_smoke_worker': True})):
             with self.subTest(seconds=seconds, resources=resources), patch.object(build_release, '_command') as run, \
                     patch.object(build_release.subprocess, 'run', return_value=collected):
                 build_release._sandbox(release, 'wbozon-test', ['python', '-m', 'unittest'], release,
@@ -32,6 +33,7 @@ class BuildInputTests(unittest.TestCase):
                 self.assertIn('--property=PrivateNetwork=yes', args)
                 self.assertIn(f"--property=CPUWeight={resources.get('cpu_weight', 20)}", args)
                 self.assertIn(f"--property=CPUQuota={resources.get('cpu_quota', 150)}%", args)
+                self.assertEqual('GUNICORN_CMD_ARGS=--workers=1' in args, resources.get('single_smoke_worker', False))
                 self.assertGreater(run.call_args.kwargs['timeout'], seconds)
 
     def test_builder_reports_the_stage_of_a_timeout(self):
