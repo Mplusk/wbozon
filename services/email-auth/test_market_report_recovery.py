@@ -509,6 +509,20 @@ class Recovery(unittest.TestCase):
                           for p in (first,last)], [("2026-09-09","2026-09-13",3),("2026-09-14","2026-09-18",3)])
         self.assertTrue(last["complete"])
 
+    def test_financial_checkpoint_uses_only_the_key_that_fetched_the_rows(self):
+        base=ResumeWire()
+        base.creds,base.gate_dir,base.fetch_times={"api_token":"base"},"/fixture",[]
+        sources={token:ResumeWire() for token in ("A","B")}
+        args=dict(article="same",nm_id=2,date_from="2026-10-01",date_to="2026-10-02")
+        with patch.object(expansion_gateway,"Wire",side_effect=lambda p,c,*_:sources[c["api_token"]]), \
+             patch.object(wb_expansion,"_finance",return_value={"items":[],"complete":True,"next_cursor":None}) as fetch:
+            for token in ("A","B","A"):
+                base.category_keys={"wb_finance":{"api_token":token}}
+                self.assertTrue(expansion_gateway._finance_period(args,base)["complete"])
+            self.assertEqual(fetch.call_count,2)
+            self.assertEqual([call.args[1] for call in fetch.call_args_list],[sources["A"],sources["B"]])
+            self.assertFalse(base.records)
+
     def test_by_id_finance_requires_end_marker_and_complete_date_coverage(self):
         wire = ResumeWire()
         wire.creds, wire.gate_dir = {}, "/fixture"

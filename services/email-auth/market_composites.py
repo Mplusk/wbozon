@@ -243,8 +243,9 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
         article = mapping["wb_vendor_code"]
         selector = {"article": article, "nm_id": mapping["wb_nm_id"]}
         history = market_history.History(wires["wb"].gate_dir)
+        finance_creds = getattr(wires["wb"], "category_keys", {}).get("wb_finance", wires["wb"].creds)
         days = history.verified_days(
-            "wb", wires["wb"].creds, "wb_finance_report", period["date_from"], period["date_to"]
+            "wb", finance_creds, "wb_finance_report", period["date_from"], period["date_to"]
         )
         if len(days) == (end - start).days + 1:
             archived = [r for _, records in days.values() for r in records]
@@ -594,7 +595,9 @@ def verified_comparison(args, wires, seller_mapping, identity_report):
                 unavailable.pop("ozon")
                 break
     if not verified_wires:
-        return identity_report
+        return result([], complete=False, status="unverified_mapping", unavailable_marketplaces=unavailable,
+                      catalog_matches=identity_report["items"], basis="calendar_period_order_analytics",
+                      causal_diagnosis={"observations": [], "status": "insufficient_comparable_data"})
     data = comparison(args, verified_wires, verified_ids)
     if unavailable:
         data.update(complete=False, status="partial_catalog_identity", unavailable_marketplaces=unavailable)

@@ -162,7 +162,10 @@ class Reports(unittest.TestCase):
                              {"ozon": {"status": "retry_time_unknown", "http_status": 429, "retry_after_seconds": None}})
             compare.reset_mock()
             unresolved = identity(failed, wb)
-            self.assertIs(market_composites.verified_comparison(args, wires, None, unresolved), unresolved)
+            empty=market_composites.verified_comparison(args, wires, None, unresolved)
+            self.assertFalse(empty["complete"])
+            self.assertEqual((empty["items"],empty["status"]),([],"unverified_mapping"))
+            self.assertEqual(empty["catalog_matches"],unresolved["items"])
             compare.assert_not_called()
 
     def test_retention_both_fields_and_unallocated_account_row(self):

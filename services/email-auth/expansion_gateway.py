@@ -350,11 +350,14 @@ def _finance_by_report(args, wire):
 
 def _finance_period(args, wire):
     """Resume at the last confirmed rrdId; totals only become final after HTTP 204."""
+    finance_creds = getattr(wire, "category_keys", {}).get("wb_finance")
+    if finance_creds and finance_creds != wire.creds:
+        finance_wire = Wire("wb", finance_creds, wire.gate_dir, wire.deadline)
+        finance_wire.fetch_times = wire.fetch_times
+        wire = finance_wire
     snapshot = None
     if hasattr(wire, "progress_snapshot"):
-        creds = getattr(wire, "category_keys", {}).get("wb_finance", wire.creds)
-        source = wire if creds == wire.creds else Wire("wb", creds, wire.gate_dir, wire.deadline)
-        checkpoint = source.progress_snapshot("wb-finance-by-report-v2", _wb_finance_report_key(args))
+        checkpoint = wire.progress_snapshot("wb-finance-by-report-v2", _wb_finance_report_key(args))
         saved = checkpoint.get("last_ready") or {}
         if (saved.get("complete") and saved.get("source") == "wb_financial_reports_by_id" and
                 (saved.get("period_from"), saved.get("period_to")) == (args["date_from"], args["date_to"])):
@@ -364,7 +367,9 @@ def _finance_period(args, wire):
                     time.time() - checkpoint["verified_at"] < (86400 if closed else 1800)):
                 return snapshot
     query = {k: v for k, v in args.items() if k not in ("mode", "cursor")}
-    with wire.progress("wb-finance-v2", query) as (state, save):
+    # A v2 checkpoint can have been created under the general token while the
+    # upstream request used a different financial account. Its owner is unverifiable.
+    with wire.progress("wb-finance-v3", query) as (state, save):
         state = state or {"cursor": 0, "rows": [], "unallocated": 0, "done": False}
         issues = []
         for _ in range(12):
