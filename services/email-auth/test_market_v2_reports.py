@@ -128,6 +128,22 @@ class Reports(unittest.TestCase):
         self.assertTrue(read(sku=17)['complete'])
         self.assertEqual(read(sku=17)['items'], [rows[1]])
 
+    def test_comparison_uses_exact_seller_posting_during_a_catalog_cooldown(self):
+        args={"article":"WB-A","previous_from":"2026-09-01","previous_to":"2026-09-30",
+              "date_from":"2026-10-01","date_to":"2026-10-31"}
+        offer={"ozon_offer_id":"O-A","wb_vendor_code":"WB-A"}
+        wires={"ozon":SimpleNamespace(gate_dir="fixture",creds={}),"wb":object()}
+        identity=market_specs.result([{"ozon":market_specs.result([],complete=False,status="cooldown"),
+                                      "wb":market_specs.result([{"article":"WB-A","nm_id":7}])}],complete=False)
+        with patch.object(market_history,"History") as history, patch.object(market_composites,"comparison",return_value={}) as compare:
+            history.return_value.verified_days.return_value={"2026-09-10":("stamp",[{"article":"O-A","offer_id":"O-A","sku":"19"}])}
+            result=market_composites.verified_comparison(args,wires,offer,identity)
+            self.assertIn("ozon",result["historical_identity_sources"])
+            self.assertEqual(compare.call_args.args[2]["ozon_offer_id"],"O-A")
+            other=dict(offer,ozon_offer_id="other")
+            result=market_composites.verified_comparison(args,wires,other,identity)
+            self.assertIn("ozon",result["unavailable_marketplaces"])
+
     def test_comparison_uses_only_a_verified_exact_marketplace_when_the_other_catalog_fails(self):
         args = {"article": "napkin"}
         wires = {"ozon": object(), "wb": object(), "performance": object()}

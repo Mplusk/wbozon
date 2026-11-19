@@ -178,7 +178,7 @@ TOOLS = {
     ),
     "wb_ads": (
         "Кампании WB, списания и статистика по товару. include_order_share сопоставляет прямые рекламные единицы с заказанными единицами воронки WB.",
-        "date_from date_to campaign_ids article nm_id report limit offset cursor include_order_share",
+        "date_from date_to campaign_ids article nm_id report limit offset cursor task_id include_order_share",
         "date_from date_to",
     ),
     "ozon_ads": (
@@ -209,7 +209,7 @@ TOOLS = {
     "ozon_stocks_analytics": ("Остатки FBO, транзит, среднесуточные продажи и запас в днях по кластерам и складам. С датами показывает историю снимков.", "sku skus cluster_id warehouse_id article date_from date_to offset limit", ""),
     "ozon_turnover": ("Оборачиваемость, среднесуточные продажи и текущий запас товара из отчёта Ozon.", "sku skus article offset limit", ""),
     "ozon_delivery_time": ("Доля локальных продаж по кластерам назначения. Ozon не публикует фактическую длительность доставки покупателю в этом отчёте.", "date_from date_to article sku cluster_id limit offset", "date_from date_to"),
-    "wb_retentions": ("Отчёты WB об удержаниях, причины и суммы по указанному виду; при доступности источника возвращает артикул.", "date_from date_to article nm_id retention_type limit offset cursor", "date_from date_to"),
+    "wb_retentions": ("Отчёты WB об удержаниях, причины и суммы по указанному виду; при доступности источника возвращает артикул.", "date_from date_to article nm_id retention_type limit offset cursor task_id", "date_from date_to"),
     "wb_region_sales": ("Заказы по регионам назначения и текущим статусам из ленты WB за последние 31 день.", "date_from date_to article nm_id limit offset snapshot_time", "date_from date_to"),
     "wb_returns_report": ("Возвраты товаров продавцу, даты и состояние по артикулу.", "date_from date_to article nm_id return_status limit offset", "date_from date_to"),
     "wb_ads_finance": ("Списания, пополнения и документы рекламы WB. Кампании и документы не распределяются автоматически между артикулами.", "date_from date_to campaign_ids document limit offset", "date_from date_to"),

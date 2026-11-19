@@ -576,10 +576,30 @@ def verified_comparison(args, wires, seller_mapping, identity_report):
     if identity_report["complete"]:
         return comparison(args, wires, identity_report["mapping"])
     verified_wires, verified_ids, unavailable = verified_accounts(args, wires, seller_mapping, identity_report)
+    anchor = None
+    issue = unavailable.get("ozon", {})
+    retryable = (issue.get("status") in ("busy", "cooldown", "retry_time_unknown", "source_unavailable", "pending")
+                 or issue.get("http_status") in (429, 500, 502, 503, 504))
+    ozon = wires.get("ozon")
+    if retryable and seller_mapping and "mapping" not in args and getattr(ozon, "gate_dir", None):
+        offer = seller_mapping.get("ozon_offer_id")
+        archive = market_history.History(ozon.gate_dir)
+        for first, last in (("previous_from", "previous_to"), ("date_from", "date_to")):
+            days = archive.verified_days("ozon", ozon.creds, "ozon_posting_sku_daily", args[first], args[last])
+            if offer and any(r.get("article") == r.get("offer_id") == offer and r.get("sku")
+                             for _, records in days.values() for r in records):
+                anchor = "seller_mapping_and_authenticated_posting_article_offer_id_sku"
+                verified_wires["ozon"], verified_ids["ozon_offer_id"] = ozon, offer
+                if "performance" in wires:verified_wires["performance"] = wires["performance"]
+                unavailable.pop("ozon")
+                break
     if not verified_wires:
         return identity_report
     data = comparison(args, verified_wires, verified_ids)
-    data.update(complete=False, status="partial_catalog_identity", unavailable_marketplaces=unavailable)
+    if unavailable:
+        data.update(complete=False, status="partial_catalog_identity", unavailable_marketplaces=unavailable)
+    if anchor:
+        data["historical_identity_sources"] = {"ozon": anchor}
     return data
 
 

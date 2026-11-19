@@ -101,14 +101,15 @@ def _inventory(r):
 def _tariffs(r):
     kind=r.args.get("kind","return");day=r.args.get("date",r.first.isoformat())
     office=r.args.get("warehouse")
+    transit=r.fetch("wb_tariff_reports","transit",ttl=86400) if kind=="transit" else None
     if not office and r.args.get("warehouse_id"):
         from wb_expansion import _warehouse_directory
         directory=_warehouse_directory({"include_warehouses":True,"warehouse_id":r.args["warehouse_id"]},r.wire,{})
         names={str(w["warehouse_id"]):w["name"] for w in directory.get("warehouses",[]) if w.get("name")}
         office=names.get(str(r.args["warehouse_id"]))
         if not office:raise SourceIssue(source="warehouse_directory",status="warehouse_name_unavailable",warehouse_id=r.args["warehouse_id"])
-    if kind=="transit":
-        for row in r.fetch("wb_tariff_reports","transit",ttl=86400):
+    if transit is not None:
+        for row in transit:
             if not office or office in (row.get("transitWarehouseName"),row.get("destinationWarehouseName")):
                 yield dict(scope="warehouse",kind=kind,date=row.get("activeFrom"),**row)
         return
@@ -297,7 +298,7 @@ def retentions(r):
             for first,last in periods:
                 if kind=="antifraud":
                     # WB selects a week by a day from that week.
-                    data=r.fetch(FIN,choice,{"query":{"date":first.isoformat()}})
+                    data=r.fetch(FIN,choice,{"query":{"date":first.isoformat()}},86400)
                     records=data.get("details") or []
                 else:
                     params={"dateFrom":first.isoformat()+"T00:00:00Z","dateTo":last.isoformat()+"T23:59:59Z","limit":100,"offset":0}

@@ -125,9 +125,11 @@ class SourceIssue(Exception):
 class Reader:
     def __init__(self,name,args,creds,directory,deadline):
         import expansion_gateway
-        self.name,self.args,self.directory,self.deadline=name,args,directory,deadline
+        self.name,self.args,self.directory=name,args,directory
+        # Leave time to serialize a resumable partial report before its worker is stopped.
+        self.deadline=deadline-min(1.5,max(0,deadline-time.monotonic())/10)
         self.market=name.split("_")[0]
-        self.wire=expansion_gateway.make_wire(self.market,creds,directory,deadline)
+        self.wire=expansion_gateway.make_wire(self.market,creds,directory,self.deadline)
         self.scopes={}
         self.issues=[]
         self.stamps=[]
@@ -146,6 +148,8 @@ class Reader:
     def cached(self,op,inputs,ttl=300):
         import market_catalog
         from market_transport import Wire
+        if time.monotonic()+0.4>=self.deadline:
+            raise SourceIssue(source=op,status="pending",reason="request_deadline")
         row=market_catalog.find_route(op)
         if not row or row["category"]!="read" or row["market"]!=self.market:
             raise ValueError("Unexpected read operation")
@@ -183,6 +187,9 @@ class Reader:
                 if isinstance(raw,dict) and raw.get("error") is True:
                     raise SourceIssue(source=row["path"],status="provider_error",http_status=fetched.get("http_status"))
                 hit={"data":raw,"stamp":fetched.get("fetched_at") or fetched.get("observed_at"),"http":fetched.get("http_status",200)}
+                # A closed month can span several official quota windows during a scan.
+                if ("date_to" in self.args or "month" in self.args) and self.last < datetime.now(timezone.utc).date()-timedelta(days=7):
+                    ttl=max(ttl,86400)
                 save(hit,ttl)
         if hit.get("stamp"):self.stamps.append(hit["stamp"])
         return hit["data"]

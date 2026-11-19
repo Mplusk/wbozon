@@ -151,6 +151,16 @@ class History:
                 db.execute("SELECT day,observed FROM days WHERE scope=? AND dataset=?", (owner, dataset))
             )
 
+    def wb_funnel_product_coverage(self, owner):
+        with self.db() as db:
+            rows = db.execute(
+                "SELECT dataset, COUNT(*), MIN(day), MAX(day) FROM days "
+                "WHERE scope=? AND dataset GLOB 'wb_funnel_nm_[0-9]*' GROUP BY dataset ORDER BY dataset", (owner,)
+            ).fetchall()
+        return [dict(nm_id=int(product), days=count, first_day=first, last_day=last)
+                for dataset, count, first, last in rows
+                if (product := dataset.removeprefix('wb_funnel_nm_')).isascii() and product.isdecimal()]
+
     def record(self, creds, name, status):
         with self.db() as db:
             db.execute(

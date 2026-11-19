@@ -113,13 +113,19 @@ def read(vault, directory, args, names, credentials):
         provider = dataset.split("_")[0]
         main = {k: v for k, v in account.items() if k != "category_keys"}
         owner = market_history.scope(provider, main)
-        coverage = db.coverage(owner, dataset) if db.authorized(main, owner) else {}
+        authorized = db.authorized(main, owner)
+        coverage = db.coverage(owner, dataset) if authorized else {}
+        product_scope = {}
+        if dataset == "wb_funnel_daily" and authorized:
+            products = db.wb_funnel_product_coverage(owner)
+            product_scope = {"product_archive_count": len(products), "product_archives": products[:50]}
         archive.append(
             dict(
                 dataset=dataset,
                 days=len(coverage),
                 first_day=min(coverage, default=None),
                 last_day=max(coverage, default=None),
+                **product_scope,
                 **db.check(account, "archive_" + dataset),
             )
         )

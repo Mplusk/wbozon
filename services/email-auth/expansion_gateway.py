@@ -229,6 +229,10 @@ def _enrich(name, args, data, request):
         data["identity_enrichment"] = "incomplete"
 
 
+def _wb_finance_report_key(args):
+    return [args.get(k) for k in ("article", "nm_id", "sku", "date_from", "date_to")]
+
+
 def _finance_by_report(args, wire):
     import market_catalog
     creds = getattr(wire, "category_keys", {}).get("wb_finance", wire.creds)
@@ -240,7 +244,7 @@ def _finance_by_report(args, wire):
         return market_catalog.transfer("market_api_read", {"operation_id": op, "input": inputs},
                                        creds, src.gate_dir, src.deadline)
 
-    identity = [args.get("article"), args.get("nm_id"), args.get("sku"), start.isoformat(), end.isoformat()]
+    identity = _wb_finance_report_key(args)
     with src.progress("wb-finance-by-report-v2", identity) as (previous, save):
         now = time.time()
         refresh_interval = 86400 if end < datetime.now(market_specs.MOSCOW).date()-timedelta(days=7) else 1800
@@ -346,6 +350,19 @@ def _finance_by_report(args, wire):
 
 def _finance_period(args, wire):
     """Resume at the last confirmed rrdId; totals only become final after HTTP 204."""
+    snapshot = None
+    if hasattr(wire, "progress_snapshot"):
+        creds = getattr(wire, "category_keys", {}).get("wb_finance", wire.creds)
+        source = wire if creds == wire.creds else Wire("wb", creds, wire.gate_dir, wire.deadline)
+        checkpoint = source.progress_snapshot("wb-finance-by-report-v2", _wb_finance_report_key(args))
+        saved = checkpoint.get("last_ready") or {}
+        if (saved.get("complete") and saved.get("source") == "wb_financial_reports_by_id" and
+                (saved.get("period_from"), saved.get("period_to")) == (args["date_from"], args["date_to"])):
+            snapshot = saved
+            closed = date.fromisoformat(args["date_to"]) < datetime.now(market_specs.MOSCOW).date() - timedelta(days=7)
+            if (checkpoint.get("summary_version") == 2 and checkpoint.get("verified_at") and
+                    time.time() - checkpoint["verified_at"] < (86400 if closed else 1800)):
+                return snapshot
     query = {k: v for k, v in args.items() if k not in ("mode", "cursor")}
     with wire.progress("wb-finance-v2", query) as (state, save):
         state = state or {"cursor": 0, "rows": [], "unallocated": 0, "done": False}
@@ -356,12 +373,20 @@ def _finance_period(args, wire):
             try:
                 page = wb_expansion._finance(dict(query, cursor=state["cursor"],limit=5000), wire)
             except finance_gate.GateError as exc:
+                if snapshot and exc.reason in ("busy", "cooldown", "retry_time_unknown"):
+                    return dict(snapshot, refresh_status="pending", refresh_reason=exc.reason,
+                                retry_after_seconds=exc.retry_after_seconds)
                 if exc.reason != "retry_time_unknown":
                     raise
                 return _finance_by_report(args, wire)
             except urllib.error.HTTPError as exc:
                 if exc.code != 429:
                     raise
+                if snapshot:
+                    wait, _ = finance_gate.parse_retry_after(exc.headers)
+                    exc.close()
+                    return dict(snapshot, refresh_status="pending", refresh_reason="provider_rate_limited",
+                                retry_after_seconds=wait if wait is not None else 60)
                 issues.append(
                     {"code": "method_cooldown", "retry_after_seconds": exc.headers.get("Retry-After")}
                 )

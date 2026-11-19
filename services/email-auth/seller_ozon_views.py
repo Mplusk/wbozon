@@ -125,10 +125,10 @@ def _acts(r):
                 if marker in seen:raise ValueError("Repeated supply order last_id")
                 seen.add(marker);query["last_id"]=marker
         for order in orders:
-            response=r.fetch(FBO,"acceptance_summary",{"body":{"order_id":order}})
+            response=r.fetch(FBO,"acceptance_summary",{"body":{"order_id":order}},86400)
             for section in response["supplies_acts"]:supplies[str(section["supply_id"])]=order
     for sid,order in supplies.items():
-        doc=r.fetch(FBO,"accepted_products",{"body":{"supply_id":sid}})
+        doc=r.fetch(FBO,"accepted_products",{"body":{"supply_id":sid}},86400)
         defects={str(i["sku"]):i.get("defect_reasons") for i in doc.get("skus_defects") or []}
         for act in doc["supply_acts"]:
             for line in act.get("items") or []:

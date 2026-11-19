@@ -525,6 +525,14 @@ class Recovery(unittest.TestCase):
         self.assertTrue(last["complete"])
         self.assertEqual((last["rows_observed"],last["items"][0]["sold_units"]), (1,1))
         retained = next(iter(wire.records.values()))
+        wire.progress_snapshot=lambda name, key: wire.records[(name,json.dumps(key,sort_keys=True))]
+        with patch.object(wb_expansion,"_finance",side_effect=AssertionError("completed month queried again")):
+            self.assertEqual(expansion_gateway._finance_period(args, wire),last)
+        with patch.object(expansion_gateway.time,"time",return_value=retained["verified_at"]+86401), \
+             patch.object(wb_expansion,"_finance",side_effect=finance_gate.GateError("cooldown",56)):
+            pending=expansion_gateway._finance_period(args,wire)
+            self.assertEqual((pending["items"],pending["refresh_status"],pending["retry_after_seconds"]),
+                             (last["items"],"pending",56))
         with patch.object(expansion_gateway,"Wire",return_value=wire), patch("market_catalog.transfer",
                 side_effect=finance_gate.GateError("cooldown",60)), patch.object(expansion_gateway.time,"time",
                 return_value=retained["verified_at"]+86401):

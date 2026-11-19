@@ -325,6 +325,9 @@ jobs:
           seller_reports="$RUNNER_TEMP/marketplace-seller-settlements/service"
           mkdir -p "$seller_reports"
           git archive 7337733849a4f1d742a36d94d16f988f4555602f:services/email-auth | tar -x -C "$seller_reports"
+          typed_reports="$RUNNER_TEMP/marketplace-typed-reports/service"
+          mkdir -p "$typed_reports"
+          git archive b4ef24694d47d8e1ab0711da09ca50de9a913213:services/email-auth | tar -x -C "$typed_reports"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09 \
@@ -340,6 +343,7 @@ jobs:
             --successor c60452d10141a5fd50563b41f01b4cf0870648bf "$finance_costs" \
             --successor dd7319e0e8ad96b6bbaee913ab57321adb26f3fd "$report_workers" \
             --successor 7337733849a4f1d742a36d94d16f988f4555602f "$seller_reports" \
+            --successor b4ef24694d47d8e1ab0711da09ca50de9a913213 "$typed_reports" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -383,7 +387,9 @@ jobs:
           check_pair "$finance_costs" "$report_workers"
           seller_reports="$RUNNER_TEMP/marketplace-seller-settlements/service"
           check_pair "$report_workers" "$seller_reports"
-          check_pair "$seller_reports" "$packaged"
+          typed_reports="$RUNNER_TEMP/marketplace-typed-reports/service"
+          check_pair "$seller_reports" "$typed_reports"
+          check_pair "$typed_reports" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash
