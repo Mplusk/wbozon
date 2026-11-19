@@ -3,9 +3,75 @@
 from collections import Counter
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+import time
+import urllib.error
+import finance_gate
 
 from market_specs import MOSCOW, iso, money, result, rows, select
 import wb_expansion as wb
+
+
+def article_storage_period(period, selector, wire):
+    """Accumulate non-overlapping paid-storage jobs, checkpointing each completed span."""
+    start, end = (date.fromisoformat(period[k]) for k in ("date_from", "date_to"))
+    today = datetime.now(MOSCOW).date()
+    through = min(end, today - timedelta(days=1))
+    key = [selector["article"], selector["nm_id"], start.isoformat(), end.isoformat()]
+    with wire.progress("wb-article-storage-period-v1", key) as (saved, save):
+        state = saved or {"parts": [], "next": start.isoformat(), "task_id": None}
+        now = time.time()
+        if state.get("verified_at") and now >= state["verified_at"] + 86400:
+            state = {"parts": [], "next": start.isoformat(), "task_id": None, "previous": state["last_ready"]}
+        if state.get("last_ready"):
+            return state["last_ready"]
+        status, delay = "pending", None
+        while date.fromisoformat(state["next"]) <= through and time.monotonic()+2 < wire.deadline:
+            first = date.fromisoformat(state["next"])
+            last = min(first + timedelta(days=7), through)
+            query = dict(selector, date_from=first.isoformat(), date_to=last.isoformat(), mode="summary")
+            if state["task_id"]:
+                query["task_id"] = state["task_id"]
+            try:
+                page = wb._report("wb_paid_storage", query, wire)
+            except finance_gate.GateError as exc:
+                status, delay = exc.reason, exc.retry_after_seconds
+                break
+            except urllib.error.HTTPError as exc:
+                status = "rate_limited" if exc.code == 429 else "http_" + str(exc.code)
+                delay = exc.headers.get("Retry-After") if exc.headers else None
+                exc.close()
+                break
+            except (TimeoutError, urllib.error.URLError):
+                status = "source_unavailable"
+                break
+            state["task_id"] = page.get("task_id")
+            if not page.get("complete") or page.get("status") != "ready":
+                status, delay = page.get("status", "pending"), page.get("retry_after_seconds")
+                if page.get("provider_status") in ("purged", "canceled"):
+                    state["task_id"] = None
+                break
+            lines = page["items"]
+            if len(lines) != 1 or lines[0].get("currency") != "RUB" or money(lines[0].get("amount")) is None:
+                status = "unconfirmed_storage_currency_or_amount"
+                break
+            state["parts"].append(dict(date_from=first.isoformat(), date_to=last.isoformat(),
+                                       amount=lines[0]["amount"], rows=lines[0]["source_rows"]))
+            state.update(next=(last+timedelta(days=1)).isoformat(), task_id=None)
+            save(state, 30*86400)
+        complete = date.fromisoformat(state["next"]) > end
+        if not complete and state.get("previous"):
+            save(state, 30*86400)
+            return dict(state["previous"], refresh_status="pending", refresh_reason=status, retry_after_seconds=delay)
+        parts = state["parts"]
+        data = dict(status="ready" if complete else status, complete=complete, currency="RUB",
+                    amount=str(sum((money(p["amount"]) for p in parts),Decimal(0))) if complete else None,
+                    source_rows=sum(p["rows"] for p in parts), verified_intervals=parts,
+                    source="/api/v1/paid_storage", date_basis="storage_charge_date", retry_after_seconds=delay)
+        if complete:
+            data["data_as_of"] = datetime.now(MOSCOW).isoformat()
+            state.update(verified_at=now,last_ready=data)
+        save(state, 30*86400)
+        return data
 
 
 def _period(args):

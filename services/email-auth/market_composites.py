@@ -126,7 +126,8 @@ COMPONENTS = (
 )
 
 
-def unit_row(provider, article, currency, units, returned, amounts, cost=None, cost_currency=None):
+def unit_row(provider, article, currency, units, returned, amounts, cost=None, cost_currency=None, *,
+             unreconciled=(), settlement_adjustments=None):
     with localcontext() as ctx:
         ctx.prec = 128
         components = (*COMPONENTS, "last_mile") if "last_mile" in amounts else COMPONENTS
@@ -146,16 +147,25 @@ def unit_row(provider, article, currency, units, returned, amounts, cost=None, c
         if "last_mile" in numeric:
             expense_fields += ("last_mile",)
         expenses_known = all(numeric[k] is not None and numeric[k] >= 0 for k in expense_fields)
+        included = [k for k in expense_fields if numeric[k] is not None and
+                    (numeric[k] >= 0 or (provider == "wb" and k == "retentions"))]
+        missing = [k for k in expense_fields if k not in included]
+        missing.extend(unreconciled)
+        signed = {k: money(v) for k, v in (settlement_adjustments or {}).items()}
+        missing.extend(k for k, v in signed.items() if v is None)
+        known_net = None
+        if numeric["for_pay"] is not None and currency and included:
+            known_net = numeric["for_pay"] - sum(numeric[k] for k in included) + sum(v for v in signed.values() if v is not None)
         if (
             all(v is not None for v in numeric.values())
             and expenses_known
+            and not missing
             and denominator
             and cost is not None
             and cost >= 0
             and currency == cost_currency
         ):
-            expenses = sum(numeric[k] for k in expense_fields)
-            margin = per_unit(numeric["for_pay"] - expenses, cost)
+            margin = per_unit(known_net, cost)
         return dict(
             marketplace=provider,
             article=article,
@@ -164,6 +174,12 @@ def unit_row(provider, article, currency, units, returned, amounts, cost=None, c
             returned_units=returned,
             amounts={k: str(v) if v is not None else None for k, v in numeric.items()},
             per_sold_unit=rates,
+            net_after_expenses={"amount": str(known_net) if known_net is not None else None,
+                                "per_sold_unit": per_unit(known_net), "currency":currency,
+                                "basis":"for_pay_less_attributed_expenses_before_cost_of_goods",
+                                "complete":known_net is not None and not missing, "deducted":included,
+                                "signed_settlement_adjustments":{k:str(v) if v is not None else None for k,v in signed.items()},
+                                "unreconciled":missing, "commission_included_in_for_pay":True},
             bank_payout_per_unit=None,
             margin_per_unit=margin,
             denominator="gross_sold_units_before_returns",
@@ -230,12 +246,13 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
             "wb", wires["wb"].creds, "wb_finance_report", period["date_from"], period["date_to"]
         )
         if len(days) == (end - start).days + 1:
+            archived = [r for _, records in days.values() for r in records]
             data = result(
                 wb_expansion.finance_summary(
-                    [r for _, records in days.values() for r in records
-                     if r.get("article") == article and str(r.get("nm_id")) == str(selector["nm_id"])]
+                    [r for r in archived if r.get("article") == article and str(r.get("nm_id")) == str(selector["nm_id"])]
                 ),
                 status="archived",
+                unallocated_rows=sum(not r.get("article") and not r.get("nm_id") for r in archived),
             )
         else:
             data = observed(lambda: wb_finance(dict(period, **selector, limit=100), wires["wb"]))
@@ -266,6 +283,11 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
         sources["wb"]["advertising"] = {
             k: ad.get(k) for k in ("status", "complete", "scope", "http_status")
         }
+        storage = {}
+        if data.get("items") and hasattr(wires["wb"], "progress"):
+            import wb_reports
+            storage = observed(lambda: wb_reports.article_storage_period(period, selector, wires["wb"]))
+        sources["wb"]["storage"] = storage
         if not data.get("items"):
             row = unit_row("wb", article, None, None, None, {})
             row.update(source_period_complete=bool(data.get("complete")),
@@ -273,19 +295,36 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
             items.append(row)
         for row in data.get("items", []):
             a = row["amounts"]
-
-            def combined(*names):
-                v = [money(a.get(k)) for k in names]
-                return sum(v) if all(x is not None for x in v) else None
-
+            gaps = []
+            if not data.get("complete"):
+                gaps.append("partial_settlement")
+            if data.get("unallocated_rows") is None or data["unallocated_rows"] > 0:
+                gaps.append("unallocated_settlement_rows")
+            ads = money(ad.get("spend_by_currency", {}).get(row["currency"],
+                        "0" if ad.get("complete") and ad.get("status") == "no_spend_records" else None))
+            penalty, deduction = (money(a.get(k)) for k in ("penalty", "deduction"))
+            if ads is not None and ads > 0 and deduction:
+                identified = money(a.get("advertising_deduction"))
+                if identified is None or deduction != identified:
+                    gaps.append("deductions_with_unreconciled_advertising_overlap")
+                if identified:
+                    gaps.append("advertising_payment_document_unreconciled")
+                # The product's advertising cost is already included in ads. Unknown overlaps
+                # stay separately visible until the document and payment can be matched.
+                deduction = Decimal(0)
+            if money(a.get("additional_payment")) != 0:
+                gaps.append("unreconciled_remuneration_adjustment")
+            if money(a.get("payment_schedule")) != 0:
+                gaps.append("unreconciled_payment_schedule")
+            points, fee = money(a.get("loyalty_points")), money(a.get("loyalty_fee"))
             amounts = dict(
                 gross_sales=a.get("gross_sales"),
                 commission=a.get("commission_including_vat"),
-                logistics=combined("delivery", "rebilled_logistics"),
-                storage=a.get("storage"),
+                logistics=a.get("delivery"),
+                storage=storage.get("amount") if storage.get("complete") and storage.get("currency") == row["currency"] else None,
                 acceptance=a.get("acceptance"),
-                retentions=combined("penalty", "deduction"),
-                ads=ad.get("spend_by_currency", {}).get(row["currency"]),
+                retentions=penalty + deduction if penalty is not None and deduction is not None else None,
+                ads=ads,
                 for_pay=a.get("for_pay"),
             )
             items.append(
@@ -298,9 +337,23 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
                     amounts,
                     args.get("cost_per_unit"),
                     args.get("currency"),
+                    unreconciled=gaps,
+                    settlement_adjustments={"loyalty_points":-points if points is not None else None,
+                                            "loyalty_fee":-fee if fee is not None else None,
+                                            "loyalty_compensation":a.get("loyalty_compensation")},
                 )
             )
             items[-1]["source_period_complete"] = bool(data.get("complete"))
+            items[-1]["settlement_components"] = {
+                "commission_basis":"vw_plus_vwNds_sales_less_returns",
+                "sales_commission_before_agent_services_ex_vat":a.get("sales_commission"),
+                "service_remuneration_adjustment_including_vat":a.get("service_remuneration_including_vat"),
+                "rebilled_logistics_informational":a.get("rebilled_logistics"),
+                "storage_attributed_in_settlement":a.get("storage"),
+                "additional_payment_unclassified":a.get("additional_payment"),
+                "payment_schedule_adjustment":a.get("payment_schedule"),
+                "settlement_deductions":a.get("deduction"), "identified_advertising_deductions":a.get("advertising_deduction"),
+            }
     if "ozon" in wires:
         article = mapping["ozon_offer_id"]
         data = observed(
@@ -357,6 +410,7 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
             amounts,
             args.get("cost_per_unit"),
             args.get("currency"),
+            unreconciled=["account_level_charges_not_attributed"] + ([] if data.get("observed_return_rows") == 0 else ["return_leg_reconciliation"]),
         )
         row["basis"] = "realization_month_delivery_leg_only"
         row["reported_return_rows"] = data.get("observed_return_rows")
@@ -378,6 +432,8 @@ def accounting(args, wires, mapping, wb_finance, ozon_finance):
             ads_status=ad.get("status"),
             accrual_status=accrual.get("status"),
             accrual_http_status=accrual.get("http_status"),
+            accrual_data_as_of=accrual.get("data_as_of"), accrual_refresh_status=accrual.get("refresh_status"),
+            accrual_refresh_http_status=accrual.get("refresh_http_status"),
             accrual_postings_returned=len(accrual["returned_posting_numbers"]) if "returned_posting_numbers" in accrual else None,
             accrual_date_basis=accrual.get("period_basis"),
         )

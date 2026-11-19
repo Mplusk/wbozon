@@ -239,6 +239,10 @@ def _supply_page(oz, args, filters, state, done, details_done, delays, *, refres
         status="ready" if ready or snapshot else "pending",
         scanned_supplies=snapshot.get("scanned") if snapshot else state.get("scanned"), matched_supplies=len(selected),
         composition_complete=done or bool(snapshot), warehouses_checked=details_done or bool(snapshot), pending_sources=delays,
+        **({"warehouse_names_complete":bool(ready or snapshot) and all(r.get("warehouse_name") for r in selected),
+            "warehouse_ids_without_name":sorted({str(r.get("warehouse_id") or r.get("actual_warehouse_id")) for r in selected
+                                                if not r.get("warehouse_name") and (r.get("warehouse_id") or r.get("actual_warehouse_id"))})}
+           if not oz else {}),
         **({"data_as_of": datetime.fromtimestamp(as_of, timezone.utc).isoformat()} if as_of else {}),
         refresh_status="pending" if snapshot or refreshing else "ready" if ready else "initial_scan",
         refresh_matched_supplies=len(state["supplies"]), resume="repeat_same_arguments",

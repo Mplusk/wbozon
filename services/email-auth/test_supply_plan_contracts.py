@@ -186,7 +186,9 @@ class SupplyPlanContracts(unittest.TestCase):
         self.assertEqual(warehouses['711']['transfer_units'], 34)
         self.assertEqual(warehouses['711']['customer_return_units'], 60)
         self.assertEqual(Decimal(warehouses['711']['orders_per_day']['30']), Decimal('0.3'))
-        self.assertEqual(warehouses['712']['recommended_quantity'], 1)
+        self.assertEqual(warehouses['712']['unconstrained_recommended_quantity'], 1)
+        self.assertTrue(warehouses['712']['below_minimum_batch'])
+        self.assertEqual(warehouses['712']['recommended_quantity'], 0)
         wb_row, = platforms['wb']['locations']
         self.assertEqual(wb_row['available_units'], 3)
         self.assertIsNone(wb_row['inbound_units'])

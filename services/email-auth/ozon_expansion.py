@@ -518,7 +518,8 @@ def _geo(args, request):
                 **select(f, "cluster_from cluster_to"),
                 status=p.get("status"),
                 posting_number=p.get("posting_number"),
-                order_id=p.get("order_id") or p.get("order_number"),
+                order_id=p.get("order_id"),
+                order_number=p.get("order_number"),
                 created_at=iso(p.get("created_at")),
                 in_process_at=iso(p.get("in_process_at")),
             )

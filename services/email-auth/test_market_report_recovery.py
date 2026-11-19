@@ -40,6 +40,108 @@ class ResumeWire:
 
 
 class Recovery(unittest.TestCase):
+    def test_split_orders_are_detected_by_order_number_without_a_seller_override(self):
+        state = {"locations":{}, "orders":{}, "issues":set(), "transit":{}}
+        def posting(i):
+            return {"warehouse_id":8, "warehouse_name":"N", "created_at":"2026-09-09T12:00:00Z",
+                    "quantity":1, "posting_number":f"P{i}", "order_number":"bulk" if i<13 else f"normal-{i}",
+                    "order_id":i+100, "sku":42, "status":"delivered"}
+        rows = [posting(i) for i in range(15)]
+        supply_plan._scan(state,"orders",{"items":rows+[rows[0]]},"ozon","2026-09-01","2026-09-30")
+        loc = state["locations"]["8"]
+        loc["wholesale_daily"] = {}
+        seen = supply_plan._wholesale(state, {"bulk_order_min_units":10})
+        self.assertEqual([(g["basis"],g["order_number"],g["postings"],g["units"]) for g in seen],
+                         [("order_number","bulk",13,13)])
+        self.assertEqual(loc["daily"]["2026-09-09"]-loc["wholesale_daily"]["2026-09-09"],2)
+
+    def test_exhausted_sellable_inventory_replaces_one_snapshot_and_preserves_unknown_inbound(self):
+        wire = ResumeWire()
+        wire.creds, wire.gate_dir = {}, "/fixture"
+        def pos(name, n):
+            return {"sku":21,"item_code":"A","warehouse_name":name,"free_to_sell_amount":n}
+        def data(rows):
+            return {"http_status":200,"fetched_at":"2026-11-19T10:00:00Z","data":{"result":{"rows":rows}}}
+        with patch("market_catalog.transfer",return_value=data([pos("One",12),pos("ONE",1)])):
+            self.assertIsNone(supply_plan._warehouse_inventory("A",[21],wire))
+        with patch("market_catalog.transfer",return_value=data([pos("One",12)])):
+            snapshot = supply_plan._warehouse_inventory("A",[21],wire)
+        state = {"locations":{"1":{"warehouse":"ONE","stock":{"21":{"available":14,"inbound":2}}},
+                              "2":{"warehouse":"Two","stock":{}}}}
+        self.assertTrue(supply_plan._apply_warehouse_inventory(state,snapshot))
+        one, two = state["locations"].values()
+        self.assertEqual((one["stock"]["21"]["available"],two["stock"]["21"]["available"]),(12,0))
+        self.assertEqual((two["sellable_evidence"],two["stock"]["21"]["inbound"]),("absent_from_exhausted_inventory",None))
+        previous = copy.deepcopy(state)
+        self.assertFalse(supply_plan._apply_warehouse_inventory(state,dict(snapshot,positions={"unmapped":{"21":4}})))
+        self.assertEqual(previous,state)
+
+    def test_wb_net_accounts_once_for_commission_advertising_and_loyalty(self):
+        raw = {v:0 for v in wb_expansion.FIN_FIELDS.values()}
+        raw.update(vendorCode="A", nmId=7, currency="RUB", docTypeName="Продажа", sellerOperName="Продажа",
+                   quantity=1, forPay=100, vw=7, vwNds=1, cashbackAmount=8, cashbackCommissionChange=1, cashbackDiscount=3)
+        service = dict(raw,docTypeName="",sellerOperName="Возмещение издержек по перемещению и операционной обработке товара",
+                       forPay=0,vw=-2,vwNds=-1,rebillLogisticCost=3,cashbackAmount=0,cashbackCommissionChange=0,
+                       cashbackDiscount=0,deduction=10,bonusTypeName="Оплата WB Продвижение")
+        def calc(reason=None):
+            if reason is not None:
+                service["bonusTypeName"]=reason
+            converted,_=wb_expansion.finance_rows([raw,service],{"article":"A","nm_id":7})
+            grouped=wb_expansion.finance_summary(converted)
+            w=ResumeWire()
+            w.creds,w.gate_dir={}, "/fixture"
+            with patch.object(market_history,"History",return_value=SimpleNamespace(verified_days=lambda *_:{})), \
+                    patch.object(market_composites,"advertising",return_value={"complete":True,"spend_by_currency":{"RUB":"10"}}), \
+                    patch.object(wb_reports,"article_storage_period",return_value={"complete":True,"amount":"0","currency":"RUB"}):
+                data=market_composites.accounting({"month":"2026-10","cost_per_unit":"5","currency":"RUB"},
+                     {"wb":w},{"wb_vendor_code":"A","wb_nm_id":7},
+                     lambda *_:{"items":grouped,"complete":True,"unallocated_rows":0},None)
+            return data["items"][0]
+        row=calc()
+        self.assertEqual(row["amounts"]["commission"],"8")
+        self.assertEqual(row["net_after_expenses"]["amount"],"84")
+        self.assertIn("advertising_payment_document_unreconciled",row["net_after_expenses"]["unreconciled"])
+        self.assertIsNone(row["margin_per_unit"])
+        uncertain=calc("Неопознанное удержание")
+        self.assertFalse(uncertain["net_after_expenses"]["complete"])
+        self.assertIsNone(uncertain["margin_per_unit"])
+        service["deduction"]=0
+        documented=calc()
+        self.assertTrue(documented["net_after_expenses"]["complete"])
+        self.assertEqual(documented["margin_per_unit"],"79")
+
+    def test_storage_month_resumes_disjoint_spans_and_undated_rows_are_incomplete(self):
+        from test_wb_expansion_contracts import report_download, PERIOD
+        wire = report_download("paid_storage",[{"nmId":7,"vendorCode":"A","warehousePrice":"7"}])
+        data=wb_expansion._report("wb_paid_storage",dict(PERIOD,article="A",nm_id=7,mode="summary"),wire)
+        self.assertFalse(data["complete"])
+        self.assertIn("storage_charge_date_unconfirmed",data["issues"])
+        wire=ResumeWire()
+        query={"date_from":"2026-10-01","date_to":"2026-10-31"}
+        selector={"article":"A","nm_id":7}
+        calls=[]
+        def delivered(_,args,_wire):
+            calls.append((args["date_from"],args["date_to"],args.get("task_id")))
+            if len(calls)==2:
+                return {"complete":False,"status":"pending","task_id":"T"}
+            return {"complete":True,"status":"ready","items":[{"currency":"RUB","amount":"1.01","source_rows":1}]}
+        with patch.object(wb_expansion,"_report",side_effect=delivered):
+            first=wb_reports.article_storage_period(query,selector,wire)
+            self.assertIsNone(first["amount"])
+            final=wb_reports.article_storage_period(query,selector,wire)
+            self.assertEqual((final["amount"],final["source_rows"]),("4.04",4))
+            self.assertEqual(calls[1:3],[("2026-10-09","2026-10-16",None),("2026-10-09","2026-10-16","T")])
+            self.assertEqual(wb_reports.article_storage_period(query,selector,wire),final)
+
+    def test_wb_loyalty_service_reversal_keeps_its_own_sign(self):
+        raw = dict(vendorCode="A", nmId=7, currency="RUB", sellerOperName="Услуга",
+                   bonusTypeName="Сумма баллов, удержанных для списания ВауВБ")
+        lines=[dict(raw,docTypeName="Продажа",cashbackAmount=120,cashbackCommissionChange=12),
+               dict(raw,docTypeName="Возврат",cashbackAmount=-120,cashbackCommissionChange=-12)]
+        selected,_=wb_expansion.finance_rows(lines,{"article":"A","nm_id":7})
+        by_type=wb_expansion.finance_summary(selected)[0]["amounts"]
+        self.assertEqual((by_type["loyalty_points"],by_type["loyalty_fee"]),("0","0"))
+
     def test_closed_wb_orders_use_only_verified_complete_days_and_preserve_live_continuation(self):
         import time
         creds = {"api_token":"test-account"}
@@ -193,7 +295,7 @@ class Recovery(unittest.TestCase):
 
     def test_storage_summary_includes_every_row_of_the_completed_report(self):
         from test_wb_expansion_contracts import report_download, PERIOD
-        wire = report_download("paid_storage", [{"warehousePrice": 2.5}, {"warehousePrice": -0.25}])
+        wire = report_download("paid_storage", [{"warehousePrice": n, "date": PERIOD["date_from"]} for n in (2.5, -0.25)])
         data = wb_expansion.read("wb_paid_storage", dict(PERIOD, mode="summary", limit=1), wire)
         self.assertEqual(data["items"], [{"currency":"RUB", "amount":"2.25", "source_rows":2}])
         self.assertTrue(data["complete"])

@@ -111,17 +111,37 @@ def regulated_ozon(name,args,wire):
         amounts = regulated_ozon(name, dict(args, include_types=False), wire)
         dictionary = regulated_ozon("ozon_accrual_types", {}, wire)
         return ozon_details.label_posting_accruals(amounts, dictionary)
-    if wire.deadline-time.monotonic()<2:
-        raise TimeoutError("Insufficient finance read time")
     def read():
         with market_cooldown.worker(wire.gate_dir,wire.creds):
             return portal._provider_read(name,args,wire.creds,absolute_deadline=wire.deadline)
     portal.finance_request_preflight(name,args,wire.creds)
     with wire.progress("composite-finance-v2",[name,args]) as (cached,save):
-        if cached: return cached
+        checked = cached.get("verified_snapshot_at") if cached else None
+        if cached and (checked is None or time.time() < checked + 3600):
+            return cached
         one_read = name in ("ozon_realization_article_month", "ozon_accrual_types", "ozon_posting_accruals")
-        value=portal._finance_read_with_retry(wire.gate_dir,wire.creds,read,wire.deadline,allow_retry=one_read)
-        save(value,1800)
+        try:
+            if wire.deadline-time.monotonic()<2:
+                raise TimeoutError("Insufficient finance read time")
+            value=portal._finance_read_with_retry(wire.gate_dir,wire.creds,read,wire.deadline,allow_retry=one_read)
+        except (finance_gate.GateError, TimeoutError, urllib.error.URLError) as exc:
+            if not checked or (isinstance(exc, urllib.error.HTTPError) and exc.code not in (429, 500, 502, 503, 504)):
+                raise
+            status = exc.code if isinstance(exc, urllib.error.HTTPError) else None
+            delay = finance_gate.parse_retry_after(exc.headers)[0] if status else getattr(exc,"retry_after_seconds",None)
+            if status:
+                exc.close()
+            return dict(cached, refresh_status="pending", refresh_http_status=status, retry_after_seconds=delay)
+        historical = (
+            (name == "ozon_realization_article_month" and value.get("matched_rows")
+             and (args["year"], args["month"]) < (date.today().year, date.today().month))
+            or (name == "ozon_posting_accruals" and args.get("date_to","") < date.today().isoformat()
+                and set(value.get("returned_posting_numbers", [])) == set(args["posting_numbers"]))
+            or (name == "ozon_accrual_types" and value.get("types"))
+        )
+        if historical:
+            value=dict(value,verified_snapshot_at=time.time(),data_as_of=market_history.utc(),refresh_status="ready")
+        save(value,30*86400 if historical else 1800)
         return value
 
 
@@ -220,12 +240,20 @@ def _finance_by_report(args, wire):
         return market_catalog.transfer("market_api_read", {"operation_id": op, "input": inputs},
                                        creds, src.gate_dir, src.deadline)
 
-    with src.progress("wb-finance-by-report-v1", [args.get("article"), args.get("nm_id"),
-                                                  args.get("sku"), start.isoformat(), end.isoformat()]) as (previous, save):
+    identity = [args.get("article"), args.get("nm_id"), args.get("sku"), start.isoformat(), end.isoformat()]
+    with src.progress("wb-finance-by-report-v2", identity) as (previous, save):
         now = time.time()
         refresh_interval = 86400 if end < datetime.now(market_specs.MOSCOW).date()-timedelta(days=7) else 1800
         initial = {"reports": None, "index": 0, "cursor": 0, "rows": [], "unallocated": 0}
         state = previous or initial
+        if not previous and hasattr(src, "progress_snapshot"):
+            old = src.progress_snapshot("wb-finance-by-report-v1", identity)
+            if old.get("last_ready", {}).get("complete"):
+                snapshot = old["last_ready"]
+                if old.get("verified_at") and old.get("rows"):
+                    snapshot = dict(snapshot, items=wb_expansion.finance_summary(old["rows"]))
+                state = dict(initial, last_ready=snapshot)
+                save(state, 30*86400)
         if state.get("verified_at") and now >= state["verified_at"] + refresh_interval:
             state = dict(initial, last_ready=state["last_ready"])
             save(state, 30*86400)
@@ -292,7 +320,7 @@ def _finance_by_report(args, wire):
         missing = [d for d in wanted if d not in covered]
         done = state["index"] == len(state["reports"])
         complete = done and not missing
-        if complete and state.get("verified_at"):
+        if complete and state.get("summary_version") == 2 and state.get("verified_at"):
             return state["last_ready"]
         if not complete and state.get("last_ready"):
             if done:
@@ -309,7 +337,7 @@ def _finance_by_report(args, wire):
                     retry_after_seconds=failure.get("retry_after_seconds"), period_from=start.isoformat(), period_to=end.isoformat())
         if complete:
             response.update(data_as_of=market_history.utc(), refresh_status="ready")
-            state.update(verified_at=now, last_ready=response)
+            state.update(verified_at=now, last_ready=response, summary_version=2)
             save(state, 30*86400)
         elif done:
             save(state, 1800)

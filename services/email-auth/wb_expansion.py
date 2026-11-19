@@ -87,7 +87,7 @@ def supply_detail(parent, request):
                    group="fbw-detail", interval=2, basic_interval=1800, ttl=1800)
     planned, actual = data.get("warehouseName"), data.get("actualWarehouseName")
     # The receiving warehouse may differ from the planned destination.
-    return dict(parent, status_id=data.get("statusID", parent.get("status_id")),
+    row = dict(parent, status_id=data.get("statusID", parent.get("status_id")),
                 warehouse_id=data.get("warehouseID"), warehouse=planned or actual,
                 warehouse_name=planned or actual or None,
                 warehouse_basis="planned" if planned else "actual" if actual else "unreported",
@@ -96,6 +96,23 @@ def supply_detail(parent, request):
                 paid_acceptance_coefficient=data.get("paidAcceptanceCoefficient"), accepted_at=None,
                 quantity=data.get("quantity"), accepted_quantity=data.get("acceptedQuantity"),
                 ready_for_sale_quantity=data.get("readyForSaleQuantity"))
+    if hasattr(request, "progress_snapshot"):
+        # Keep planned and actual ID/name pairs distinct when WB routes a supply to another office.
+        for ident, name in ((row["warehouse_id"], planned), (row["actual_warehouse_id"], actual)):
+            if ident and name:
+                try:
+                    with request.progress("wb-supply-office-names-v1", [str(ident)]) as (entry, save):
+                        names = set((entry or {}).get("names", []))
+                        names.add(name)
+                        save({"names": sorted(names)[:2]}, 90*86400)
+                except finance_gate.GateError:
+                    pass
+        if not row["warehouse"]:
+            ident = row["warehouse_id"] or row["actual_warehouse_id"]
+            names = request.progress_snapshot("wb-supply-office-names-v1", [str(ident)]).get("names", [])
+            if len(names) == 1:
+                row.update(warehouse=names[0], warehouse_name=names[0], warehouse_basis="verified_supply_office_id")
+    return row
 
 
 def display_supply_warehouse(row):
@@ -491,7 +508,18 @@ def _report(name, args, request):
                 delivery_id=r.get("giId"),
             )
             if matches(item, args):
+                day = str(item.get("date") or "")[:10]
+                if args.get("mode") == "summary":
+                    try:
+                        valid_day = date.fromisoformat(day).isoformat()
+                    except ValueError:
+                        valid_day = ""
+                    if not args["date_from"] <= valid_day <= args["date_to"]:
+                        issues.add("storage_charge_date_unconfirmed")
                 items.append(item)
+            elif not any(item.get(k) is not None and str(item[k]) != str(args[k])
+                         for k in ("article","nm_id") if k in args):
+                issues.add("storage_article_identity_unconfirmed")
         else:
             item = dict(
                 _item(r, nm="nmID"),
@@ -522,7 +550,7 @@ def _report(name, args, request):
                 totals[currency] = None
             elif totals.get(currency, 0) is not None:
                 totals[currency] = totals.get(currency, Decimal(0)) + value
-        if not items:
+        if not items and not issues:
             totals["RUB"], counts["RUB"] = Decimal(0), 0
         summary = [{"currency": code, "amount": str(total) if total is not None else None,
                     "source_rows": counts[code]} for code, total in sorted(totals.items())]
@@ -554,6 +582,10 @@ FIN_FIELDS = {
     "deduction": "deduction",
     "reason": "bonusTypeName",
     "additional_payment": "additionalPayment",
+    "loyalty_points": "cashbackAmount",
+    "loyalty_fee": "cashbackCommissionChange",
+    "loyalty_compensation": "cashbackDiscount",
+    "payment_schedule": "paymentSchedule",
     "gross_sales": "retailAmount",
     "date": "rrDate",
 }
@@ -564,6 +596,9 @@ def finance_summary(items):
     for row in items:
         key = row["article"], row["nm_id"], row["currency"]
         g = groups.setdefault(key, {"sold_units": 0, "returned_units": 0, "totals": {}, "missing": set()})
+        reason = " ".join((row.get("reason") or "").casefold().split())
+        loyalty_service = any(marker in (reason + " " + (row.get("operation") or "").casefold())
+                              for marker in ("ваувб", "вау вб", "вауwb", "вау wb"))
         if row["operation"] in ("Продажа", "Возврат") and row["document"] == row["operation"]:
             label = "sold_units" if row["operation"] == "Продажа" else "returned_units"
             if type(row["quantity"]) is not int:
@@ -572,17 +607,37 @@ def finance_summary(items):
                 g[label] += abs(row["quantity"])
         for field in (
             "commission_ex_vat",
-            "commission_vat",
+            "commission_vat", "sales_commission",
             "delivery",
             "rebilled_logistics",
             "storage",
             "acceptance",
             "penalty",
             "for_pay",
-            "deduction", "additional_payment", "gross_sales",
+            "deduction", "additional_payment", "gross_sales", "loyalty_points", "loyalty_fee", "loyalty_compensation", "payment_schedule",
         ):
             n = money(row.get(field))
-            if field in ("for_pay", "commission_ex_vat", "commission_vat", "gross_sales") and n:
+            if field in ("loyalty_points", "loyalty_fee") and row["document"] == "Возврат" and not loyalty_service:
+                n = -n if n is not None else None
+            if field == "deduction" and n is not None:
+                # Payment for WB Promotion may already be attributed by advertising statistics.
+                advertised = any(label in reason for label in ("wb продвижение", "вб продвижение", "вб.продвижение"))
+                part = "advertising_deduction" if advertised else "other_deduction"
+                for label in ("advertising_deduction", "other_deduction"):
+                    g["totals"].setdefault(label, Decimal(0))
+                g["totals"][part] += n
+            if (field in ("commission_ex_vat", "commission_vat", "sales_commission") and not row["document"]
+                    and row["operation"] in ("Возмещение издержек по перемещению и операционной обработке товара",
+                                             "Возмещение издержек по перевозке")):
+                # WB reports these signed reallocation entries separately from commission on sales.
+                if field != "sales_commission":
+                    service = "service_" + field
+                    if n is None:
+                        g["missing"].add(service)
+                    else:
+                        g["totals"][service] = g["totals"].get(service, Decimal(0)) + n
+                continue
+            if field in ("for_pay", "commission_ex_vat", "commission_vat", "sales_commission", "gross_sales") and n:
                 if row["document"] == "Возврат":
                     n = -n
                 elif row["document"] != "Продажа":
@@ -598,6 +653,9 @@ def finance_summary(items):
             amounts["commission_including_vat"] = str(
                 Decimal(amounts["commission_ex_vat"]) + Decimal(amounts["commission_vat"])
             )
+        if "service_commission_ex_vat" in amounts and "service_commission_vat" in amounts:
+            amounts["service_remuneration_including_vat"] = str(Decimal(amounts["service_commission_ex_vat"]) +
+                                                                Decimal(amounts["service_commission_vat"]))
         units = g["sold_units"] if "sold_units" not in g["missing"] else None
         summary.append(
             {
