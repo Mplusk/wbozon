@@ -16,7 +16,56 @@ def snapshot(page):
     ) if key in page}
 
 
-def _units(row, read, period):
+def _compensation_adjustment(row, report, ledger):
+    net=row["net_after_expenses"]
+    info=row["compensation_income"]
+    entries=report.get("items") or []
+    if report.get("complete") and not entries:
+        info.update(reconciliation="complete_exports_no_matching_lines",confirmed_adjustment="0")
+        return
+    if not report.get("complete") or not ledger or not net.get("amount") or not row.get("currency"):
+        return
+    if not all(e.get("operation_id") and e.get("sku") and e.get("date") and e.get("amount") is not None
+               and e.get("currency")==row["currency"] for e in entries):
+        return
+    types=ledger("ozon_accrual_types",{}).get("types") or []
+    fee_ids={t["id"] for t in types if any(term in (t.get("name") or "").casefold() for term in ("компенсац","возмещен"))}
+    matched={}
+    for day in sorted({e["date"] for e in entries}):
+        expected=[e for e in entries if e["date"]==day]
+        args={"date":day,"skus":sorted({str(e["sku"]) for e in expected}),"view":"details"}
+        source=ledger("ozon_accrual_day",args)
+        cursors=set()
+        while True:
+            for line in source.get("matching_rows") or []:
+                if line.get("category")!="ITEM":continue
+                for e in expected:
+                    key=(str(e["operation_id"]),str(e["sku"]))
+                    if key!=(str(line.get("accrual_id")),str(line.get("sku"))):continue
+                    amounts=[f["accrued"]["amount"] for f in line.get("fees") or [] if f.get("type_id") in fee_ids
+                             and (f.get("accrued") or {}).get("currency")==row["currency"]]
+                    if len(amounts)!=1 or amounts[0] is None or key in matched:return
+                    value=Decimal(str(amounts[0]))
+                    if abs(value)!=abs(Decimal(e["amount"])) or (value<0)!=(e["kind"]=="DECOMPENSATION_REPORT"):return
+                    matched[key]=value
+            marker=source.get("next_cursor")
+            if not marker:break
+            if marker in cursors:return
+            cursors.add(marker)
+            args["last_id"]=marker
+            source=ledger("ozon_accrual_day",args)
+    if len(matched)!=len(entries):return
+    adjustment=sum(matched.values(),Decimal(0))
+    revised=Decimal(net["amount"])+adjustment
+    info.update(included_in_net=True,confirmed_adjustment=str(adjustment),reconciliation="exact_ITEM_accrual_id_sku_day_currency_signed_fee")
+    net["amount_before_compensations"]=net["amount"]
+    net["amount"]=str(revised)
+    if row.get("sold_units"):
+        net["per_sold_unit"]=seller_views.num(revised/row["sold_units"])
+    net.setdefault("signed_settlement_adjustments",{})["item_compensations"]=str(adjustment)
+
+
+def _units(row, read, period, ledger=None):
     if row["marketplace"] != "ozon":
         row["return_tariff_basis"] = "seller_stock_withdrawal_tariff_is_separate_from_actual_customer_return_cost"
         return
@@ -26,6 +75,12 @@ def _units(row, read, period):
     compensation = read("ozon_compensations", period)
     row["compensation_income"] = dict(snapshot(compensation),
         included_in_net=False, reconciliation="match_each_operation_to_existing_accruals_before_adding")
+    _compensation_adjustment(row,compensation,ledger)
+    if row["compensation_income"].get("confirmed_adjustment") is None:
+        net=row["net_after_expenses"]
+        net["complete"]=False
+        if "compensation_reconciliation" not in net.setdefault("unreconciled",[]):
+            net["unreconciled"].append("compensation_reconciliation")
     volume = read("ozon_wrong_volume", {})
     row["wrong_volume"] = True if volume.get("items") else False if volume.get("complete") else None
     row["wrong_volume_source"] = snapshot(volume)
@@ -158,7 +213,11 @@ def enrich(name,args,data,wires,mapping,creds,directory,deadline):
             return market_composites.observed(lambda:seller_views.execute(tool, dict(selector, **query),
                 creds[platform], directory, min(deadline-0.5,time.monotonic()+4)))
         if name == "unit_economics":
-            _units(row, read, {k:args[k] for k in ("month","date_from","date_to") if k in args})
+            import expansion_gateway
+            def ledger(tool, query):
+                if time.monotonic()+2>=deadline:return {}
+                return market_composites.observed(lambda:expansion_gateway.regulated_ozon(tool,query,wire))
+            _units(row, read, {k:args[k] for k in ("month","date_from","date_to") if k in args}, ledger)
         elif name == "supply_plan":
             _plan(row, read, wire, args, deadline)
         elif name == "sales_drop_check":

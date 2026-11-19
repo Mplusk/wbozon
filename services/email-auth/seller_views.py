@@ -294,7 +294,11 @@ def render(r,read=None):
                 if v is not None and (field!="amount" or key[1]):
                     bucket[field]=bucket.get(field,0)+Decimal(str(v)) if field=="amount" else bucket.get(field,0)+int(v)
         r.meta["period_totals"]=[dict(v,**({"amount":amount(v["amount"])} if "amount" in v else {})) for v in totals.values()]
-        r.meta["monetary_coverage"]="currency_unconfirmed" if any(row.get("amount") is not None and not row.get("currency") for row in items) else "reported"
+        if name in ("ozon_buyout","ozon_compensations","wb_retentions") and any(
+                row.get("amount") is None for row in items if row.get("kind")!="measurement"):
+            r.meta["monetary_coverage"]="amount_missing"
+        else:
+            r.meta["monetary_coverage"]="currency_unconfirmed" if any(row.get("amount") is not None and not row.get("currency") for row in items) else "reported"
     status="pending" if pending else "partial" if r.issues and items else r.issues[0]["status"] if r.issues else "ready"
     next_page=offset+limit if offset+limit<total else None
     # A failed source can change any later row number. Resume collection first.

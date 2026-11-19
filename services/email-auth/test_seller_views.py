@@ -87,6 +87,24 @@ class Contracts(unittest.TestCase):
         self.assertIsNone(row["wrong_volume"])
         self.assertEqual(calls["ozon_removals"],{"date_from":"2026-10-01","date_to":"2026-10-31"})
 
+    def test_buyout_without_amount_preserves_quantity_and_marks_money_missing(self):
+        r=self.reader("ozon_buyout",{})
+        report=seller_views.render(r,lambda _: [dict(article="fixture",quantity=2,amount=None,currency=None)])
+        self.assertTrue(report["complete"])
+        self.assertEqual(report["monetary_coverage"],"amount_missing")
+        self.assertEqual(report["period_totals"][0]["quantity"],2)
+
+    def test_compensation_changes_net_only_for_exact_incoming_item_fee(self):
+        entry=dict(operation_id="301",sku="101",date="2026-10-12",currency="RUB",amount="10",kind="COMPENSATION_REPORT")
+        def ledger(tool,args):
+            if tool=="ozon_accrual_types":return {"types":[{"id":5,"name":"Компенсация за утрату"}]}
+            return {"matching_rows":[dict(category="ITEM",accrual_id="301",sku="101",fees=[
+                dict(type_id=5,accrued=dict(amount="10",currency="RUB"))])]}
+        for operation,expected in (("301","110"),("302","100")):
+            row=dict(sold_units=2,currency="RUB",net_after_expenses=dict(amount="100",per_sold_unit="50"),compensation_income={})
+            seller_insights._compensation_adjustment(row,{"complete":True,"items":[dict(entry,operation_id=operation)]},ledger)
+            self.assertEqual(row["net_after_expenses"]["amount"],expected)
+
     def test_missing_retry_header_resumes_only_after_one_minute(self):
         with tempfile.TemporaryDirectory() as tmp:
             gate=str(Path(tmp)/"gate")

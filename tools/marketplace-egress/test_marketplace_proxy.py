@@ -11,7 +11,7 @@ import marketplace_proxy as proxy
 
 class RelayTests(unittest.TestCase):
     def test_allowlist_contains_only_required_marketplace_hosts(self):
-        self.assertEqual(proxy.ALLOWED, {'api-seller.ozon.ru',
+        self.assertEqual(proxy.ALLOWED, {'api-seller.ozon.ru', 'ir-20.ozone.ru', 'cdn1.ozone.ru',
             'discounts-prices-api.wildberries.ru', 'content-api.wildberries.ru',
             'common-api.wildberries.ru', 'seller-analytics-api.wildberries.ru','supplies-api.wildberries.ru',
             'statistics-api.wildberries.ru','finance-api.wildberries.ru','feedbacks-api.wildberries.ru',
