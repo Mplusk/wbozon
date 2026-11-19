@@ -1,6 +1,6 @@
 """Seller views over the existing account-bound read-only Avito operations."""
 from datetime import datetime, timezone, timedelta
-import json
+from decimal import Decimal
 
 
 def contracts(raw):
@@ -26,7 +26,7 @@ def contracts(raw):
             properties["item_ids"]=common["item_ids"]
         for key in keys.split():
             properties[key]={"type":"string","enum":["v1","v2"]} if key=="version" else raw[op]["properties"][key]
-        out[n]={"description":title,"properties":properties,"required":["item_ids"] if n=="avito_stocks" else ["spendingTypes"] if n=="avito_spendings" else []}
+        out[n]={"description":title,"properties":properties,"required":["item_ids"] if n=="avito_stocks" else []}
     return out
 
 
@@ -36,6 +36,47 @@ def _items(data):
     for k in ("resources","orders","reviews","chats","stocks","operations","items","groupings","spendings","result","data"):
         if isinstance(data.get(k),(dict,list)):return _items(data[k])
     return [data]
+
+
+def _identify(name, rows, args, directory, get, metadata):
+    from expansion_gateway import _seller_mappings
+    targets=[]
+    for record in rows:
+        if name=="avito_orders":
+            targets.extend((item,item.get("avitoId")) for item in record.get("items") or [])
+        elif name=="avito_items":targets.append((record,record.get("id")))
+        elif name=="avito_chats":targets.append((record,((record.get("context") or {}).get("value") or {}).get("id")))
+        elif name=="avito_reviews":targets.append((record,(record.get("item") or {}).get("id")))
+        elif name=="avito_stocks":targets.append((record,record.get("item_id")))
+        elif name=="avito_stats" and ("itemId" in record or record.get("type")=="item" or args.get("grouping")=="item"):
+            targets.append((record,record.get("itemId",record.get("id"))))
+        elif name=="avito_spendings" and len(args.get("item_ids",[]))==1:
+            targets.append((record,args["item_ids"][0]))
+        else:record.setdefault("scope","account")
+    mapped={}
+    for mapping in _seller_mappings(directory).values():
+        if mapping.get("avito_item_id") and mapping.get("avito_article"):
+            mapped.setdefault(str(mapping["avito_item_id"]),set()).add(mapping["avito_article"])
+    missing={str(i) for _,i in targets if i and str(i).isdecimal() and str(i) not in mapped}
+    if missing:
+        from market_composites import observed
+        ordered=sorted(missing)
+        for i in range(0,len(ordered),100):
+            found=observed(lambda:get("avito_get_ad_ids_by_avito_ids",{"query":",".join(ordered[i:i+100])}))
+            for item in (found.get("data") or {}).get("items",[]):
+                if item.get("ad_id"):
+                    mapped.setdefault(str(item.get("avito_id")),set()).add(str(item["ad_id"]))
+    for record,ident in targets:
+        if not ident:
+            record.setdefault("scope","account")
+            continue
+        record["item_id"]=ident
+        values=mapped.get(str(ident),set())
+        if len(values)==1:
+            record["article"]=next(iter(values))
+        else:
+            record["article_status"]="seller_article_unconfirmed"
+            metadata["source_status"]="partial_product_identity"
 
 
 def read(name,args,creds,directory,deadline):
@@ -71,11 +112,17 @@ def read(name,args,creds,directory,deadline):
         if name=="avito_stocks":op,q="avito_get_stocks_info",{"item_ids":ids}
         else:
             op,q="avito_account_spendings",{"dateFrom":first.isoformat(),"dateTo":last.isoformat(),"grouping":args.get("grouping","day"),
-                                          "spendingTypes":args["spendingTypes"]}
+                                          "spendingTypes":args.get("spendingTypes",["all","promotion","presence","commission","rest"])}
             if ids:
                 if len(ids)>100:raise ValueError("Avito spendings accept at most 100 item IDs")
                 q["filter"]={"itemIDs":ids}
         rows=_items(get(op,q)["data"]);more=offset+size<len(rows);rows=rows[offset:offset+size]
+        if name=="avito_spendings":
+            for group in rows:
+                for line in group.get("spendings") or []:
+                    if line.get("value") is not None:
+                        line.update(amount=format(Decimal(str(line["value"]))/100,"f"),currency="RUB",source_unit="kopeck")
+            metadata["total_basis"]="all_includes_the_individual_spending_types"
     else:
         if name=="avito_stats":
             op="avito_item_analytics"
@@ -116,7 +163,7 @@ def read(name,args,creds,directory,deadline):
             rows=selected
     for record in rows:
         if not isinstance(record,dict):raise ValueError("Unexpected Avito record")
-        if name=="avito_items" and "id" in record:record.setdefault("item_id",record["id"])
+    _identify(name,rows,args,directory,get,metadata)
     return public_values(dict(tool=name,items=rows,complete=not more and "source_status" not in metadata,
         next_cursor=str(offset+size) if more else None,status=metadata.get("source_status","ready"),observed_at=now,
         data_as_of=min(stamps,default=None),provisional_dates=[],read_only=True,untrusted_data=True,**metadata))

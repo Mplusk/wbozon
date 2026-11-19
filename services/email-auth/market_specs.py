@@ -82,7 +82,7 @@ FIELDS = {
     "archive": {"type":"boolean"},
     "mapping": {
         "type": "object",
-        "properties": {"ozon_offer_id": TEXT, "wb_vendor_code": TEXT, "wb_nm_id": ID,"avito_item_id":ID},
+        "properties": {"ozon_offer_id": TEXT, "wb_vendor_code": TEXT, "wb_nm_id": ID,"avito_item_id":ID,"avito_article":TEXT},
         "required": ["ozon_offer_id", "wb_vendor_code"],
         "additionalProperties": False,
     },

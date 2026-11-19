@@ -81,6 +81,8 @@ def _compensation_adjustment(row, report, ledger):
 def _units(row, read, period, ledger=None):
     if row["marketplace"] != "ozon":
         row["return_tariff_basis"] = "seller_stock_withdrawal_tariff_is_separate_from_actual_customer_return_cost"
+        _,last=seller_views.period(period)
+        row["seller_return_tariff"]=snapshot(read("wb_tariffs",{"date":last.isoformat(),"kind":"return","limit":5}))
         return
     buyouts = read("ozon_buyout", period)
     row["ozon_own_purchases"] = dict(snapshot(buyouts), retail_realization_units=row.get("sold_units"),
@@ -163,6 +165,7 @@ def _plan(row, read, wire, args, deadline):
         history = read("wb_stocks_history", {"date_from":first,"date_to":through,"group_by":"warehouse"})
         row["warehouse_inventory"] = snapshot(current)
         row["warehouse_availability_history"] = snapshot(history)
+        row["transit_tariffs"]=snapshot(read("wb_tariffs",{"kind":"transit","limit":10}))
         return
     stock = read("ozon_fbs_stocks", {})
     positions = stock.get("items", [])
@@ -172,7 +175,9 @@ def _plan(row, read, wire, args, deadline):
         demand=_fbs_orders(wire, row["article"], through, args.get("horizon_days", 14), available, args))
     if complete and row["seller_fulfillment"]["demand"]["ordered_units"] is not None:
         row["account_coverage"] = dict(status="partial", excluded=["rFBS"], included=["FBO","FBS"])
-    row["removal_adjustments"] = dict(basis="completed_disposals_already_in_sellable_stock",
+    first=(date.fromisoformat(through)-timedelta(days=29)).isoformat()
+    removals=read("ozon_removals",dict(date_from=first,date_to=through))
+    row["removal_adjustments"] = dict(snapshot(removals),basis="completed_disposals_already_in_sellable_stock",
         pending_unconfirmed_stock_adjustment=None, deducted_again=0)
     row["supply_slots"] = _slots(row, wire, read, deadline)
 
@@ -185,33 +190,65 @@ def _avito(name, args, mapping, creds, directory, deadline):
         return market_composites.observed(lambda:avito_mcp.read(op,query,creds,directory,deadline))
     item = (mapping or {}).get("avito_item_id")
     if not item:
-        lookup = get("avito_get_avito_ids_by_ad_ids", {"query":args["article"]})
+        article=(mapping or {}).get("avito_article") or args["article"]
+        lookup = get("avito_get_avito_ids_by_ad_ids", {"query":article})
         pairs = (lookup.get("data") or {}).get("items", [])
         matches = {p.get("avito_id",p.get("avitoId")) for p in pairs if isinstance(p,dict) and
-                   str(p.get("ad_id",p.get("adId"))) == args["article"]}
+                   str(p.get("ad_id",p.get("adId"))) == article}
         if len(matches) == 1:
             item = matches.pop()
     if not item:
         return {"status":"article_mapping_unresolved"}
     page = get("avito_get_item_info", {"item_id":int(item)})
     card = page.get("data") or {}
-    if str(card.get("id")) != str(item):
+    published_article=card.get("autoload_item_id")
+    if (not card.get("status") or ("id" in card and str(card["id"])!=str(item)) or
+        published_article and (mapping or {}).get("avito_article") and published_article!=mapping["avito_article"]):
         return {"status":page.get("status","item_identity_unconfirmed")}
-    data = dict(status="confirmed", item_id=item, article=args["article"], source="avito_get_item_info")
+    data = dict(status="confirmed", item_id=item, article=published_article or (mapping or {}).get("avito_article") or args["article"],
+                source="authenticated_seller_and_item_path_avito_get_item_info")
     if name == "sales_drop_check":
         for key, prefix in (("previous","previous"),("current","current")):
             start,end=(args.get("date_from"),args.get("date_to")) if key=="current" else (args.get(prefix+"_from"),args.get(prefix+"_to"))
             if start and end:
                 data[key]=get("avito_stats", dict(item_ids=[int(item)],date_from=start,date_to=end,version="v1"))
     if name == "unit_economics":
-        data.update(sold_units=None, net_after_expenses=None, status="realized_settlement_unavailable",
-                    basis="item_views_and_delivery_orders_do_not_establish_net_settlement")
+        first,last=seller_views.period(args)
+        dates=dict(dateFrom=first.isoformat(),dateTo=last.isoformat())
+        query=dict(dates,grouping="item",metrics=["deliveredItems","deliveredItemsPrice"],limit=100,offset=0)
+        metrics={}
+        while time.monotonic()+1<deadline:
+            page=get("avito_item_analytics",query)
+            groups=((page.get("data") or {}).get("result") or {}).get("groupings") or []
+            matches=[g for g in groups if str(g.get("id"))==str(item)]
+            if len(matches)==1:
+                metrics={m["slug"]:m["value"] for m in matches[0].get("metrics",[]) if "slug" in m and m.get("value") is not None}
+                break
+            nxt=(page.get("pagination") or {}).get("next")
+            if type(nxt) is not int or nxt<=query["offset"]:break
+            query["offset"]=nxt
+        spend=get("avito_account_spendings",dict(dates,grouping="month",filter={"itemIDs":[int(item)]},
+                  spendingTypes=["promotion","presence","commission","rest"]))
+        groups=((spend.get("data") or {}).get("result") or {}).get("groupings") or []
+        expenses={line["slug"]:Decimal(str(line["value"]))/100 for group in groups for line in group.get("spendings",[])
+                  if line.get("slug") and line.get("value") is not None} if len(groups)==1 else {}
+        quantity=metrics.get("deliveredItems")
+        delivered=Decimal(str(metrics["deliveredItemsPrice"]))/100 if "deliveredItemsPrice" in metrics else None
+        quantity=Decimal(str(quantity)) if quantity is not None else None
+        units=int(quantity) if quantity is not None and quantity>=0 and quantity==quantity.to_integral_value() else None
+        components=("promotion","presence","rest")
+        net=delivered-sum(expenses[k] for k in components) if delivered is not None and all(k in expenses for k in components) else None
+        data.update(sold_units=units,delivered_payout=str(delivered) if delivered is not None else None,
+            expenses={k:str(v) for k,v in expenses.items()},currency="RUB",status="reported" if net is not None else "partial_settlement",
+            net_after_expenses={"amount":str(net) if net is not None else None,"per_sold_unit":seller_views.num(net/units) if net is not None and units else None},
+            basis="deliveredItemsPrice_after_commission_less_item_attributed_promotion_presence_rest")
     return data
 
 
 def enrich(name,args,data,wires,mapping,creds,directory,deadline):
     if "avito" in creds and name in ("article_map","unit_economics","sales_drop_check"):
-        data["avito"] = _avito(name,args,mapping,creds["avito"],directory,deadline)
+        data["avito"] = market_composites.observed(lambda:_avito(name,args,mapping,creds["avito"],directory,
+            min(deadline-1,time.monotonic()+6)))
         if data["avito"].get("status") == "confirmed" and name == "article_map" and data.get("mapping"):
             data["mapping"]["avito_item_id"] = data["avito"]["item_id"]
     if name == "article_map":
@@ -227,7 +264,9 @@ def enrich(name,args,data,wires,mapping,creds,directory,deadline):
         def read(tool, query):
             if time.monotonic() + 1 >= deadline:
                 return dict(status="pending", complete=False, source=tool, reason="request_deadline")
-            return market_composites.observed(lambda:seller_views.execute(tool, dict(selector, **query),
+            keys=seller_views.VIEWS[tool][1].split()
+            product={k:v for k,v in selector.items() if k in keys}
+            return market_composites.observed(lambda:seller_views.execute(tool, dict(product, **query),
                 creds[platform], directory, min(deadline-0.5,time.monotonic()+4)))
         if name == "unit_economics":
             import expansion_gateway

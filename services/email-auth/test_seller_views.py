@@ -129,3 +129,21 @@ class Contracts(unittest.TestCase):
                 self.assertEqual(blocked.exception.retry_after_seconds,1)
                 now[0]+=1
                 self.assertEqual(finance_gate.run(gate,"1",lambda:7,read_recovery=True),7)
+
+    def test_avito_item_income_keeps_seller_commission_out_of_second_deduction(self):
+        def provider(tool,args,*_):
+            if tool=="avito_get_item_info":
+                self.assertEqual(args,{"item_id":123})
+                return {"data":{"autoload_item_id":"sample","status":"active"}}
+            if tool=="avito_item_analytics":
+                self.assertNotIn("filter",args)
+                return {"data":{"result":{"groupings":[{"id":"123","metrics":[
+                    {"slug":"deliveredItems","value":2},{"slug":"deliveredItemsPrice","value":10000}]}]}}}
+            self.assertEqual(args["filter"],{"itemIDs":[123]})
+            return {"data":{"result":{"groupings":[{"spendings":[{"slug":key,"value":v} for key,v in
+                [("promotion",1000),("presence",500),("commission",200),("rest",0)]]}]}}}
+        with patch.object(avito_mcp,"read",side_effect=provider):
+            actual=seller_insights._avito("unit_economics",{"article":"sample","month":"2026-10"},
+                {"avito_item_id":123,"avito_article":"sample"},{"client_id":"fixture"},"fixture",time.monotonic()+10)
+        self.assertEqual(actual["net_after_expenses"]["per_sold_unit"],"42.5")
+        self.assertEqual(actual["sold_units"],2)
