@@ -8,13 +8,13 @@ import hashlib
 import json
 import os
 import pathlib
+import pwd
 import re
 import signal
 import stat
 import sys
 import time
 
-DIRECTORY = pathlib.Path('/var/lib/staging-account/incoming')
 MAX_BYTES = 30_000_000
 MAX_ARTIFACTS = 40
 MAX_TOTAL_BYTES = 300_000_000
@@ -285,10 +285,13 @@ def main():
     signal.signal(signal.SIGALRM, _deadline)
     signal.alarm(180)
     try:
-        _trusted_ancestors(DIRECTORY)
-        receive(DIRECTORY, sys.stdin.buffer, match[1], match[4], int(match[5]),
+        directory = pathlib.Path(pwd.getpwuid(os.geteuid()).pw_dir) / 'incoming'
+        if not directory.is_absolute():
+            raise Rejected('invalid staging account home')
+        _trusted_ancestors(directory)
+        receive(directory, sys.stdin.buffer, match[1], match[4], int(match[5]),
                 run_id=match[2], run_attempt=match[3])
-    except (Rejected, OSError, ValueError):
+    except (Rejected, KeyError, OSError, ValueError):
         print('Staging outcome not confirmed; inspect before retrying.', file=sys.stderr)
         return 1
     finally:

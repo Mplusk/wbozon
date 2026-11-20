@@ -209,14 +209,14 @@ jobs:
           candidate="$RUNNER_TEMP/reviewed-fbo"
           adoption="$RUNNER_TEMP/first-adoption"
           previous="$RUNNER_TEMP/previous-fbo"
-          baseline_ref=c8b2257cdd11bb539d3705d269fda6b23c0bde99
-          reviewed=023c4c19fb8ece8a4b302abd47ec10dd73a6cd07
+          baseline_ref=824d84a053134e06dac96aacb7a527401e50ab74
+          reviewed=19bb022125d6230cde06588a8ef6140356552ae8
           packaged="$RUNNER_TEMP/native-candidate/service"
           mkdir "$baseline" "$candidate" "$adoption" "$previous"
           git -c core.autocrlf=false archive "$baseline_ref" services/email-auth | tar -x -C "$baseline" --strip-components=2
           git -c core.autocrlf=false archive "$reviewed" services/email-auth | tar -x -C "$candidate" --strip-components=2
-          git -c core.autocrlf=false archive ebd651e963c95f7c796ff1439bb7498160adfd43 services/email-auth | tar -x -C "$adoption" --strip-components=2
-          git -c core.autocrlf=false archive 11bca6b902810fd6b86c1e6f0ed352db40a142c8 services/email-auth | tar -x -C "$previous" --strip-components=2
+          git -c core.autocrlf=false archive c5f86331fdbe6165394b566d52c79cc878c359f7 services/email-auth | tar -x -C "$adoption" --strip-components=2
+          git -c core.autocrlf=false archive 3d0bb1741f19870899c1ea498049a78acc7c99a1 services/email-auth | tar -x -C "$previous" --strip-components=2
           echo "Testing systemd transition $baseline_ref <-> $reviewed"
           # Exercise the packaged service for this transition and retain the reviewed pair as a regression thereafter.
           if [[ "$(git rev-parse "$GITHUB_SHA:services/email-auth")" == "$(git rev-parse "$reviewed:services/email-auth")" ]]; then
@@ -243,7 +243,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          reports=bed0c74cdbc320ceaf3763f596c260ae998f5530
+          reports=b78835f2adf6a09df5828bb2cf6730c93349a96f
           if [[ "$(git rev-parse "$GITHUB_SHA:services/email-auth")" == "$(git rev-parse "$reports:services/email-auth")" ]]; then
             python3 -B -I tools/native-release/check_report_rollback.py \
               --python "$RUNNER_TEMP/native-candidate-venv/bin/python" \
@@ -256,9 +256,9 @@ jobs:
         run: |
           set -euo pipefail
           cutover="$RUNNER_TEMP/market-cutover"
-          baseline=c8b2257cdd11bb539d3705d269fda6b23c0bde99
-          bridge=6eccd5d159bd2957e6ff25b18783aa6e20e81ea2
-          reports=b863b6182b3188cf27982d128e6690f0fc580830
+          baseline=824d84a053134e06dac96aacb7a527401e50ab74
+          bridge=3de87e7ffa97d903e7df2a997634a1eaee8f68b5
+          reports=146c31eb1f6cd3d74ae5d7e7d8f134a7cf100257
           for ref in "$baseline" "$bridge" "$reports"; do
             mkdir -p "$cutover/$ref/service"
             git -c core.autocrlf=false archive "$ref:services/email-auth" | tar -x -C "$cutover/$ref/service"
@@ -293,69 +293,69 @@ jobs:
           regional="$RUNNER_TEMP/market-v2-regional/service"
           active="$RUNNER_TEMP/market-v2-active/service"
           mkdir -p "$previous" "$deployed" "$reports" "$regional" "$active"
-          git archive 08c6f9b3778a4ea039d8a0093623c815cc95ecc4:services/email-auth | tar -x -C "$previous"
-          git archive 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09:services/email-auth | tar -x -C "$deployed"
-          git archive e3c2823a8f6b4714eb53ac67f4f5d1dbb04dea21:services/email-auth | tar -x -C "$reports"
-          git archive a51e1411d9b60bbdaa792e7d095e95d41ae8f2e1:services/email-auth | tar -x -C "$regional"
-          git archive 7c27cc2d0fdc8464c712f193310c2494df83366a:services/email-auth | tar -x -C "$active"
+          git archive fb80d50146f42588ab1c50cd8925e57980306965:services/email-auth | tar -x -C "$previous"
+          git archive b151124d70320946c17d22b08b1daa63964018de:services/email-auth | tar -x -C "$deployed"
+          git archive 302e47d9673c630176aaafe90eaf715e4986226d:services/email-auth | tar -x -C "$reports"
+          git archive 19eb64821718c293b95aef2044f5dcac93cf7760:services/email-auth | tar -x -C "$regional"
+          git archive 3fb3b9fbb73b1fe367aa3cc580a00f777c17e44f:services/email-auth | tar -x -C "$active"
           scoped="$RUNNER_TEMP/market-avito/service"
           mkdir -p "$scoped"
-          git archive 929c65948445c7f2e9413393ce4b198d44e1c64f:services/email-auth | tar -x -C "$scoped"
+          git archive eae44aeb9d182d5529f9cf970d9627b578cc2528:services/email-auth | tar -x -C "$scoped"
           catalogue="$RUNNER_TEMP/market-catalogue/service"
           mkdir -p "$catalogue"
-          git archive 4c2f238c567692ea580b828cfc5f792bab586a04:services/email-auth | tar -x -C "$catalogue"
+          git archive 26effadc16a75555f002c069a89eeb35df43d876:services/email-auth | tar -x -C "$catalogue"
           live="$RUNNER_TEMP/market-catalogue-production/service"
           mkdir -p "$live"
-          git archive e51eab6161dee31d4d4a5f522ac1f870d65a7284:services/email-auth | tar -x -C "$live"
+          git archive 629f6db13c02973015d505be6071b6098f04d414:services/email-auth | tar -x -C "$live"
           recovery="$RUNNER_TEMP/market-report-recovery/service"
           mkdir -p "$recovery"
-          git archive 8c4fb1f5ae6aa0b18ff93324f8c0dc05074ff074:services/email-auth | tar -x -C "$recovery"
+          git archive 35d33b1996461802baf2b248031115b8e98a4eb8:services/email-auth | tar -x -C "$recovery"
           snapshot="$RUNNER_TEMP/marketplace-verified-snapshots/service"
           mkdir -p "$snapshot"
-          git archive d0af460f912a6582f76bbf3036ef0757d6d2d60e:services/email-auth | tar -x -C "$snapshot"
+          git archive ad3047b13e069ce7b8c1836db5a567a4a9dea85a:services/email-auth | tar -x -C "$snapshot"
           order_archive="$RUNNER_TEMP/marketplace-order-archive/service"
           mkdir -p "$order_archive"
-          git archive 7b606bf1a1126fe912980aa6dd487c61e745b65b:services/email-auth | tar -x -C "$order_archive"
+          git archive 22cc8f7e1175f53b2c2b0a49ea82ee4533122eba:services/email-auth | tar -x -C "$order_archive"
           finance_costs="$RUNNER_TEMP/marketplace-finance-costs/service"
           mkdir -p "$finance_costs"
-          git archive c60452d10141a5fd50563b41f01b4cf0870648bf:services/email-auth | tar -x -C "$finance_costs"
+          git archive 1c3d5678d25a221bf39c781361e7725d30694717:services/email-auth | tar -x -C "$finance_costs"
           report_workers="$RUNNER_TEMP/marketplace-report-workers/service"
           mkdir -p "$report_workers"
-          git archive dd7319e0e8ad96b6bbaee913ab57321adb26f3fd:services/email-auth | tar -x -C "$report_workers"
+          git archive adce143e7c15c99a6f68dbde27761b0b021ad384:services/email-auth | tar -x -C "$report_workers"
           seller_reports="$RUNNER_TEMP/marketplace-seller-settlements/service"
           mkdir -p "$seller_reports"
-          git archive 7337733849a4f1d742a36d94d16f988f4555602f:services/email-auth | tar -x -C "$seller_reports"
+          git archive f64e565ac7cb11d6d4113e3a452c40fa187dbce8:services/email-auth | tar -x -C "$seller_reports"
           typed_reports="$RUNNER_TEMP/marketplace-typed-reports/service"
           mkdir -p "$typed_reports"
-          git archive b4ef24694d47d8e1ab0711da09ca50de9a913213:services/email-auth | tar -x -C "$typed_reports"
+          git archive 322597742c6aa4670a48d4796a8a2fa8804623ef:services/email-auth | tar -x -C "$typed_reports"
           seller_receipts="$RUNNER_TEMP/marketplace-seller-receipts/service"
           mkdir -p "$seller_receipts"
-          git archive 76c19dc2abd919b67ab0820e3d5f407ea56acee1:services/email-auth | tar -x -C "$seller_receipts"
+          git archive 525ab9054c3c2683d2b25032e2b5ca227b445587:services/email-auth | tar -x -C "$seller_receipts"
           resumable_reports="$RUNNER_TEMP/marketplace-resumable-reports/service"
           mkdir -p "$resumable_reports"
-          git archive 16ea3341869ae3a39b61142f230278c049afc5a0:services/email-auth | tar -x -C "$resumable_reports"
+          git archive c5a2558817b4969ddea983d88157edf3820d32e2:services/email-auth | tar -x -C "$resumable_reports"
           scoped_reports="$RUNNER_TEMP/marketplace-scoped-reports/service"
           mkdir -p "$scoped_reports"
-          git archive 13a1d844d84d4f392e88cedf610e7ec2e1b81eae:services/email-auth | tar -x -C "$scoped_reports"
+          git archive b970edd32559dc0445b7b26673153767652bd2e0:services/email-auth | tar -x -C "$scoped_reports"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
-            --candidate-service "$deployed" --candidate-commit 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09 \
-            --next-service "$reports" --next-commit e3c2823a8f6b4714eb53ac67f4f5d1dbb04dea21 \
-            --latest-service "$regional" --latest-commit a51e1411d9b60bbdaa792e7d095e95d41ae8f2e1 \
-            --successor 7c27cc2d0fdc8464c712f193310c2494df83366a "$active" \
-            --successor 929c65948445c7f2e9413393ce4b198d44e1c64f "$scoped" \
-            --successor 4c2f238c567692ea580b828cfc5f792bab586a04 "$catalogue" \
-            --successor e51eab6161dee31d4d4a5f522ac1f870d65a7284 "$live" \
-            --successor 8c4fb1f5ae6aa0b18ff93324f8c0dc05074ff074 "$recovery" \
-            --successor d0af460f912a6582f76bbf3036ef0757d6d2d60e "$snapshot" \
-            --successor 7b606bf1a1126fe912980aa6dd487c61e745b65b "$order_archive" \
-            --successor c60452d10141a5fd50563b41f01b4cf0870648bf "$finance_costs" \
-            --successor dd7319e0e8ad96b6bbaee913ab57321adb26f3fd "$report_workers" \
-            --successor 7337733849a4f1d742a36d94d16f988f4555602f "$seller_reports" \
-            --successor b4ef24694d47d8e1ab0711da09ca50de9a913213 "$typed_reports" \
-            --successor 76c19dc2abd919b67ab0820e3d5f407ea56acee1 "$seller_receipts" \
-            --successor 16ea3341869ae3a39b61142f230278c049afc5a0 "$resumable_reports" \
-            --successor 13a1d844d84d4f392e88cedf610e7ec2e1b81eae "$scoped_reports" \
+            --candidate-service "$deployed" --candidate-commit b151124d70320946c17d22b08b1daa63964018de \
+            --next-service "$reports" --next-commit 302e47d9673c630176aaafe90eaf715e4986226d \
+            --latest-service "$regional" --latest-commit 19eb64821718c293b95aef2044f5dcac93cf7760 \
+            --successor 3fb3b9fbb73b1fe367aa3cc580a00f777c17e44f "$active" \
+            --successor eae44aeb9d182d5529f9cf970d9627b578cc2528 "$scoped" \
+            --successor 26effadc16a75555f002c069a89eeb35df43d876 "$catalogue" \
+            --successor 629f6db13c02973015d505be6071b6098f04d414 "$live" \
+            --successor 35d33b1996461802baf2b248031115b8e98a4eb8 "$recovery" \
+            --successor ad3047b13e069ce7b8c1836db5a567a4a9dea85a "$snapshot" \
+            --successor 22cc8f7e1175f53b2c2b0a49ea82ee4533122eba "$order_archive" \
+            --successor 1c3d5678d25a221bf39c781361e7725d30694717 "$finance_costs" \
+            --successor adce143e7c15c99a6f68dbde27761b0b021ad384 "$report_workers" \
+            --successor f64e565ac7cb11d6d4113e3a452c40fa187dbce8 "$seller_reports" \
+            --successor 322597742c6aa4670a48d4796a8a2fa8804623ef "$typed_reports" \
+            --successor 525ab9054c3c2683d2b25032e2b5ca227b445587 "$seller_receipts" \
+            --successor c5a2558817b4969ddea983d88157edf3820d32e2 "$resumable_reports" \
+            --successor b970edd32559dc0445b7b26673153767652bd2e0 "$scoped_reports" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -489,6 +489,7 @@ jobs:
         env:
           STAGE_SSH_KEY: ${{ secrets.WBOZON_STAGE_SSH_KEY }}
           STAGE_KNOWN_HOSTS: ${{ secrets.WBOZON_STAGE_KNOWN_HOSTS }}
+          STAGE_SSH_TARGET: ${{ secrets.WBOZON_STAGE_SSH_TARGET }}
           BUILD_ATTEMPT: ${{ needs.native-candidate.outputs.artifact_attempt }}
           BUILD_SHA256: ${{ needs.native-candidate.outputs.artifact_sha256 }}
         shell: bash
@@ -498,6 +499,10 @@ jobs:
           [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$BUILD_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
           test -n "$STAGE_SSH_KEY"
           test -n "$STAGE_KNOWN_HOSTS"
+          if [[ ! "$STAGE_SSH_TARGET" =~ ^[A-Za-z_][A-Za-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; then
+            echo "::error::Configure WBOZON_STAGE_SSH_TARGET as user@host."
+            exit 1
+          fi
           artifact="$RUNNER_TEMP/native-artifact/native-portal-${GITHUB_SHA}.tar.gz"
           test -f "$artifact" && test ! -L "$artifact"
           test -f "$RUNNER_TEMP/native-artifact/SHA256SUMS" && test ! -L "$RUNNER_TEMP/native-artifact/SHA256SUMS"
@@ -521,13 +526,13 @@ jobs:
               -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$private_dir/known_hosts" \
               -o GlobalKnownHostsFile=/dev/null -o ClearAllForwardings=yes \
               -o ConnectTimeout=60 -o ServerAliveInterval=15 -o ServerAliveCountMax=6 \
-              staging-account@portal.example.invalid "stage $GITHUB_SHA $GITHUB_RUN_ID $BUILD_ATTEMPT $digest $bytes" \
+              -- "$STAGE_SSH_TARGET" "stage $GITHUB_SHA $GITHUB_RUN_ID $BUILD_ATTEMPT $digest $bytes" \
               < "$artifact" 2>"$private_dir/ssh-error"; then
               exit 0
             else
               status=$?
             fi
-            cat "$private_dir/ssh-error" >&2
+            echo "::warning::Staging SSH exited with status $status."
             if grep -Eiq \
               -e 'Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED|Permission denied' \
               -e 'Authentication failed|Failed to authenticate|Too many authentication failures|Bad owner or permissions|Load key ' \
@@ -565,12 +570,19 @@ jobs:
         env:
           HOST_KEY: ${{ secrets.WBOZON_STAGE_KNOWN_HOSTS }}
           DEPLOY_KEY: ${{ secrets.WBOZON_DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_TARGET: ${{ secrets.WBOZON_DEPLOY_SSH_TARGET }}
           GH_TOKEN: ${{ github.token }}
           ARTIFACT: ${{ needs.native-candidate.outputs.artifact_id }}
           BUILD_ATTEMPT: ${{ needs.native-candidate.outputs.artifact_attempt }}
           TAR_SHA256: ${{ needs.native-candidate.outputs.artifact_sha256 }}
         run: |
           set -euo pipefail
+          if [[ ! "$DEPLOY_SSH_TARGET" =~ ^[A-Za-z_][A-Za-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; then
+            echo "::error::Configure WBOZON_DEPLOY_SSH_TARGET as user@host."
+            exit 1
+          fi
+          test -n "$DEPLOY_KEY"
+          test -n "$HOST_KEY"
           umask 077
           keys="$(mktemp -d "$RUNNER_TEMP/wbozon-deploy.XXXXXX")"
           trap 'rm -f "$keys/id" "$keys/known_hosts" "$keys/ssh-error"; rmdir "$keys"' EXIT
@@ -583,18 +595,18 @@ jobs:
                 -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$keys/known_hosts" \
                 -o GlobalKnownHostsFile=/dev/null -o ClearAllForwardings=yes \
                 -o ConnectTimeout=90 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-                deploy-user@portal.example.invalid deploy 2>"$keys/ssh-error"; then
+                -- "$DEPLOY_SSH_TARGET" deploy 2>"$keys/ssh-error"; then
               exit 0
             else
               status=$?
             fi
-            cat "$keys/ssh-error" >&2
+            echo "::warning::Deployment SSH exited with status $status."
             # These messages precede authentication and the remote deployment command.
             # A later disconnect has an uncertain outcome and requires reconciliation.
             if [[ $status != 255 || $attempt == 3 ]] || ! grep -Eq \
               -e '^kex_exchange_identification: (read: Connection reset by peer|Connection closed by remote host)' \
               -e '^Connection timed out during banner exchange' \
-              -e '^ssh: connect to host portal\.example\.invalid port 22: (Connection timed out|Connection refused)' \
+              -e '^ssh: connect to host [^[:space:]]+ port [0-9]+: (Connection timed out|Connection refused)$' \
               "$keys/ssh-error"; then
               exit "$status"
             fi

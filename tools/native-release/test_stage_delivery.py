@@ -13,6 +13,7 @@ import unittest
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
 PAYLOAD = b"synthetic staged artifact\n"
 COMMIT = "a" * 40
+SSH_TARGET = "staging-test@stage.example.invalid"
 
 
 class StagingDeliveryTests(unittest.TestCase):
@@ -92,6 +93,7 @@ ssh() {
                 "GITHUB_SHA": COMMIT,
                 "GITHUB_RUN_ID": "381",
                 "BUILD_ATTEMPT": "7",
+                "STAGE_SSH_TARGET": SSH_TARGET,
                 "digest": digest,
                 "bytes": str(len(PAYLOAD)),
             }
@@ -113,11 +115,12 @@ ssh() {
                 options = (directory / f"arguments-{i}").read_text().splitlines()
                 self.assertEqual(
                     options[-2:],
-                    ["staging-account@portal.example.invalid", f"stage {COMMIT} 381 7 {digest} {len(PAYLOAD)}"],
+                    [SSH_TARGET, f"stage {COMMIT} 381 7 {digest} {len(PAYLOAD)}"],
                 )
                 self.assertIn("StrictHostKeyChecking=yes", options)
                 self.assertIn("IdentitiesOnly=yes", options)
                 self.assertIn("ClearAllForwardings=yes", options)
+                self.assertEqual(options[-3], "--")
             waits = directory / "waits"
             delays = waits.read_text().splitlines() if waits.exists() else []
             return proc.returncode, attempts, delays

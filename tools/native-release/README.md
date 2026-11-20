@@ -327,7 +327,8 @@ I/O supervision. Synthetic tests do not prove real systemd drain or recovery.
 
 `stage_receiver.py` accepts an archive over a forced SSH command for a dedicated
 unprivileged account. It checks the announced length and digest and writes only
-to that account's private staging directory. It never unpacks, executes or activates
+to the private `incoming` directory under that account's home from the host user
+database. It never unpacks, executes or activates
 the archive. The SSH key cannot invoke a shell or write to the live release. The
 staged file and sender-supplied digest are **not** independent proof of CI origin;
 any future privileged promoter must obtain trusted provenance and verify the
@@ -340,6 +341,9 @@ release branch. A separate, fresh GitHub runner downloads the exact artifact ID
 and compares its tarball digest with the builder's job output; the build and tests
 do not run in the job containing the staging key. Uploads use
 pinned SSH host keys and encrypted GitHub secrets.
+The two connection targets come from `WBOZON_STAGE_SSH_TARGET` and
+`WBOZON_DEPLOY_SSH_TARGET` in GitHub Actions Secrets. Set each as `user@host`
+for its pinned host key and forced command.
 The transfer retries a network interruption up to twice with the same build
 attempt, archive and digest. Each upload has a 150-second deadline. The receiver
 checks an existing file under the same identity before acknowledging delivery.
