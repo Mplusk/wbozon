@@ -18,6 +18,9 @@ session authentication, CSRF, encrypted storage and shutdown. On the VPS this
 synthetic portal uses one worker within its CPU quota. CI tests the packaged
 two-worker configuration, and production readiness verifies both serving workers.
 Both host checks run as wbozon-test with private networking and bounded tmpfs.
+The host's catalogue suite prepares the same verified TLS context as the
+serving worker before timing its synthetic requests. The suite also exercises
+cold TLS initialization and provider deadline cancellation independently.
 The controller and its trust policy are installed separately by the administrator.
 
 On the two-vCPU production VPS the portal's systemd drop-in grants one CPU

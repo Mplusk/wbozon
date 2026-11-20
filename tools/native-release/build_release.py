@@ -143,6 +143,19 @@ def _sandbox(release, unit, args, cwd, *, runtime_seconds, cpu_weight=20, cpu_qu
         raise BuildError('isolated test unit still exists')
 
 
+def unit_test_command(python, files, tests):
+    if tests and 'service/market_https.py' in files:
+        # The production worker loads the system trust store before its request
+        # deadline starts. Use that preparation inside the same isolated process
+        # as the catalogue tests, with the original deadlines and assertions.
+        program = ('import sys, unittest\n'
+                   'from market_https import VerifiedHTTPS\n'
+                   'VerifiedHTTPS()\n'
+                   'unittest.main(module=None, argv=["unittest", "-q", *sys.argv[1:]])')
+        return [str(python), '-c', program, *tests]
+    return [str(python), '-m', 'unittest', '-q', *tests]
+
+
 def prepare(files, release, work, *, run_id, attempt, release_gid):
     release, work = pathlib.Path(release), pathlib.Path(work)
     test_gid = grp.getgrnam('wbozon-test').gr_gid
@@ -193,7 +206,7 @@ def prepare(files, release, work, *, run_id, attempt, release_gid):
     # Bound the focused checks below one core while allowing their cold workers
     # to make progress alongside the package manager and other host services.
     resources = {'cpu_weight': 200, 'cpu_quota': 75} if tests else {}
-    _sandbox(release, prefix + '-unit', [str(python), '-m', 'unittest', '-q', *tests], release / 'service',
+    _sandbox(release, prefix + '-unit', unit_test_command(python, files, tests), release / 'service',
              runtime_seconds=720, **resources)
     _sandbox(release, prefix + '-smoke', [str(python), str(release / 'test_native.py')], '/tmp',
              runtime_seconds=300, single_smoke_worker=bool(tests), **resources)

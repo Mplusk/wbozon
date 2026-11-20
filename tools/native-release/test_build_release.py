@@ -1,3 +1,5 @@
+import subprocess
+import sys
 import unittest
 import tempfile
 from pathlib import Path
@@ -35,6 +37,23 @@ class BuildInputTests(unittest.TestCase):
                 self.assertIn(f"--property=CPUQuota={resources.get('cpu_quota', 150)}%", args)
                 self.assertEqual('GUNICORN_CMD_ARGS=--workers=1' in args, resources.get('single_smoke_worker', False))
                 self.assertGreater(run.call_args.kwargs['timeout'], seconds)
+
+    def test_verified_tls_is_ready_in_the_same_test_process_and_failures_propagate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'market_https.py').write_text(
+                'prepared = False\ndef VerifiedHTTPS():\n global prepared\n prepared = True\n')
+            (root / 'test_fixture.py').write_text(
+                'import unittest, market_https\nclass Cases(unittest.TestCase):\n'
+                ' def test_ready(self): self.assertTrue(market_https.prepared)\n'
+                ' def test_fails(self): self.fail("synthetic")\n')
+            for case, code in (('test_ready', 0), ('test_fails', 1)):
+                args = build_release.unit_test_command(sys.executable, {'service/market_https.py': b''},
+                                                       ['test_fixture.Cases.' + case])
+                result = subprocess.run(args, cwd=root, capture_output=True, timeout=60)
+                self.assertEqual(result.returncode, code)
+            legacy = build_release.unit_test_command(sys.executable, {}, ['test_fixture.Cases.test_ready'])
+            self.assertEqual(legacy, [sys.executable, '-m', 'unittest', '-q', 'test_fixture.Cases.test_ready'])
 
     def test_builder_reports_the_stage_of_a_timeout(self):
         timed_out = build_release.subprocess.TimeoutExpired(['private-argument'], 360)
