@@ -704,8 +704,10 @@ class Portal:
         self.mcp_token_hash=mcp_read_token_hash
         self.external_keys=external_key_store if external_key_store is not None else external_keys.KeyStore(vault.path)
         self.oauth=oauth_store if oauth_store is not None else oauth_mcp.OAuthStore(vault.path,signing_secret=login.secret,clock=login.clock)
-    def read_gateway(self, operation, args, creds):
+    def read_gateway(self, operation, args, creds, *, include_avito=False):
         if operation=='mcp_health':
+            from functools import partial
+            accounts=partial(expansion_gateway.credentials,include_avito=include_avito)
             detail=None
             if 'probe_arguments' in args:
                 name,probe=args['tool_name'],args['probe_arguments']
@@ -717,7 +719,7 @@ class Portal:
                     route,_=market_specs.seller_reports.request(name,probe)
                     account=market_catalog.read_credentials(self.vault,route)
                 else:
-                    account=expansion_gateway.credentials(self.vault,name)
+                    account=accounts(self.vault,name)
                 if account:
                     try:
                         data=self.read_gateway(name,probe,account)
@@ -738,7 +740,9 @@ class Portal:
                             if k in ('provider_method','retry_after_seconds','retry_basis')})
                     except urllib.error.URLError:
                         detail={'status':'transport_error','http_status':None}
-            report=market_health.read(self.vault,self.finance_gate_dir,args,external_mcp.TOOL_NAMES,expansion_gateway.credentials)
+                else:
+                    detail=self._unconfigured_read(name)
+            report=market_health.read(self.vault,self.finance_gate_dir,args,external_mcp.TOOL_NAMES,accounts)
             report["seller_capabilities"]=market_specs.seller_reports.capabilities(self.vault,self.finance_gate_dir,
                     args.get("refresh_capabilities",False),self.read_gateway)
             caps=report["seller_capabilities"]
@@ -789,6 +793,10 @@ class Portal:
             market_history.History(self.finance_gate_dir).record(creds,operation,status)
         except (OSError,sqlite3.Error):
             pass
+
+    def _unconfigured_read(self, operation):
+        self._observe(operation, None, 'not_configured')
+        return dict(status='not_configured', complete=False, data_as_of=None, http_status=None)
 
     def _dispatch_read(self, operation, args, creds):
         if operation not in finance_gate.FINANCE_OPERATIONS:
@@ -890,19 +898,26 @@ class Portal:
                         if not selected or selected in avito_mcp.PUBLIC_CONTRACTS:
                             account=self.vault.read("avito")
                             hist=market_history.History(self.finance_gate_dir)
-                            items=[dict(tool=n,category="Avito",**(hist.check(account,n) if account else
-                                {"status":"not_configured","last_checked_at":None})) for n in sorted(avito_mcp.PUBLIC_CONTRACTS) if selected in (None,n)]
+                            probe=None
+                            if selected and "probe_arguments" in args:
+                                avito_mcp.validate(selected,args["probe_arguments"])
+                                if account:
+                                    from market_composites import observed
+                                    probe=observed(lambda:self.read_gateway(selected,args["probe_arguments"],account))
+                                else:
+                                    probe=self._unconfigured_read(selected)
+                            items=[dict(tool=n,category="Avito",**hist.check(account or None,n))
+                                   for n in sorted(avito_mcp.PUBLIC_CONTRACTS) if selected in (None,n)]
                             if selected:
                                 result=market_specs.result(items,tool_count=len(items))
-                                if "probe_arguments" in args and account:
-                                    from market_composites import observed
-                                    avito_mcp.validate(selected,args["probe_arguments"])
-                                    probe=observed(lambda:self.read_gateway(selected,args["probe_arguments"],account))
+                                if probe is not None:
                                     result["probe"]={k:probe.get(k) for k in ("status","complete","data_as_of","http_status")}
                             else:
-                                result=self.read_gateway(operation,args,{})
+                                result=self.read_gateway(operation,args,{},include_avito=True)
                                 result["items"].extend(items);result["tool_count"]+=len(items)
                             return result
+                    if operation=='mcp_health':
+                        return self.read_gateway(operation,args,{},include_avito=current_access=="all")
                     if operation in market_specs.seller_reports.GROUPS:
                         route, inputs=market_specs.seller_reports.request(operation,args)
                         if inputs is None:
@@ -911,10 +926,10 @@ class Portal:
                     else:
                         creds=(market_catalog.read_credentials(self.vault,market_catalog.routes()[args['operation_id']]) if operation=='market_api_read'
                            else self.vault.read('avito') if operation in avito_mcp.PUBLIC_CONTRACTS else
-                           expansion_gateway.credentials(self.vault,operation))
-                        if current_access=="all" and operation in ("article_map","unit_economics","sales_drop_check"):
-                            creds=dict(creds or {},avito=self.vault.read("avito"))
-                    if not creds and operation!='mcp_health': raise external_mcp.MCPToolError('not_configured')
+                           expansion_gateway.credentials(self.vault,operation,include_avito=current_access=="all"))
+                    if not creds and operation!='mcp_health':
+                        self._unconfigured_read(operation)
+                        raise external_mcp.MCPToolError('not_configured')
                     return self.read_gateway(operation,args,creds)
                 except market_actions.ActionError as exc:
                     return {'status':'action_unavailable','reason':str(exc)}
@@ -925,7 +940,7 @@ class Portal:
                         return {'status':'provider_error','http_status':status,'reason':{400:'invalid_provider_parameters',
                                 401:'provider_credentials',402:'provider_subscription_required',403:'provider_access_denied',
                                 404:'provider_resource_not_found',422:'provider_validation_failed'}.get(status,'provider_replied')}
-                    code='provider_access_denied' if exc.code in (401,403) else 'rate_limited' if exc.code==429 else 'unavailable'
+                    code='provider_access_denied' if exc.code in (401,402,403) else 'rate_limited' if exc.code==429 else 'unavailable'
                     delay=getattr(exc,'retry_after_seconds',None) if exc.code==429 else None
                     if exc.code==429 and delay is None: delay,_=finance_gate.parse_retry_after(exc.headers)
                     raw_delay=delay
@@ -934,7 +949,7 @@ class Portal:
                     guarded=operation in finance_gate.FINANCE_OPERATIONS or operation in avito_mcp.PUBLIC_CONTRACTS
                     reason='retry_time_unknown' if exc.code==429 and delay is None and guarded else None
                     if raw_delay is not None and delay is None: reason='retry_interval_unavailable'
-                    raise external_mcp.MCPToolError(code,retry_after_seconds=delay,reason=reason) from None
+                    raise external_mcp.MCPToolError(code,retry_after_seconds=delay,reason=reason,http_status=exc.code) from None
                 except finance_gate.GateError as exc:
                     code='rate_limited' if exc.reason in ('busy','cooldown','retry_time_unknown') else 'unavailable'
                     delay=public_retry_delay(exc.retry_after_seconds,creds)

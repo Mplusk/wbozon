@@ -371,7 +371,45 @@ class WBExpansionContracts(unittest.TestCase):
         result = self.read('wb_acceptance_slots', {'warehouse_id': 42}, wire)
         self.assertFalse(result['complete'])
         self.assertEqual(result['status'], 'upstream_disabled')
+        self.assertEqual(result['http_status'], 503)
         self.assertEqual(result['items'], [])
+
+    def test_tariffs_keep_the_directory_error_and_use_only_unique_observed_names(self):
+        import seller_wb_views
+        from seller_views import SourceIssue
+        from types import SimpleNamespace
+
+        def report(error, names):
+            wire = Mock(side_effect=error)
+            wire.progress_snapshot.return_value = {"names": names}
+            fetch = Mock(return_value={"response":{"data":{"currency":"RUB","warehouseList":[
+                {"warehouseName":"Склад A"}, {"warehouseName":"Склад B"}]}}})
+            return SimpleNamespace(args={"warehouse_id":3026}, first=START, wire=wire, fetch=fetch, meta={})
+
+        url = FBW + '/api/v1/warehouses'
+        throttled = HTTPError(url, 429, 'limited', {'Retry-After':'70'}, None)
+        with self.assertRaises(HTTPError) as failure:
+            list(seller_wb_views._tariffs(report(throttled, [])))
+        self.assertIs(failure.exception, throttled)
+        def absent():
+            return HTTPError(url, 404, 'unavailable', {}, None)
+        for names in ([], ['Склад A','Склад B']):
+            with self.subTest(names=names), self.assertRaises(SourceIssue) as failure:
+                list(seller_wb_views._tariffs(report(absent(), names)))
+            self.assertEqual(failure.exception.info['http_status'], 404)
+        known = report(absent(), ['Склад A'])
+        self.assertEqual([r['warehouse'] for r in seller_wb_views._tariffs(known)], ['Склад A'])
+        self.assertEqual(known.meta['warehouse_name_source'], 'verified_supply_office_id')
+        for names, supplied, expected in ((['Склад A','Склад B'], None, 'warehouse_name_ambiguous'),
+                                         (['Склад A'], 'Склад B', 'warehouse_name_mismatch')):
+            with self.subTest(expected=expected):
+                catalog = [{"ID":3026, "name":name} for name in names]
+                selected = report([catalog], [])
+                if supplied:
+                    selected.args['warehouse'] = supplied
+                with self.assertRaises(SourceIssue) as failure:
+                    list(seller_wb_views._tariffs(selected))
+                self.assertEqual(failure.exception.info['status'], expected)
 
     def test_restored_slots_preserve_blocked_free_and_paid_types_for_the_14_day_horizon(self):
         today = datetime.now(timezone(timedelta(hours=3))).date()

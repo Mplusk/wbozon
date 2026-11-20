@@ -453,6 +453,34 @@ class Recovery(unittest.TestCase):
             self.assertEqual((row["warehouse"], row["warehouse_name"], row["warehouse_basis"]),
                              ("Склад WB №3026", None, "reported_id_only"))
 
+    def test_warehouse_name_resumes_after_retry_after_without_reloading_goods(self):
+        wire=ResumeWire()
+        args=dict(article="A",date_from="2026-10-01",date_to="2026-10-31")
+        headers=market_specs.result([dict(supply_id=7,preorder_id=None)])
+        detail=lambda row,wire: dict(row,warehouse=None,warehouse_id=3026,actual_warehouse_id=None)
+        limited=urllib.error.HTTPError("https://supplies-api.wildberries.ru/api/v1/warehouses",
+                                      429,"limit",{"Retry-After":"60"},None)
+        catalog={"warehouses_status":"reported","warehouses":[{"warehouse_id":3026,"name":"Склад A"}]}
+        with patch.object(wb_expansion,"supply_headers", return_value=headers), patch.object(
+                wb_expansion,"_goods",return_value=market_specs.result([{"quantity":77,"accepted_quantity":76}])) as goods, patch.object(
+                wb_expansion,"supply_detail",side_effect=detail) as details, patch.object(
+                wb_expansion,"_warehouse_directory",side_effect=[limited,catalog]) as directory, patch.object(supply_history.time,"time") as clock:
+            clock.return_value=1000
+            first=supply_history.report("wb_supplies",args,wire)
+            self.assertFalse(first["warehouses_checked"])
+            self.assertEqual(first["items"][0]["declared_units"],77)
+            self.assertEqual(first["pending_sources"][0]["http_status"],429)
+            clock.return_value=1040
+            next_page=supply_history.report("wb_supplies",args,wire)
+            self.assertEqual(next_page["pending_sources"][0]["retry_after_seconds"],20)
+            self.assertIsNone(next_page["pending_sources"][0]["http_status"])
+            self.assertEqual(directory.call_count,1)
+            clock.return_value=1060
+            done=supply_history.report("wb_supplies",args,wire)
+            self.assertTrue(done["complete"] and done["warehouse_names_complete"])
+            self.assertEqual(done["items"][0]["warehouse_name"],"Склад A")
+            self.assertEqual((goods.call_count,details.call_count,directory.call_count),(1,1,2))
+
     def test_postings_archive_requires_both_schemes_and_keeps_financial_metrics_separate(self):
         class PostingWire(ResumeWire):
             provider, creds = "ozon", {"client_id":"1", "api_key":"fixture"}

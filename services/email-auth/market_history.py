@@ -173,11 +173,9 @@ class History:
                 "SELECT outcome,checked FROM checks WHERE credential=? AND tool=?",
                 (credential_id(creds), name),
             ).fetchone()
-        return (
-            {"status": found[0], "last_checked_at": found[1]}
-            if found
-            else {"status": "untested", "last_checked_at": None}
-        )
+        if found:
+            return {"status": found[0], "last_checked_at": found[1]}
+        return {"status": "untested" if creds else "not_configured", "last_checked_at": None}
 
 
 def days_between(start, end):

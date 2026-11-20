@@ -30,12 +30,16 @@ def provider(name):
     return "wb" if name.startswith("wb_") else "ozon"
 
 
-def credentials(vault, name):
+def credentials(vault, name, *, include_avito=False):
     if name in market_health.COMPOSITE:
         keys={p:c for p in ("wb","ozon","performance") if (c:=vault.read(p))}
         extras={p:c for p in market_health.WB_CATEGORIES if (c:=vault.read(p))}
         if extras:
             keys["wb"]=dict(keys.get("wb") or next(iter(extras.values())),category_keys=extras)
+        if include_avito and name in ("article_map", "unit_economics", "sales_drop_check"):
+            avito = vault.read("avito")
+            if keys or avito:
+                keys["avito"] = avito
         return keys
     if name.startswith("wb_"):
         preferred=market_health.WB_TOOLS.get(name)

@@ -62,7 +62,7 @@ def read(vault, directory, args, names, credentials):
     items = []
     for name in chosen:
         creds = credentials(vault, name)
-        status = db.check(creds, name) if creds else {"status": "not_configured", "last_checked_at": None}
+        status = db.check(creds or None, name)
         items.append(dict(tool=name, category=WB_CATEGORIES.get(WB_TOOLS.get(name)), **status))
     tokens = []
     for key, label in {

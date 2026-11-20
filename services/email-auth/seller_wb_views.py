@@ -102,12 +102,24 @@ def _tariffs(r):
     kind=r.args.get("kind","return");day=r.args.get("date",r.first.isoformat())
     office=r.args.get("warehouse")
     transit=r.fetch("wb_tariff_reports","transit",ttl=86400) if kind=="transit" else None
-    if not office and r.args.get("warehouse_id"):
-        from wb_expansion import _warehouse_directory
-        directory=_warehouse_directory({"include_warehouses":True,"warehouse_id":r.args["warehouse_id"]},r.wire,{})
-        names={str(w["warehouse_id"]):w["name"] for w in directory.get("warehouses",[]) if w.get("name")}
-        office=names.get(str(r.args["warehouse_id"]))
-        if not office:raise SourceIssue(source="warehouse_directory",status="warehouse_name_unavailable",warehouse_id=r.args["warehouse_id"])
+    if r.args.get("warehouse_id"):
+        from wb_expansion import _warehouse_directory, verified_supply_warehouse_name
+        ident = r.args["warehouse_id"]
+        directory = _warehouse_directory({"include_warehouses": True, "warehouse_id": ident}, r.wire, {}, required=True)
+        names = {w["name"].strip() for w in directory.get("warehouses", []) if isinstance(w.get("name"), str) and w["name"].strip()}
+        if len(names) > 1:
+            raise SourceIssue(source="/api/v1/warehouses", status="warehouse_name_ambiguous", warehouse_id=ident)
+        confirmed = next(iter(names), None)
+        if confirmed is None:
+            confirmed = verified_supply_warehouse_name(r.wire, ident)
+            if not confirmed:
+                code = directory.get("warehouse_catalog_http_status")
+                raise SourceIssue(source="/api/v1/warehouses", status="provider_access_denied" if code in (401,403)
+                                  else "warehouse_name_unavailable", http_status=code, required_category="Поставки", warehouse_id=ident)
+            r.meta["warehouse_name_source"] = "verified_supply_office_id"
+        if office and office.strip().casefold() != confirmed.casefold():
+            raise SourceIssue(source="warehouse_id", status="warehouse_name_mismatch", warehouse_id=ident)
+        office = confirmed
     if transit is not None:
         for row in transit:
             if not office or office in (row.get("transitWarehouseName"),row.get("destinationWarehouseName")):

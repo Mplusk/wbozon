@@ -331,6 +331,9 @@ jobs:
           seller_receipts="$RUNNER_TEMP/marketplace-seller-receipts/service"
           mkdir -p "$seller_receipts"
           git archive 76c19dc2abd919b67ab0820e3d5f407ea56acee1:services/email-auth | tar -x -C "$seller_receipts"
+          resumable_reports="$RUNNER_TEMP/marketplace-resumable-reports/service"
+          mkdir -p "$resumable_reports"
+          git archive 16ea3341869ae3a39b61142f230278c049afc5a0:services/email-auth | tar -x -C "$resumable_reports"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09 \
@@ -348,6 +351,7 @@ jobs:
             --successor 7337733849a4f1d742a36d94d16f988f4555602f "$seller_reports" \
             --successor b4ef24694d47d8e1ab0711da09ca50de9a913213 "$typed_reports" \
             --successor 76c19dc2abd919b67ab0820e3d5f407ea56acee1 "$seller_receipts" \
+            --successor 16ea3341869ae3a39b61142f230278c049afc5a0 "$resumable_reports" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -395,7 +399,9 @@ jobs:
           check_pair "$seller_reports" "$typed_reports"
           seller_receipts="$RUNNER_TEMP/marketplace-seller-receipts/service"
           check_pair "$typed_reports" "$seller_receipts"
-          check_pair "$seller_receipts" "$packaged"
+          resumable_reports="$RUNNER_TEMP/marketplace-resumable-reports/service"
+          check_pair "$seller_receipts" "$resumable_reports"
+          check_pair "$resumable_reports" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

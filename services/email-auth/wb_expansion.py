@@ -109,10 +109,17 @@ def supply_detail(parent, request):
                     pass
         if not row["warehouse"]:
             ident = row["warehouse_id"] or row["actual_warehouse_id"]
-            names = request.progress_snapshot("wb-supply-office-names-v1", [str(ident)]).get("names", [])
-            if len(names) == 1:
-                row.update(warehouse=names[0], warehouse_name=names[0], warehouse_basis="verified_supply_office_id")
+            known = verified_supply_warehouse_name(request, ident)
+            if known:
+                row.update(warehouse=known, warehouse_name=known, warehouse_basis="verified_supply_office_id")
     return row
+
+
+def verified_supply_warehouse_name(request, ident):
+    if ident is None or not hasattr(request, "progress_snapshot"):
+        return None
+    names = request.progress_snapshot("wb-supply-office-names-v1", [str(ident)]).get("names", [])
+    return names[0] if len(names) == 1 else None
 
 
 def display_supply_warehouse(row):
@@ -926,6 +933,8 @@ def _slots(args, request):
                 [],
                 complete=False,
                 status="upstream_disabled",
+                http_status=exc.code,
+                provider_method=COEFFICIENTS,
                 horizon_days=14,
                 source="https://dev.wildberries.ru/release-notes?id=570",
             ),
@@ -997,7 +1006,7 @@ def _slots(args, request):
     return data
 
 
-def _warehouse_directory(args, request, data):
+def _warehouse_directory(args, request, data, *, required=False):
     if not args.get("include_warehouses"):
         return data
     try:
@@ -1009,6 +1018,8 @@ def _warehouse_directory(args, request, data):
             ttl=1800,
         )
     except urllib.error.HTTPError as exc:
+        if required and exc.code == 429:
+            raise
         data.update(
             warehouses_status="unavailable",
             warehouse_catalog_http_status=exc.code,

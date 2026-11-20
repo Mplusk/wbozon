@@ -215,6 +215,53 @@ class KeyAccess(unittest.TestCase):
             self.assertTrue(self.app.external_keys.revoke(key_id,self.now))
             self.assertEqual(self.rpc(token,"tools/list")["error"],"unauthorized")
 
+    def test_missing_seller_key_records_the_read_without_observing_market_data(self):
+        _, token = self.app.external_keys.create("All reads", secrets.token_urlsafe(16), self.now, "all")
+
+        def call(name, **args):
+            result = self.rpc(token, "tools/call", name=name, arguments=args)["result"]
+            return json.loads(result["content"][0]["text"])
+
+        name = "avito_items"
+        self.assertIsNone(call("mcp_health", tool_name=name)["items"][0]["last_checked_at"])
+        failure = call(name)
+        self.assertEqual(failure["status"], "not_configured")
+        self.assertTrue(failure["read_only"] and failure["untrusted_data"])
+        self.assertFalse(failure["complete"])
+        self.assertIsNone(failure["data_as_of"])
+        self.assertIsNone(failure["http_status"])
+        activity = call("mcp_health", tool_name=name)["items"][0]
+        self.assertEqual(activity["status"], "not_configured")
+        self.assertTrue(activity["last_checked_at"])
+        self.assertIsNone(call("mcp_health", tool_name="avito_stats")["items"][0]["last_checked_at"])
+        probed = call("mcp_health", tool_name="avito_stats", probe_arguments={})
+        self.assertEqual(probed["probe"]["status"], "not_configured")
+        self.assertIsNone(probed["probe"]["http_status"])
+        self.assertTrue(probed["items"][0]["last_checked_at"])
+        self.vault.save("avito", {"client_id":"test-account","client_secret":"test-secret"})
+        configured = call("mcp_health", tool_name=name)["items"][0]
+        self.assertEqual(configured["status"], "untested")
+        self.assertIsNone(configured["last_checked_at"])
+
+    def test_composite_health_uses_the_credentials_of_the_calling_scope(self):
+        _, all_key = self.app.external_keys.create("All", secrets.token_urlsafe(16), self.now, "all")
+        _, market_key = self.app.external_keys.create("Markets", secrets.token_urlsafe(16), self.now, "marketplaces")
+        def read(key, name, args):
+            result = self.rpc(key, "tools/call", name=name, arguments=args)["result"]
+            return json.loads(result["content"][0]["text"])
+        args = {"article":"A", "month":"2026-10"}
+        health = {"tool_name":"unit_economics"}
+        self.assertEqual(read(all_key, "unit_economics", args)["error"], "not_configured")
+        self.vault.save("ozon", {"client_id":"ozon-test","api_key":"synthetic"})
+        self.app.gateway = lambda *_: {"items":[], "status":"ready", "complete":True}
+        for avito in (None, {"client_id":"avito-test","client_secret":"secret-test"}):
+            if avito:
+                self.vault.save("avito", avito)
+            self.assertEqual(read(all_key, "unit_economics", args)["status"], "ready")
+            self.assertEqual(read(all_key, "mcp_health", health)["items"][0]["status"], "ready")
+            self.assertEqual(read(market_key, "mcp_health", health)["items"][0]["status"], "untested")
+        self.assertEqual(read(market_key, "mcp_health", dict(health,probe_arguments=args))["items"][0]["status"], "ready")
+
 
 class ScopedOAuth(unittest.TestCase):
     setUp = test_oauth_mcp.Tests.setUp

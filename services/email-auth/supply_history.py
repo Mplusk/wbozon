@@ -1,5 +1,6 @@
 """Resume supply composition scans with a separate cursor for the list and each supply."""
 
+import math
 import time
 from datetime import datetime, timezone
 import urllib.error
@@ -69,7 +70,11 @@ def report(name, args, wire):
             except urllib.error.HTTPError as exc:
                 if exc.code != 429:
                     raise
-                delays.append({"status": "method_cooldown", "retry_after_seconds": exc.headers.get("Retry-After")})
+                delay = getattr(exc, "retry_after_seconds", None)
+                if delay is None:
+                    delay, _ = finance_gate.parse_retry_after(exc.headers)
+                delays.append({"status": "method_cooldown", "http_status": 429,
+                               "retry_after_seconds": delay if delay is not None else 60})
                 exc.close()
             except (TimeoutError, urllib.error.URLError):
                 delays.append({"status": "provider_read_incomplete"})
@@ -195,27 +200,40 @@ def report(name, args, wire):
             catalog = None
             directory_attempted = False
             for index, match in enumerate(state["supplies"]):
-                if match.get("warehouse") or match.get("detail_checked") or time.monotonic() + 2 >= wire.deadline:
+                retry_name = match.get("warehouse_name_status") == "retry_pending"
+                if (not retry_name and (match.get("warehouse") or match.get("detail_checked"))) or time.monotonic() + 2 >= wire.deadline:
                     continue
-                detail = fetch(wb_expansion.supply_detail, match, wire)
+                detail = dict(match, warehouse=None) if retry_name else fetch(wb_expansion.supply_detail, match, wire)
                 if detail is None:
                     break
                 warehouse_id = detail["warehouse_id"] or detail["actual_warehouse_id"]
                 if not detail["warehouse"] and warehouse_id:
                     if not directory_attempted:
                         directory_attempted = True
-                        catalog = fetch(wb_expansion._warehouse_directory, {"include_warehouses": True}, wire, {})
+                        wait = math.ceil(state.get("warehouse_directory_retry_at", 0) - time.time())
+                        if wait > 0:
+                            delays.append(dict(status="cooldown", reason="local_limiter", http_status=None, retry_after_seconds=wait))
+                        else:
+                            catalog = fetch(wb_expansion._warehouse_directory, {"include_warehouses": True}, wire, {}, required=True)
+                            if catalog is None:
+                                retry = delays[-1].get("retry_after_seconds") if delays else None
+                                state["warehouse_directory_retry_at"] = time.time() + (retry if type(retry) is int else 60)
+                            else:
+                                state.pop("warehouse_directory_retry_at", None)
                     names = {r["name"] for r in (catalog or {}).get("warehouses", [])
                              if str(r["warehouse_id"]) == str(warehouse_id) and r["name"]}
                     if len(names) == 1:
                         name_from_id = names.pop()
                         detail.update(warehouse=name_from_id, warehouse_name=name_from_id, warehouse_basis="directory_by_id")
+                        detail.pop("warehouse_name_status", None)
                     else:
-                        detail["warehouse_name_status"] = (catalog or {}).get("warehouses_status", "unavailable")
-                state["supplies"][index] = dict(wb_expansion.display_supply_warehouse(detail), detail_checked=True)
+                        detail["warehouse_name_status"] = "retry_pending" if catalog is None else catalog.get("warehouses_status", "unavailable")
+                state["supplies"][index] = dict(wb_expansion.display_supply_warehouse(detail),
+                                                detail_checked=detail.get("warehouse_name_status") != "retry_pending")
                 save(state, 30 * 86400)
         done = state["last_page"] and not state["queue"]
-        details_done = oz or all(s.get("warehouse") or s.get("detail_checked") for s in state["supplies"])
+        details_done = oz or all((s.get("warehouse") or s.get("detail_checked")) and
+                                 s.get("warehouse_name_status") != "retry_pending" for s in state["supplies"])
         ready = done and details_done
         if not oz and ready and not state.get("finished_at"):
             state["finished_at"] = time.time()

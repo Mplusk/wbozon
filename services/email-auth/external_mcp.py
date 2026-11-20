@@ -8,6 +8,7 @@ versions; it returns JSON responses, not SSE streams, and never issues sessions.
 import base64
 import json
 import re
+from datetime import datetime, timezone
 
 import ozon_mcp
 import wb_mcp
@@ -164,20 +165,27 @@ _ERRORS = {
 
 class MCPToolError(Exception):
     """Only fixed, non-sensitive error codes may cross the client boundary."""
-    def __init__(self, code, retry_after_seconds=None, reason=None):
+    def __init__(self, code, retry_after_seconds=None, reason=None, http_status=None):
         if code not in _ERRORS: raise ValueError('Invalid tool error code')
         if retry_after_seconds is not None and (code != 'rate_limited' or type(retry_after_seconds) is not int or
                                                  not 0 <= retry_after_seconds <= 2147483647):
             raise ValueError('Invalid retry interval')
         if reason is not None and reason not in ('busy','cooldown','local_limiter','retry_time_unknown','storage_unavailable','retry_interval_unavailable'):
             raise ValueError('Invalid error reason')
+        if http_status is not None and (type(http_status) is not int or not 100 <= http_status <= 599):
+            raise ValueError('Invalid provider HTTP status')
         self.code = code
         self.retry_after_seconds = retry_after_seconds
         self.reason = reason
+        self.http_status = http_status
         super().__init__(code)
 
-def _tool_error(code, retry_after_seconds=None, reason=None, diagnostic=None):
+def _tool_error(name, code, retry_after_seconds=None, reason=None, diagnostic=None, http_status=None):
     details={'error':code, 'message':_ERRORS[code]}
+    if name != 'market_api_propose':
+        details.update(status=code, read_only=True, untrusted_data=True, items=[], complete=False,
+                       next_cursor=None, data_as_of=None, observed_at=datetime.now(timezone.utc).isoformat(),
+                       http_status=http_status)
     if code=='provider_timeout' and diagnostic: details.update(diagnostic)
     if code == 'rate_limited':
         details['retry_after_seconds']=retry_after_seconds
@@ -341,22 +349,24 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
                 wb_mcp.validate_args(name,args)
                 if name == 'wb_prices' and 'nm_id' in args: raise ValueError()
         except (TypeError,ValueError):
-            result = _tool_error('invalid_arguments')
+            result = _tool_error(name,'invalid_arguments')
         else:
             try:
                 data = execute(key_id,name,args)
                 if not isinstance(data,dict): raise ValueError()
+                if name != 'market_api_propose':
+                    data = dict(data, read_only=True, untrusted_data=True)
                 text = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(',',':'))
-                result = (_tool_error('response_too_large') if len(text.encode('utf-8')) > MAX_OUTPUT
+                result = (_tool_error(name,'response_too_large') if len(text.encode('utf-8')) > MAX_OUTPUT
                           else {'content':[{'type':'text','text':text}]})
                 if name in market_specs.TOOLS and data.get('status')=='provider_access_denied':
                     result['isError']=True
                 if (name in market_catalog.PUBLIC_TOOLS or name in market_specs.seller_reports.GROUPS) and data.get('status') in ('action_unavailable','provider_error'):
                     result['isError']=True
             except MCPToolError as exc:
-                result = _tool_error(exc.code,exc.retry_after_seconds,exc.reason,getattr(exc,'diagnostic',None))
+                result = _tool_error(name,exc.code,exc.retry_after_seconds,exc.reason,getattr(exc,'diagnostic',None),exc.http_status)
             except Exception:
-                result = _tool_error('unavailable')
+                result = _tool_error(name,'unavailable')
     else:
         return rpc_error(-32601,'Method not found',ident,status='404 Not Found' if modern else '200 OK')
     if modern:
