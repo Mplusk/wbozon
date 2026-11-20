@@ -1,4 +1,5 @@
 """Exercise browser key lifecycle and real WSGI MCP routing with synthetic data."""
+from datetime import datetime, timezone
 import gc
 import io
 import json
@@ -200,7 +201,12 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
         self.app.gateway=gateway
         message={'jsonrpc':'2.0','id':7,'method':'tools/call',
                  'params':{'name':'ozon_accrual_types','arguments':{}}}
-        with patch('finance_gate.time.time',return_value=1000.0), patch('finance_gate.time.monotonic',return_value=100.0):
+        # The synthetic key is two digits. Keep an unrelated timestamp from
+        # containing the same digits and making the leak assertion unreliable.
+        with (patch('finance_gate.time.time',return_value=1000.0),
+              patch('finance_gate.time.monotonic',return_value=100.0),
+              patch('external_mcp.datetime',wraps=datetime) as clock):
+            clock.now.return_value=datetime(2026,1,1,tzinfo=timezone.utc)
             response=self.mcp(message,token)
             info=json.loads(json.loads(response['body'])['result']['content'][0]['text'])
             self.assertIsNone(info['retry_after_seconds'])
