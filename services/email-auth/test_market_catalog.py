@@ -3,6 +3,7 @@ import json
 import secrets
 import ssl
 import unittest
+import urllib.error
 import urllib.request
 from email.message import Message
 from unittest.mock import patch
@@ -12,6 +13,7 @@ import finance_gate
 import market_actions as actions
 import market_catalog as catalog
 import market_https
+import market_transport
 import test_external_mcp_integration
 import test_portal
 
@@ -228,6 +230,55 @@ class CatalogTests(unittest.TestCase):
         with patch('urllib.request.OpenerDirector.open',return_value=response),patch('market_transport.Wire.admit_catalog'):
             with self.assertRaises(finance_gate.ProviderResponseInvalid):
                 catalog.transfer('market_api_propose',args,credentials,self.app.finance_gate_dir,time.monotonic()+5)
+
+    def test_ozon_acts_share_cache_and_respect_pacing_and_retry_after(self):
+        directory = self.app.finance_gate_dir
+        creds = {"client_id":"91","api_key":"synthetic-acceptance-key"}
+        summary = "ozon_post_v1_supply_order_act_summary_get"
+        products = "ozon_post_v1_supply_order_act_product_get"
+        url = "https://api-seller.ozon.ru/v1/supply-order/act/summary/get"
+        now = [1770000000.0]
+        attempts = []
+
+        def send(request, **_):
+            attempts.append(request.full_url)
+            if len(attempts) == 2:
+                error = urllib.error.HTTPError(request.full_url,429,"",{"Retry-After":"9"},io.BytesIO())
+                raise error
+            document = {"supplies_acts":[{"is_agreement_completed":True}]} if request.full_url == url else {"supply_acts":[]}
+            response = io.BytesIO(json.dumps(document).encode())
+            response.status = 200
+            return response
+
+        def get(operation, body):
+            args = {"operation_id":operation,"input":{"body":body}}
+            return catalog.transfer("market_api_read",args,creds,directory,time.monotonic()+20)
+
+        with patch("urllib.request.OpenerDirector.open",side_effect=send), patch.object(
+                time,"time",side_effect=lambda:now[0]), patch.object(time,"monotonic",side_effect=lambda:now[0]), patch.object(
+                finance_gate,"_boot_identity",return_value="a"*64):
+            first = get(summary,{"order_id":1})
+            legacy = market_transport.Wire("ozon",creds,directory,time.monotonic()+20)
+            self.assertEqual(legacy("POST",url,body={"order_id":1}),first["data"])
+            self.assertEqual(get(summary,{"order_id":1})["fetched_at"],first["fetched_at"])
+            with self.assertRaises(finance_gate.GateError) as paced:
+                get(products,{"supply_id":7})
+            self.assertEqual(paced.exception.retry_after_seconds,market_transport.OZON_ACT_INTERVAL)
+            self.assertEqual(len(attempts),1)
+            now[0] += market_transport.OZON_ACT_INTERVAL
+            with self.assertRaises(urllib.error.HTTPError) as rejected:
+                get(products,{"supply_id":7})
+            self.assertEqual(rejected.exception.retry_after_seconds,9)
+            rejected.exception.close()
+            now[0] += 8
+            with self.assertRaises(finance_gate.GateError) as blocked:
+                get(summary,{"order_id":2})
+            self.assertEqual(blocked.exception.retry_after_seconds,1)
+            self.assertEqual(len(attempts),2)
+            now[0] += 1
+            actual = get(products,{"supply_id":7})
+            self.assertEqual(actual["data"],{"supply_acts":[]})
+            self.assertEqual(len(attempts),3)
 
     def test_tls_is_prepared_by_the_real_opener_and_reused_across_requests(self):
         market_https._context.cache_clear()

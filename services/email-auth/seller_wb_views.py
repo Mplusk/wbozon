@@ -1,7 +1,8 @@
 """Wildberries report periods, product identity, warehouse observations and currencies."""
 from collections import Counter
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from html.parser import HTMLParser
 import re
 import sqlite3
 import time
@@ -386,6 +387,16 @@ def _promotions(r):
             yield from r.section("promotion_products",members)
 
 
+def _chat_timestamp(value):
+    if type(value) is not int:
+        return None
+    try:
+        stamp=datetime(1970,1,1,tzinfo=timezone.utc)+timedelta(milliseconds=value)
+    except OverflowError:
+        return None
+    return stamp.isoformat(timespec="milliseconds").replace("+00:00","Z")
+
+
 def _questions(r):
     nm=_nm(r)
     def questions():
@@ -398,11 +409,42 @@ def _questions(r):
     for d in r.section("unread",lambda:[r.fetch(INFO,"unread")["data"]]):r.meta["unread"]=d
     def chats():
         for d in r.fetch(INFO,"chats")["result"] or []:
-            row={"kind":"chat","chat_id":d.get("chatID"),"last_message_at":(d.get("lastMessage") or {}).get("addTimestamp")}
+            last=d.get("lastMessage") or {}
+            row={"kind":"chat","chat_id":d.get("chatID"),"last_message_at":_chat_timestamp(last.get("addTimestamp"))}
             item=(d.get("goodCard") or {}).get("nmID")
             if item:yield from r.product(row,None,item)
             elif not r.ids:yield dict(row,scope="chat")
     yield from r.section("chats",chats)
+
+
+class _NewsText(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.parts=[]
+        self.hidden=None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script","style"):
+            self.hidden=tag
+        elif tag in ("br","p","li","div"):
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag):
+        if tag==self.hidden:
+            self.hidden=None
+        elif tag in ("p","li","div"):
+            self.parts.append(" ")
+
+    def handle_data(self, data):
+        if self.hidden is None:
+            self.parts.append(data)
+
+
+def _news_text(value):
+    reader=_NewsText()
+    reader.feed(value or "")
+    reader.close()
+    return " ".join(re.sub(r"https?://\S+"," ","".join(reader.parts),flags=re.IGNORECASE).split())
 
 
 def _seller_info(r):
@@ -410,11 +452,20 @@ def _seller_info(r):
         raw=r.fetch(INFO,"seller_rating")
         yield {"scope":"account","kind":"seller_rating","valuation":raw.get("valuation"),"feedback_count":raw.get("feedbackCount")}
     yield from r.section("seller_rating",rating)
-    query=r.args.get("query","").casefold()
+    query=" ".join(r.args.get("query","").split())
+    word=re.compile(r"(?<!\w)"+re.escape(query)+r"(?!\w)",re.IGNORECASE) if query else None
     def news():
         for d in r.fetch(INFO,"news",{"query":{"from":r.first.isoformat()}})["data"] or []:
-            if r.first.isoformat()<=str(d.get("date",""))[:10]<=r.last.isoformat() and query in (str(d.get("header",""))+" "+str(d.get("content",""))).casefold():
-                yield {"scope":"portal","kind":"news","date":d["date"],"header":d.get("header"),"news_id":d.get("id")}
+            if not r.first.isoformat()<=str(d.get("date",""))[:10]<=r.last.isoformat():
+                continue
+            row={"scope":"portal","kind":"news","date":d["date"],"header":d.get("header"),"news_id":d.get("id")}
+            if word and not word.search(_news_text(d.get("header"))):
+                content=_news_text(d.get("content"))
+                match=word.search(content)
+                if not match:
+                    continue
+                row["content_excerpt"]=content[max(0,match.start()-50):match.end()+90]
+            yield row
     yield from r.section("news",news)
     yield from r.section("documents",lambda:(dict(kind="document",scope="account",**d) for d in r.pages(FIN,"documents",{"query":{
         "beginTime":r.first.isoformat(),"endTime":r.last.isoformat(),"limit":50,"offset":0}},"data.documents",("query","offset",None,50))))

@@ -11,9 +11,11 @@ import urllib.error
 
 import avito_mcp
 import finance_gate
+import market_catalog
 import market_specs
 import seller_insights
 import seller_ozon_views
+import seller_reports
 import seller_views
 import seller_wb_views
 import seller_workbooks
@@ -65,6 +67,96 @@ class Contracts(unittest.TestCase):
         reader.ids = {"101"}
         list(seller_wb_views._card_issues(reader))
         self.assertEqual(requests["content_recommendations"]["body"]["search"],"101")
+
+    def test_card_issues_summary_covers_all_rows_and_details_are_paginated(self):
+        reader = self.reader("wb_card_issues", {"limit":1})
+        card = {"nmId":101,"vendorCode":"fixture"}
+        reader.fetch = lambda group, choice, *_: {
+            "blocked":{"report":[card]},"price_quarantine":{"data":{"quarantineGoods":[card]}},
+        }[choice]
+        reader.pages = lambda group, choice, *_: {
+            "item_rating":[dict(card,isShadowed=True),dict(card,nmId=102,isShadowed=False)],
+            "content_recommendations":[card],
+        }[choice]
+        summary = seller_views.render(reader)
+        self.assertEqual(summary["counts"],dict(blocked=1,item_rating=2,shadowed=1,price_quarantine=1,content_recommendations=1))
+        self.assertEqual(summary["items"],[])
+        self.assertIsNone(summary["next_cursor"])
+        self.assertEqual(summary["total_rows"],5)
+        self.assertTrue(summary["complete"])
+        reader.args.update(mode="details",cursor="1")
+        details = seller_views.render(reader)
+        self.assertEqual(details["items"][0]["kind"],"item_rating")
+        self.assertEqual((len(details["items"]),details["next_cursor"]),(1,2))
+
+    def test_wb_news_matches_visible_words_and_returns_a_body_excerpt(self):
+        reader = self.reader("wb_seller_info", {"query":" aPi "})
+        news = [
+            {"id":1,"header":"Чат с покупателями","content":'<a href="https://example.test/API">Чат</a> https://example.test/api'},
+            {"id":2,"header":"Кроссплатформенный AppAPI","content":"<style>API</style><!-- API -->"},
+            {"id":3,"header":"Изменения в <b>API</b>"},
+            {"id":4,"header":"Новая выгрузка","content":"<p>Отчёт доступен через <b>API</b>.</p>"},
+        ]
+        for row in news:
+            row["date"]="2026-10-11T03:00:00+03:00"
+        reader.fetch = lambda group, choice, *_: {"data":news} if choice=="news" else {}
+        reader.pages = lambda *_: []
+        rows = [row for row in seller_wb_views._seller_info(reader) if row["kind"]=="news"]
+        self.assertEqual([row["news_id"] for row in rows],[3,4])
+        self.assertEqual(rows[1]["content_excerpt"],"Отчёт доступен через API.")
+
+    def test_wb_chat_message_time_is_an_iso_utc_timestamp(self):
+        reader = self.reader("wb_questions", {})
+        reader.ids.clear()
+        reader.pages = lambda *_: []
+        chats = [{"chatID":"fixture-chat","lastMessage":{"addTimestamp":1766138234889}},{"chatID":"empty"}]
+        reader.fetch = lambda group, choice, *_: {"result":chats} if choice=="chats" else {"data":{}}
+        self.assertEqual([row["last_message_at"] for row in seller_wb_views._questions(reader)],
+                         ["2025-12-19T09:57:14.889Z",None])
+
+    def test_ozon_promotions_keep_actual_prices_separate_from_candidate_limits(self):
+        reader = self.reader("ozon_promotions", {"article":"fixture"})
+        reader.fetch = lambda *_, **__: {"result":[{"id":12,"title":"fixture"}]}
+        def price(value):
+            return {"amount":value,"currency":"RUB"}
+        reader.pages = lambda group, kind, *_: [{"id":77, "price":price("500"),
+            "action_price":price("299.90" if kind=="participating_products" else "0"),
+            "max_action_price":price("350"), "alert_max_action_price":price("330")}]
+        active, candidate = seller_ozon_views._promotions(reader,{"product_id":77})
+        self.assertEqual(active["action_price"],price("299.90"))
+        self.assertEqual((active["amount"],active["currency"]),("299.90","RUB"))
+        self.assertIsNone(candidate["action_price"])
+        self.assertIsNone(candidate["amount"])
+        self.assertEqual(candidate["regular_price"],price("500"))
+        self.assertEqual(candidate["max_action_price"],price("350"))
+        self.assertEqual(candidate["recommended_action_price"],price("330"))
+
+    def test_ozon_fbs_stock_requests_match_catalog_for_article_sku_and_warehouse(self):
+        cases = [
+            ({},None,set(),[("warehouses",{"limit":100}),("warehouse_stock",{"limit":100,"warehouse_id":7})]),
+            ({"warehouse_id":7},None,set(),[("warehouse_stock",{"limit":100,"warehouse_id":7})]),
+            ({"sku":101},"fixture",{"101"},[("stock_by_warehouse",{"limit":100,"sku":["101"]})]),
+            ({"article":"fixture"},"fixture",{"101","102"},[("stock_by_warehouse",{"limit":100,"offer_id":["fixture"]})]),
+        ]
+        for args, article, ids, expected in cases:
+            with self.subTest(args=args):
+                reader = self.reader("ozon_fbs_stocks", args)
+                reader.article, reader.ids = article, ids
+                calls = []
+                def fetch(group, choice, inputs, *_):
+                    calls.append((choice, inputs["body"]))
+                    op = seller_reports.GROUPS[group][1][choice]
+                    market_catalog.validate("market_api_read",{"operation_id":op,"input":inputs})
+                    if choice == "warehouses":
+                        return {"warehouses":[{"warehouse_id":7,"name":"fixture warehouse"}],"has_next":False}
+                    field = "stocks" if choice=="warehouse_stock" else "products"
+                    return {field:[{"sku":101,"offer_id":"fixture","free_stock":0,"warehouse_id":7}],"has_next":False}
+                reader.fetch = fetch
+                rows = list(seller_ozon_views._fbs_stocks(reader))
+                self.assertEqual(calls,expected)
+                self.assertEqual((rows[0]["warehouse_id"],rows[0]["free_stock"]),(7,0))
+                if not args:
+                    self.assertEqual(rows[0]["warehouse_name"],"fixture warehouse")
 
     def test_compensation_dates_identity_and_duplicate_operations(self):
         r=self.reader("ozon_compensations",{"article":"fixture"})

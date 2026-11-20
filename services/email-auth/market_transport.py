@@ -41,6 +41,13 @@ WB_HOSTS = frozenset(
 )
 SELLER = "api-seller.ozon.ru"
 PERFORMANCE = "api-performance.ozon.ru"
+OZON_ACT_METHODS = {
+    "/v1/supply-order/act/summary/get": "supplies_acts",
+    "/v1/supply-order/act/product/get": "supply_acts",
+}
+# The method descriptions do not specify an individual quota. Leave a margin
+# above the observed one-second Retry-After and honour longer provider waits.
+OZON_ACT_INTERVAL = 2
 MAX_REPORT = 16 * 1024 * 1024
 MAX_CACHE_BYTES = 96 * 1024 * 1024
 UNCONFIRMED_EXPIRY = 253402300799  # Unknown creation survives process restarts and report retention.
@@ -50,8 +57,7 @@ SELLER_READS = frozenset(
         "/v3/supply-order/get",
         "/v1/supply-order/details",
         "/v1/supply-order/bundle",
-        "/v1/supply-order/act/product/get",
-        "/v1/supply-order/act/summary/get",
+        *OZON_ACT_METHODS,
         "/v3/product/info/list",
         "/v4/product/info/attributes",
         "/v4/product/info/stocks",
@@ -137,6 +143,18 @@ def _no_duplicates(entries):
 
 def _id(value):
     return hashlib.sha256(_json(value).encode()).hexdigest()
+
+
+def _ozon_act_cache_ttl(path, value):
+    field = OZON_ACT_METHODS[path]
+    groups = value.get(field) if isinstance(value, dict) else None
+    if not isinstance(groups, list) or any(not isinstance(group, dict) for group in groups):
+        raise finance_gate.ProviderResponseInvalid("Invalid Ozon act response")
+    if not groups:
+        return 60
+    if field == "supplies_acts" and all(group.get("is_agreement_completed") is True for group in groups):
+        return 86400
+    return 600
 
 
 WB_FEED_HOST = "seller-analytics-api.wildberries.ru"
@@ -543,7 +561,7 @@ class Wire:
             quantity_unit="pcs",
         )
 
-    def _admit(self, key, interval, cabinet_key=None, *, read_recovery=False):
+    def _admit(self, key, interval, cabinet_key=None, *, read_recovery=False, max_wait=2):
         keys = (key, cabinet_key or key)
         while True:
             with self.db() as db:
@@ -569,7 +587,7 @@ class Wire:
                         db.execute("UPDATE quota SET until_at=MAX(until_at,?) WHERE k IN (SELECT k FROM wb_feed_slots)",
                                    (now + interval,))
                     return
-            if wait>2 or not self.wait(wait):
+            if wait>max_wait or not self.wait(wait):
                 delay = math.ceil(wait)
                 if read_recovery:
                     raise market_cooldown.MethodLimited('cooldown',delay)
@@ -671,6 +689,10 @@ class Wire:
             or not allowed_read(parts.netloc, method, parts.path)
         ):
             raise ValueError("Invalid provider endpoint")
+        act_read = self.provider == "ozon" and parts.path in OZON_ACT_METHODS
+        if act_read:
+            interval = max(interval, OZON_ACT_INTERVAL)
+            ttl = 600  # Enables cache lookup. The response determines its lifetime.
         key = self._key(method, url, query, body)
         if job:
             reservations = self._submission_locks(method, url, query, body)
@@ -684,6 +706,9 @@ class Wire:
         if self.provider == "wb" and basic_interval and not _wb_personal(self.creds["api_token"]):
             interval = basic_interval
         quota = _id([self.scope, parts.netloc, group or parts.path])
+        if act_read:
+            # Pace both methods for this seller, even after a key rotation.
+            quota = _id(market_cooldown.method_key(self.provider, self.creds, url.rsplit("/", 2)[0]))
         # The WB order feed has one pacing interval per seller. Keep writing
         # the old token slot too, as the preceding release reads it on rollback.
         cabinet_quota = (WB_FEED_CABINET if self.provider == "wb" and parts.netloc == WB_FEED_HOST and
@@ -707,11 +732,12 @@ class Wire:
             data=_json(body).encode() if body is not None else None,
         )
         def prepare():
-            self._admit(quota, interval, cabinet_quota,read_recovery=not job and not token_request)
             if ttl and not job:
                 hit = self._http_cache(key, binary)
                 if hit is not None:
                     raise _AvailableResult(hit)
+            self._admit(quota, interval, cabinet_quota, read_recovery=not job and not token_request,
+                        max_wait=0 if act_read else 2)
             if self.deadline - time.monotonic() < 0.3:
                 raise TimeoutError()
             if job:
@@ -753,6 +779,8 @@ class Wire:
                     raise finance_gate.ProviderResponseInvalid("Invalid marketplace JSON response") from None
                 if value is None and not no_content:
                     raise finance_gate.ProviderResponseInvalid("Unexpected JSON null in marketplace response")
+                if act_read:
+                    ttl = _ozon_act_cache_ttl(parts.path, value)
                 if token_request:
                     ttl = max(0, min(86400, int(value["expires_in"])) - 60)
                 if job:
@@ -808,6 +836,7 @@ class Wire:
                     delay is None
                     or attempt
                     or job
+                    or act_read
                     or max(delay, interval) > 3
                     or not self.wait(max(1, delay))
                 ):

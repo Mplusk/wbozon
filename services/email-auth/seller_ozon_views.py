@@ -161,30 +161,37 @@ def _removals(r):
         yield from r.section(name,collect)
 
 
-def _acts(r):
+def _act_supplies(r):
     a=r.args
-    supplies={}
-    if "supply_id" in a:supplies[str(a["supply_id"])]=a.get("order_id")
-    else:
-        orders=[a["order_id"]] if "order_id" in a else []
-        if not orders:
-            start,end=_times(r)
-            query={"filter":{"states":["COMPLETED","REPORTS_CONFIRMATION_AWAITING","REPORT_REJECTED"],
-                             "timeslot_from_range":{"from":start,"to":end,"timeslot_filter_type":"BY_UTC_TIME"}},
-                   "limit":100,"sort_by":"ORDER_CREATION","sort_dir":"DESC"}
-            seen=set()
-            while True:
-                page=r.cached("ozon_post_v3_supply_order_list",{"body":query})
-                orders.extend(page["order_ids"])
-                marker=page.get("last_id")
-                if not marker or not page["order_ids"]:break
-                if marker in seen:raise ValueError("Repeated supply order last_id")
-                seen.add(marker);query["last_id"]=marker
-        for order in orders:
-            response=r.fetch(FBO,"acceptance_summary",{"body":{"order_id":order}},86400)
-            for section in response["supplies_acts"]:supplies[str(section["supply_id"])]=order
-    for sid,order in supplies.items():
-        doc=r.fetch(FBO,"accepted_products",{"body":{"supply_id":sid}},86400)
+    if "supply_id" in a:
+        yield str(a["supply_id"]), a.get("order_id")
+        return
+    orders=[a["order_id"]] if "order_id" in a else []
+    if not orders:
+        start,end=_times(r)
+        query={"filter":{"states":["COMPLETED","REPORTS_CONFIRMATION_AWAITING","REPORT_REJECTED"],
+                         "timeslot_from_range":{"from":start,"to":end,"timeslot_filter_type":"BY_UTC_TIME"}},
+               "limit":100,"sort_by":"ORDER_CREATION","sort_dir":"DESC"}
+        seen=set()
+        while True:
+            page=r.cached("ozon_post_v3_supply_order_list",{"body":query})
+            orders.extend(page["order_ids"])
+            marker=page.get("last_id")
+            if not marker or not page["order_ids"]:break
+            if marker in seen:raise ValueError("Repeated supply order last_id")
+            seen.add(marker);query["last_id"]=marker
+    for order in dict.fromkeys(orders):
+        response=r.fetch(FBO,"acceptance_summary",{"body":{"order_id":order}})
+        for section in response["supplies_acts"]:
+            yield str(section["supply_id"]), order
+
+
+def _acts(r):
+    seen=set()
+    for sid,order in _act_supplies(r):
+        if sid in seen:continue
+        seen.add(sid)
+        doc=r.fetch(FBO,"accepted_products",{"body":{"supply_id":sid}})
         defects={str(i["sku"]):i.get("defect_reasons") for i in doc.get("skus_defects") or []}
         for act in doc["supply_acts"]:
             for line in act.get("items") or []:
@@ -194,6 +201,11 @@ def _acts(r):
                     "declared":expected,"received":count,"approved":line.get("approved_quantity"),
                     "difference":int(count)-int(expected) if count is not None and expected is not None else None,
                     "reasons":defects.get(str(sku),[])},details.get("offer_id"),sku)
+
+
+def _promotion_price(value):
+    price=_money(value)
+    return price if price["amount"] is not None and Decimal(price["amount"])>0 else None
 
 
 def _promotions(r,card):
@@ -208,10 +220,36 @@ def _promotions(r,card):
             def collect():
                 for item in r.pages(PROMO,kind,{"body":{"action_id":p["id"],"limit":100}},"products",("body","last_id","last_id",100)):
                     if str(item["id"])==str(card["product_id"]):
+                        action_price=_promotion_price(item.get("action_price"))
                         yield {"article":r.article,"sku_candidates":sorted(r.ids),"product_id":item["id"],"promotion_id":p["id"],
-                               "title":p.get("title"),"kind":kind,**_money(item.get("action_price")),
+                               "title":p.get("title"),"kind":kind,
+                               **(action_price or {"amount":None,"currency":None}),
+                               "action_price":action_price,"regular_price":_promotion_price(item.get("price")),
+                               "max_action_price":_promotion_price(item.get("max_action_price")),
+                               "recommended_action_price":_promotion_price(item.get("alert_max_action_price")),
                                "date_from":p.get("date_start"),"date_to":p.get("date_end")}
             yield from r.section(kind,collect)
+
+
+def _fbs_stocks(r):
+    def stocks(choice, body, path, warehouse=None):
+        for item in r.pages(FBS,choice,{"body":body},path,("body","cursor","cursor",100)):
+            row={k:item.get(k) for k in ("product_id","warehouse_id","warehouse_name","free_stock","present","reserved")}
+            if warehouse:
+                row["warehouse_id"]=item.get("warehouse_id") or warehouse["warehouse_id"]
+                row["warehouse_name"]=item.get("warehouse_name") or warehouse.get("name")
+            yield from r.product(row,item.get("offer_id"),item.get("sku"))
+
+    warehouse_id=r.args.get("warehouse_id")
+    if warehouse_id is not None:
+        yield from stocks("warehouse_stock",{"limit":100,"warehouse_id":warehouse_id},"stocks",{"warehouse_id":warehouse_id})
+    elif r.ids or r.article:
+        selector={"sku":sorted(r.ids)} if r.args.get("sku") is not None or not r.article else {"offer_id":[r.article]}
+        yield from stocks("stock_by_warehouse",dict(selector,limit=100),"products")
+    else:
+        for warehouse in r.pages(FBS,"warehouses",{"body":{"limit":100}},"warehouses",("body","cursor","cursor",100),900):
+            body={"limit":100,"warehouse_id":warehouse["warehouse_id"]}
+            yield from stocks("warehouse_stock",body,"stocks",warehouse)
 
 
 def _slots(r):
@@ -317,7 +355,4 @@ def read(r):
                 yield from r.product({"posting_number":p.get("posting_number"),"order_number":p.get("order_number"),"status":p.get("status"),
                     "shipment_date":p.get("shipment_date"),"quantity":int(d["quantity"]),"warehouse_id":(p.get("delivery_method") or {}).get("warehouse_id")},d.get("offer_id"),d.get("sku"))
     elif name=="ozon_fbs_stocks":
-        wh=r.args.get("warehouse_id")
-        body={"warehouse_id":wh,"limit":100} if wh else {"limit":100,**({"sku":sorted(r.ids)} if r.ids else {})}
-        for d in r.pages(FBS,"warehouse_stock" if wh else "stock_by_warehouse",{"body":body},"stocks" if wh else "products",("body","cursor","cursor",100)):
-            yield from r.product({k:d.get(k) for k in ("product_id","warehouse_id","warehouse_name","free_stock","present","reserved")},d.get("offer_id"),d.get("sku"))
+        yield from _fbs_stocks(r)

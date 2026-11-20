@@ -337,6 +337,9 @@ jobs:
           scoped_reports="$RUNNER_TEMP/marketplace-scoped-reports/service"
           mkdir -p "$scoped_reports"
           git archive b970edd32559dc0445b7b26673153767652bd2e0:services/email-auth | tar -x -C "$scoped_reports"
+          prior_service="$RUNNER_TEMP/marketplace-prior-release/service"
+          mkdir -p "$prior_service"
+          git archive 189ef26ae95a572944ac9213b90774a6f5e7a61e:services/email-auth | tar -x -C "$prior_service"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit b151124d70320946c17d22b08b1daa63964018de \
@@ -356,6 +359,7 @@ jobs:
             --successor 525ab9054c3c2683d2b25032e2b5ca227b445587 "$seller_receipts" \
             --successor c5a2558817b4969ddea983d88157edf3820d32e2 "$resumable_reports" \
             --successor b970edd32559dc0445b7b26673153767652bd2e0 "$scoped_reports" \
+            --successor 189ef26ae95a572944ac9213b90774a6f5e7a61e "$prior_service" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog

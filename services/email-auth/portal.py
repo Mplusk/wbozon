@@ -804,7 +804,8 @@ class Portal:
             if self.gateway is provider_read:
                 legacy_job = (operation in market_specs.FAST_SELLER_READS and
                               isinstance(args.get("task_id"), str) and args["task_id"].startswith("mcpjob_"))
-                if ((operation in market_specs.RESUMABLE_READS or legacy_job) and os.name == "posix"
+                batch_acts = operation == "ozon_supply_acts" and "supply_id" not in args
+                if ((operation in market_specs.RESUMABLE_READS or legacy_job or batch_acts) and os.name == "posix"
                         and os.environ.get("MCP_PREPARE_MARKET_WORKERS") == "1"):
                     import report_jobs
                     try:

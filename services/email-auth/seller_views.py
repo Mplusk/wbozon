@@ -16,7 +16,7 @@ VIEWS = {
     "wb_tariffs": ("Тариф возврата, паллеты или транзита по дате и складу.", "date warehouse warehouse_id kind", {"kind":["return","pallet","transit"]}),
     "wb_balance": ("Баланс WB и эквайринг за выбранный период.", "date_from date_to", {}),
     "wb_funnel_history": ("Дневная воронка по готовому CSV, архиву и календарным дням WB.", "nm_id article date_from date_to download_id", {}),
-    "wb_card_issues": ("Блокировки, скрытие, карантин цен, рейтинг и перекрёстные рекомендации WB.", "nm_id article date_from date_to", {}),
+    "wb_card_issues": ("Блокировки, скрытие, карантин цен, рейтинг и рекомендации WB. Summary возвращает итоги в counts, details — карточки.", "nm_id article date_from date_to", {}),
     "wb_promotions": ("Календарь акций и участие товара WB.", "nm_id article date_from date_to in_action", {}),
     "wb_questions": ("Вопросы покупателей, наличие новых вопросов и отзывов, сведения о чатах WB.", "nm_id article date_from date_to", {}),
     "wb_claims": ("Заявки покупателей WB на возврат по периодам и товарам.", "nm_id article date_from date_to", {}),
@@ -25,9 +25,9 @@ VIEWS = {
     "ozon_buyout": ("Товары, выкупленные самим Ozon, по данным УПД.", "article sku date_from date_to month", {}),
     "ozon_balance": ("Баланс Ozon, выплаты и движение денег с валютой. Данные бета-метода.", "date_from date_to month", {}),
     "ozon_wrong_volume": ("Измеренные Ozon габариты и вес товаров с расхождением.", "article sku", {}),
-    "ozon_supply_acts": ("Заявленное и принятое по SKU, расхождения и причины в актах поставок.", "order_id supply_id article sku date_from date_to", {}),
+    "ozon_supply_acts": ("Заявленное и принятое по SKU, расхождения и причины в актах поставок. По заявке или за период готовит результат в фоне.", "order_id supply_id article sku date_from date_to", {}),
     "ozon_removals": ("Вывоз товара и списания по дате, SKU и артикулу.", "article sku date_from date_to kind", {"kind":["from_stock","from_supply","decommissioned","all"]}),
-    "ozon_promotions": ("Акции Ozon, товары-участники, кандидаты и цены.", "article sku date_from date_to", {}),
+    "ozon_promotions": ("Акции Ozon. С артикулом или SKU показывает товары-участники, кандидатов, цену по акции, обычную и предельную цены.", "article sku date_from date_to", {}),
     "ozon_competitor_prices": ("Ценовые стратегии, привязка товара и цена конкурента.", "article sku", {}),
     "ozon_card_quality": ("Контент-рейтинг, его составляющие и видимость SKU на витринах.", "article sku", {}),
     "ozon_supply_slots": ("Загрузка складов, зоны размещения и доступные слоты по заявке.", "article sku order_id cluster_id", {}),
@@ -147,7 +147,7 @@ class Reader:
 
     def cached(self,op,inputs,ttl=300):
         import market_catalog
-        from market_transport import Wire
+        from market_transport import OZON_ACT_METHODS, Wire
         if time.monotonic()+0.4>=self.deadline:
             raise SourceIssue(source=op,status="pending",reason="request_deadline")
         row=market_catalog.find_route(op)
@@ -169,7 +169,8 @@ class Reader:
                     fetched=market_catalog.transfer("market_api_read",{"operation_id":op,"input":inputs},creds,self.directory,self.deadline)
                 except urllib.error.HTTPError as exc:
                     http=exc.code
-                    wait=finance_gate.parse_retry_after(exc.headers)[0] if http==429 else None
+                    wait=getattr(exc,"retry_after_seconds",None)
+                    if http==429 and wait is None:wait=finance_gate.parse_retry_after(exc.headers)[0]
                     exc.close()
                     info=dict(source=row["path"],status="provider_access_denied" if http in (401,402,403) else "rate_limited" if http==429 else "provider_error",http_status=http)
                     if http in (401,402,403):
@@ -187,10 +188,11 @@ class Reader:
                 if isinstance(raw,dict) and raw.get("error") is True:
                     raise SourceIssue(source=row["path"],status="provider_error",http_status=fetched.get("http_status"))
                 hit={"data":raw,"stamp":fetched.get("fetched_at") or fetched.get("observed_at"),"http":fetched.get("http_status",200)}
-                # A closed month can span several official quota windows during a scan.
-                if ("date_to" in self.args or "month" in self.args) and self.last < datetime.now(timezone.utc).date()-timedelta(days=7):
-                    ttl=max(ttl,86400)
-                save(hit,ttl)
+                if self.market!="ozon" or row["path"] not in OZON_ACT_METHODS:
+                    # A closed month can span several official quota windows during a scan.
+                    if ("date_to" in self.args or "month" in self.args) and self.last < datetime.now(timezone.utc).date()-timedelta(days=7):
+                        ttl=max(ttl,86400)
+                    save(hit,ttl)
         if hit.get("stamp"):self.stamps.append(hit["stamp"])
         return hit["data"]
 
@@ -307,17 +309,19 @@ def render(r,read=None):
             r.meta["monetary_coverage"]="amount_missing"
         else:
             r.meta["monetary_coverage"]="currency_unconfirmed" if any(row.get("amount") is not None and not row.get("currency") for row in items) else "reported"
-    status="pending" if pending else "partial" if r.issues and items else r.issues[0]["status"] if r.issues else "ready"
-    next_page=offset+limit if offset+limit<total else None
+    summary_only=name=="wb_card_issues" and args.get("mode","summary")=="summary"
+    has_data=bool(items) or summary_only and any(value is not None for value in r.meta.get("counts",{}).values())
+    status="pending" if pending else "partial" if r.issues and has_data else r.issues[0]["status"] if r.issues else "ready"
+    next_page=offset+limit if not summary_only and offset+limit<total else None
     # A failed source can change any later row number. Resume collection first.
     if pending:next_page=None
     recent=datetime.now(MOSCOW).date()-timedelta(days=1)
     provisional=[(r.first+timedelta(days=i)).isoformat() for i in range((r.last-r.first).days+1)
                  if recent<=r.first+timedelta(days=i)<=datetime.now(MOSCOW).date()] if "date_to"in args else []
-    payload=dict(tool=name,items=items[offset:offset+limit],mode=args.get("mode","summary"),status=status,complete=not r.issues and next_page is None,
+    payload=dict(tool=name,items=[] if summary_only else items[offset:offset+limit],mode=args.get("mode","summary"),status=status,complete=not r.issues and next_page is None,
                  next_cursor=next_page,observed_at=now,data_as_of=min(r.stamps,default=None),provisional_dates=provisional,
                  source_complete=not r.issues,source_issues=r.issues,total_rows=total if not r.issues else None,
                  read_only=True,untrusted_data=True,**r.meta)
     if pending:payload["task_id"]=task
-    if r.issues and not items:payload.update({k:v for k,v in r.issues[0].items() if k in ("http_status","required_subscription","required_category","retry_after_seconds","field","reason")})
+    if r.issues and not has_data:payload.update({k:v for k,v in r.issues[0].items() if k in ("http_status","required_subscription","required_category","retry_after_seconds","field","reason")})
     return public_values(payload)

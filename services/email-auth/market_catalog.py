@@ -349,17 +349,25 @@ def transfer(tool, arguments, creds, directory, deadline, *, csv_download=False)
     token=creds.get('digital_token') or creds.get('api_token') or creds.get('api_key')
     interval=row.get('interval_seconds',{})
     saved_jobs=('/api/v1/warehouse_remains','/api/v1/paid_storage','/api/v1/acceptance_report')
-    if row['host']==market_transport.WB_FEED_HOST and row['path'] in (*saved_jobs,market_transport.WB_FEED_PATH):
+    ozon_act = (tool == 'market_api_read' and row['host'] == market_transport.SELLER
+                and row['path'] in market_transport.OZON_ACT_METHODS)
+    wb_report = row['host'] == market_transport.WB_FEED_HOST and row['path'] in (*saved_jobs, market_transport.WB_FEED_PATH)
+    if ozon_act or wb_report:
         job=row['path'] in saved_jobs
         query={k:_scalar(v) for k,v in arguments['input'].get('query',{}).items()}
         value=wire(row['method'],'https://'+row['host']+row['path'],body=arguments['input'].get('body'),
-                   query=query or None,interval=interval.get('personal',60),basic_interval=interval.get('basic',10800),
+                   query=query or None,interval=interval.get('personal',0.1 if ozon_act else 60),
+                   basic_interval=interval.get('basic',10800),
                    ttl=1800 if job else 0,job=job)
         clean=json.loads(json.dumps(_project(value),ensure_ascii=False,default=str))
-        if any(json.dumps(v,ensure_ascii=False)[1:-1] in json.dumps(clean,ensure_ascii=False) for v in creds.values() if isinstance(v,str) and v):
+        secrets = (token,) if ozon_act else creds.values()
+        encoded = json.dumps(clean,ensure_ascii=False)
+        if any(json.dumps(v,ensure_ascii=False)[1:-1] in encoded for v in secrets if isinstance(v,str) and v):
             raise finance_gate.ProviderResponseInvalid('Unsafe marketplace data')
         result={'operation_id':row['operation_id'],'data':clean,'source':'marketplace_or_confirmed_task',
                 'observed_at':datetime.now(timezone.utc).isoformat()}
+        if ozon_act:
+            result.update(http_status=200, fetched_at=datetime.fromtimestamp(wire.fetch_times[-1], timezone.utc).isoformat())
         if job:
             result.update(operation_status='accepted',asynchronous=True)
         return result

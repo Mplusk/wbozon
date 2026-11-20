@@ -21,11 +21,14 @@ class GatewayTests(unittest.TestCase):
         with (patch('portal.provider_read', direct), patch('portal.os.name', 'posix'),
               patch.dict('portal.os.environ', {'MCP_PREPARE_MARKET_WORKERS':'1'}),
               patch.object(report_jobs, 'run', return_value={'status':'pending','reason':'waiting_worker'}) as queued):
-            for name in ('wb_questions', 'wb_claims', 'wb_seller_info', 'ozon_supply_acts',
-                         'ozon_promotions', 'ozon_competitor_prices'):
+            for name in ('wb_questions', 'wb_claims', 'wb_seller_info', 'ozon_promotions', 'ozon_competitor_prices'):
                 with self.subTest(name=name):
                     self.assertEqual(self.app._dispatch_read(name, {}, {} )['status'], 'ready')
+            self.assertEqual(self.app._dispatch_read('ozon_supply_acts', {'supply_id':77}, {})['status'], 'ready')
             queued.assert_not_called()
+            self.assertEqual(self.app._dispatch_read('ozon_supply_acts', {'order_id':42}, {})['status'], 'pending')
+            queued.assert_called_once()
+            queued.reset_mock()
             # Receipts created by the previous release must remain resumable.
             self.app._dispatch_read('wb_questions', {'task_id':'mcpjob_'+'a'*32}, {})
             queued.assert_called_once()

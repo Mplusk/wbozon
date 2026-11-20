@@ -33,6 +33,7 @@ GROUPS = {
         "roles": "ozon_post_v1_roles", "questions": "ozon_post_v1_question_list", "chats": "ozon_list_4"}),
     "ozon_fbs_reports": ("Заказы к сборке, остатки на складе продавца и индекс ошибок FBS.", {
         "unfulfilled": "ozon_fbs_unfulfilled_v4", "warehouse_stock": "ozon_post_v1_product_info_warehouse_stocks",
+        "warehouses": "ozon_post_v2_warehouse_list",
         "stock_by_warehouse": "ozon_post_v2_product_info_stocks_by_warehouse_fbs", "fbs_rating": "ozon_post_v1_rating_index_fbs_info"}),
     "wb_inventory_reports": ("Текущие остатки FBW, аналитика остатков по офисам и товарам за интервал.", {
         "stock_now": "wb_stats_stocks", "offices": "wb_post_api_stocks_report_offices",
