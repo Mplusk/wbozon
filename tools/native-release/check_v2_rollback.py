@@ -31,10 +31,10 @@ REPO = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 import check_market_cutover as replay
 
-BASE = 'c8b2257cdd11bb539d3705d269fda6b23c0bde99'
-BRIDGE = '6eccd5d159bd2957e6ff25b18783aa6e20e81ea2'
-SERVER = '08c6f9b3778a4ea039d8a0093623c815cc95ecc4'
-DEPLOYED_V2 = '4de7fd3f83fcd90eacf5221ef9d02651c1a49a09'
+BASE = '824d84a053134e06dac96aacb7a527401e50ab74'
+BRIDGE = '3de87e7ffa97d903e7df2a997634a1eaee8f68b5'
+SERVER = 'fb80d50146f42588ab1c50cd8925e57980306965'
+DEPLOYED_V2 = 'b151124d70320946c17d22b08b1daa63964018de'
 BASE_INVENTORY = 'b543e1568394095a20f14213feb3a194a456716c70d43b95c06b33c98cd32aed'
 BRIDGE_INVENTORY = '4fbd8858010f37f39b7676c4b34fede5526aa56623569bbc231e77524edce0cf'
 SERVER_INVENTORY = '88b7d5dde100b635d7ac881e1f6999fc9d0626fff5c1ea9e722e31ec58aa9dbc'
@@ -85,7 +85,7 @@ def assert_sources(old, new, candidate_ref, root):
     export_service(DEPLOYED_V2, deployed)
     old_hash, new_hash = service_digest(old), service_digest(new)
     if old_hash != SERVER_INVENTORY or service_digest(server) != SERVER_INVENTORY:
-        raise AssertionError('the historic 08c6f9b service inventory does not match')
+        raise AssertionError(f'the historic {SERVER[:7]} service inventory does not match')
     if new_hash != V2_INVENTORY or service_digest(deployed) != V2_INVENTORY or new_hash != service_digest(reference):
         raise AssertionError('the historic v2 service does not match its exact deployed Git tree')
     for name in ('finance_gate.py', 'market_cooldown.py'):
