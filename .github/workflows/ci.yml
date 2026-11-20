@@ -337,6 +337,9 @@ jobs:
           scoped_reports="$RUNNER_TEMP/marketplace-scoped-reports/service"
           mkdir -p "$scoped_reports"
           git archive 13a1d844d84d4f392e88cedf610e7ec2e1b81eae:services/email-auth | tar -x -C "$scoped_reports"
+          queued_reports="$RUNNER_TEMP/marketplace-queued-reports/service"
+          mkdir -p "$queued_reports"
+          git archive 27432a81864704e34b58da396b8ae2f666d24806:services/email-auth | tar -x -C "$queued_reports"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09 \
@@ -356,6 +359,7 @@ jobs:
             --successor 76c19dc2abd919b67ab0820e3d5f407ea56acee1 "$seller_receipts" \
             --successor 16ea3341869ae3a39b61142f230278c049afc5a0 "$resumable_reports" \
             --successor 13a1d844d84d4f392e88cedf610e7ec2e1b81eae "$scoped_reports" \
+            --successor 27432a81864704e34b58da396b8ae2f666d24806 "$queued_reports" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -407,7 +411,9 @@ jobs:
           check_pair "$seller_receipts" "$resumable_reports"
           scoped_reports="$RUNNER_TEMP/marketplace-scoped-reports/service"
           check_pair "$resumable_reports" "$scoped_reports"
-          check_pair "$scoped_reports" "$packaged"
+          queued_reports="$RUNNER_TEMP/marketplace-queued-reports/service"
+          check_pair "$scoped_reports" "$queued_reports"
+          check_pair "$queued_reports" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

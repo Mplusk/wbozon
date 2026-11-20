@@ -62,6 +62,9 @@ class Contracts(unittest.TestCase):
         closed_day = (today-timedelta(days=1)).isoformat()
         self.assertEqual(requests["item_rating"]["body"]["currentPeriod"], {"start":closed_day,"end":closed_day})
         self.assertEqual(reader.meta["rating_period_requested"], {"start":today.isoformat(),"end":today.isoformat()})
+        reader.ids = {"101"}
+        list(seller_wb_views._card_issues(reader))
+        self.assertEqual(requests["content_recommendations"]["body"]["search"],"101")
 
     def test_compensation_dates_identity_and_duplicate_operations(self):
         r=self.reader("ozon_compensations",{"article":"fixture"})

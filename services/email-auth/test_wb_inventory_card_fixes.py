@@ -172,7 +172,9 @@ class InventoryCardFixTests(unittest.TestCase):
         rating=next(i for i in reader.issues if i.get("http_status")==400)
         rec=next(i for i in reader.issues if i.get("http_status")==403)
         self.assertEqual(rating["reason"],"provider_rejected_request")
-        self.assertEqual(rec["required_category"],"Рекомендации")
+        self.assertEqual(rec["required_category"],"Контент")
+        self.assertIn("Джем",rec["required_subscription"])
+        self.assertEqual(rec["supported_token_types"],["Персональный","Сервисный"])
         self.assertNotIn("item_rating",reader.meta["counts"])
         self.assertNotIn("content_recommendations",reader.meta["counts"])
 

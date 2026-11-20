@@ -338,7 +338,10 @@ def _card_issues(r):
                 batch=(raw.get("data") or {}).get("quarantineGoods",[])
                 if len(batch)==1000:batch=r.pages(CARD,choice,{"query":{"limit":1000,"offset":0}},"data.quarantineGoods",("query","offset",None,1000))
             else:
-                batch=r.pages(CARD,choice,{"body":{"limit":100}},"data",("body","next","next",100))
+                body = {"limit":100}
+                if nm:
+                    body["search"] = str(nm)
+                batch=r.pages(CARD,choice,{"body":body},"data",("body","next","next",100))
             count=0;shadow=0
             for d in batch:
                 if choice=="item_rating" and type(d.get("isShadowed")) is not bool:
@@ -357,8 +360,11 @@ def _card_issues(r):
             if choice=="item_rating" and issue.get("http_status")==400:
                 issue.update(reason="provider_rejected_request",period=r.meta.get("rating_period"),
                              documentation="https://dev.wildberries.ru/docs/openapi/analytics#tag/Ocenka-tovara/operation/postV2ItemRating")
-            if choice=="content_recommendations" and issue.get("http_status")==403:
-                issue.update(required_category="Рекомендации",reason="token_category_access_denied")
+            if choice=="content_recommendations" and issue.get("http_status") in (402,403):
+                issue.update(required_category="Контент", required_subscription="Джем — Продвинутый или Премиальный",
+                             supported_token_types=["Персональный","Сервисный"],
+                             reason="content_recommendations_access_required",
+                             documentation="https://dev.wildberries.kg/docs/openapi/item-management")
     r.meta["counts"]=counts
 
 
