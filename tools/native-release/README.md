@@ -7,6 +7,11 @@ transaction phases and starts a candidate that deliberately fails readiness.
 The final production job waits for server activation and checks the public HTTPS
 health response. Branch builds do not activate production.
 
+The production SSH client allows 90 seconds for connection setup and five
+minutes of unanswered keepalives during a running deployment. The job retries
+only failures known to precede authentication. The host transaction is reconciled
+separately if a connection drops after submission.
+
 The SSH deploy key runs only dispatch.py. It submits the GitHub job's temporary
 read token on stdin to a root-owned transient systemd service. The host verifies
 the run, successful jobs, current main, artifact digest, Git source and pinned
