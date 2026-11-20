@@ -31,7 +31,10 @@ The same production drop-in sets `MCP_PREPARE_MARKET_WORKERS=1` through
 product/price worker gets up to 30 seconds to load the modules and TLS trust
 store before it receives any request or credentials. A one-byte readiness
 signal starts the 20-second request deadline. The parent kills and reaps an
-unready or overdue child. The full operation is bounded at 50 seconds.
+unready or overdue child. A resumable seller report can take 75 seconds to
+start and 45 seconds to execute. The client receives a task receipt after
+three seconds and can poll for the completed result. Forward activation and
+rollback both allow 155 seconds for pending requests to drain.
 
 Before stopping the portal, the controller fences new connections on its two
 listener addresses, waits for established requests and provider children to exit,

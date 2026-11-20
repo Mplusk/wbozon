@@ -16,6 +16,21 @@ def snapshot(page):
     ) if key in page}
 
 
+def display_unit_amounts(row):
+    """Format financial fields after reconciliation, preserving the seller's identifiers."""
+    net = row.get("net_after_expenses") or {}
+    compensation = row.get("compensation_income") or {}
+    fields = ((row.get("amounts") or {}, None), (row.get("per_sold_unit") or {}, None),
+              (net.get("signed_settlement_adjustments") or {}, None),
+              (net, ("amount", "per_sold_unit", "amount_before_compensations", "per_sold_unit_before_compensations")),
+              (compensation, ("confirmed_adjustment",)), (row, ("margin_per_unit", "bank_payout_per_unit")))
+    for record, names in fields:
+        for field in record if names is None else names:
+            value = record.get(field)
+            if isinstance(value, (str, Decimal)) and Decimal(value).as_tuple().exponent < -4:
+                record[field] = seller_views.num(value)
+
+
 def _compensation_adjustment(row, report, ledger):
     net=row["net_after_expenses"]
     info=row["compensation_income"]

@@ -328,6 +328,9 @@ jobs:
           typed_reports="$RUNNER_TEMP/marketplace-typed-reports/service"
           mkdir -p "$typed_reports"
           git archive b4ef24694d47d8e1ab0711da09ca50de9a913213:services/email-auth | tar -x -C "$typed_reports"
+          seller_receipts="$RUNNER_TEMP/marketplace-seller-receipts/service"
+          mkdir -p "$seller_receipts"
+          git archive 76c19dc2abd919b67ab0820e3d5f407ea56acee1:services/email-auth | tar -x -C "$seller_receipts"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit 4de7fd3f83fcd90eacf5221ef9d02651c1a49a09 \
@@ -344,6 +347,7 @@ jobs:
             --successor dd7319e0e8ad96b6bbaee913ab57321adb26f3fd "$report_workers" \
             --successor 7337733849a4f1d742a36d94d16f988f4555602f "$seller_reports" \
             --successor b4ef24694d47d8e1ab0711da09ca50de9a913213 "$typed_reports" \
+            --successor 76c19dc2abd919b67ab0820e3d5f407ea56acee1 "$seller_receipts" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -389,7 +393,9 @@ jobs:
           check_pair "$report_workers" "$seller_reports"
           typed_reports="$RUNNER_TEMP/marketplace-typed-reports/service"
           check_pair "$seller_reports" "$typed_reports"
-          check_pair "$typed_reports" "$packaged"
+          seller_receipts="$RUNNER_TEMP/marketplace-seller-receipts/service"
+          check_pair "$typed_reports" "$seller_receipts"
+          check_pair "$seller_receipts" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

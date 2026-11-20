@@ -225,6 +225,14 @@ for _group, (_description, _) in seller_reports.GROUPS.items():
 for _view, (_description, _keys, _enums) in seller_views.VIEWS.items():
     TOOLS[_view]=(_description, "", "")
 
+RESUMABLE_READS = frozenset(seller_views.VIEWS) | {
+    "unit_economics", "sales_drop_check", "supply_plan", "wb_retentions", "wb_ads",
+    "ozon_reviews", "ozon_delivery_time", "wb_acceptance_slots", "ozon_stocks_by_cluster",
+    "ozon_stocks_analytics", "ozon_sku_daily",
+}
+for _name in RESUMABLE_READS:
+    _description, _keys, _required = TOOLS[_name]
+    TOOLS[_name] = (_description + " При status=pending повторите вызов с теми же аргументами и task_id через retry_after_seconds секунд.", _keys, _required)
 
 def schema(name):
     if name in seller_views.VIEWS:
@@ -233,6 +241,8 @@ def schema(name):
         return seller_reports.schema(name)
     _, keys, required = TOOLS[name]
     props = {k: FIELDS[k] for k in (*keys.split(), "mode")}
+    if name in RESUMABLE_READS:
+        props["task_id"] = TEXT
     return props, required.split()
 
 

@@ -16,6 +16,7 @@
 !seller_reports.py
 !avito_views.py
 !seller_views.py
+!report_jobs.py
 !seller_ozon_views.py
 !seller_wb_views.py
 !seller_workbooks.py

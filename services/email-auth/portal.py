@@ -386,7 +386,7 @@ def _prepare_provider_worker(operation):
     import market_transport  # Also used by the allowlisted request diagnostics.
     VerifiedHTTPS()
 
-def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=None):
+def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=None, report_mappings=None):
     """Bound the entire provider operation, including DNS and response reads.
 
     Credentials go over a private stdin pipe, never argv or the environment.
@@ -395,7 +395,12 @@ def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=Non
     started=time.monotonic()
     prepare = (os.name == 'posix' and operation in PREPARED_OPERATIONS
                and os.environ.get('MCP_PREPARE_MARKET_WORKERS') == '1')
-    hard_deadline=started+PROVIDER_DEADLINE_SECONDS+(PROVIDER_STARTUP_SECONDS if prepare else 0)
+    # A resumed read is observed through its task receipt. Its cold startup
+    # and execution do not consume the external client's HTTP deadline.
+    managed_report = report_mappings is not None and operation in market_specs.RESUMABLE_READS
+    startup_seconds = 75 if managed_report else PROVIDER_STARTUP_SECONDS
+    execution_seconds = 45 if managed_report else PROVIDER_DEADLINE_SECONDS
+    hard_deadline=started+execution_seconds+(startup_seconds if prepare else 0)
     if finance_gate_dir is None and operation not in finance_gate.FINANCE_OPERATIONS:
         finance_gate_dir = os.environ.get('OZON_FINANCE_GATE_DIR')
         if finance_gate_dir is None and os.environ.get('VAULT_PATH'):
@@ -421,18 +426,21 @@ def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=Non
             try:
                 if prepare:
                     import select
-                    remaining_startup=started+PROVIDER_STARTUP_SECONDS-time.monotonic()
+                    remaining_startup=started+startup_seconds-time.monotonic()
                     if remaining_startup<=0 or not select.select([process.stdout],[],[],remaining_startup)[0]:
-                        raise subprocess.TimeoutExpired(process.args,PROVIDER_STARTUP_SECONDS)
+                        raise subprocess.TimeoutExpired(process.args,startup_seconds)
                     if os.read(process.stdout.fileno(),1) != b'R':
                         raise finance_gate.LocalPreparationError('Marketplace worker could not prepare')
                     ready_at=time.monotonic()
-                    if ready_at>=started+PROVIDER_STARTUP_SECONDS:
-                        raise subprocess.TimeoutExpired(process.args,PROVIDER_STARTUP_SECONDS)
-                    hard_deadline=min(hard_deadline,ready_at+PROVIDER_DEADLINE_SECONDS)
+                    if ready_at>=started+startup_seconds:
+                        raise subprocess.TimeoutExpired(process.args,startup_seconds)
+                    hard_deadline=min(hard_deadline,ready_at+execution_seconds)
                 deadline=hard_deadline-min(2,PROVIDER_DEADLINE_SECONDS)
-                payload=json.dumps({'operation':operation, 'args':args, 'creds':creds,
-                                    'finance_gate_dir':finance_gate_dir,'deadline_monotonic':deadline,'dispatch':dispatch}).encode()
+                envelope={'operation':operation, 'args':args, 'creds':creds,
+                          'finance_gate_dir':finance_gate_dir,'deadline_monotonic':deadline,'dispatch':dispatch}
+                if managed_report:
+                    envelope['report_mappings'] = report_mappings
+                payload=json.dumps(envelope).encode()
                 remaining=hard_deadline-time.monotonic()
                 if remaining<=0:
                     # A delayed launch must never receive credentials or dispatch work after expiry.
@@ -541,8 +549,16 @@ def _provider_worker():
                     request['creds'],request['finance_gate_dir'],request['deadline_monotonic'])
             if request['operation'] in market_specs.TOOLS:
                 import expansion_gateway
-                return expansion_gateway.execute(request['operation'],request['args'],request['creds'],
-                    request['finance_gate_dir'],request['deadline_monotonic'])
+                snapshot = request.get('report_mappings')
+                if snapshot is not None and (request['operation'] not in market_specs.RESUMABLE_READS or
+                                             not isinstance(snapshot, dict)):
+                    raise ValueError('Invalid report mapping')
+                token = expansion_gateway.request_seller_mappings.set(snapshot)
+                try:
+                    return expansion_gateway.execute(request['operation'],request['args'],request['creds'],
+                        request['finance_gate_dir'],request['deadline_monotonic'])
+                finally:
+                    expansion_gateway.request_seller_mappings.reset(token)
             with market_cooldown.worker(request.get('finance_gate_dir'), request['creds']):
                 if request['operation'] in ('ozon_article_summary','ozon_posting_accruals'):
                     import posting_discovery
@@ -753,7 +769,13 @@ class Portal:
             self._observe(operation,creds,status)
             raise
         if isinstance(value,dict):
-            self._observe(operation,creds,value.get('status') or ('partial' if value.get('complete') is False else 'ok'))
+            # A managed worker records its own admission and completion in order.
+            # A foreground poll can finish just after the worker has recorded ready.
+            in_progress = (value.get("status") == "pending" and
+                           str(value.get("task_id", "")).startswith("mcpjob_") and
+                           value.get("reason") in ("report_in_progress", "local_limiter"))
+            if not in_progress:
+                self._observe(operation,creds,value.get('status') or ('partial' if value.get('complete') is False else 'ok'))
             if self.gateway is provider_read:
                 value.setdefault('data_as_of',value.get('as_of') or (None if operation in market_specs.TOOLS else market_history.utc()))
                 if operation.startswith('wb_') and 'date_to' in args:
@@ -771,6 +793,16 @@ class Portal:
     def _dispatch_read(self, operation, args, creds):
         if operation not in finance_gate.FINANCE_OPERATIONS:
             if self.gateway is provider_read:
+                if (operation in market_specs.RESUMABLE_READS and os.name == "posix"
+                        and os.environ.get("MCP_PREPARE_MARKET_WORKERS") == "1"):
+                    import report_jobs
+                    try:
+                        return report_jobs.run(operation, args, creds, self.finance_gate_dir,
+                            lambda query, snapshot: provider_read(operation, query, creds,
+                                finance_gate_dir=self.finance_gate_dir, report_mappings=snapshot),
+                            observe=lambda status: self._observe(operation, creds, status))
+                    except report_jobs.InvalidTask:
+                        raise external_mcp.MCPToolError("invalid_arguments") from None
                 try:
                     return provider_read(operation,args,creds,finance_gate_dir=self.finance_gate_dir)
                 except (TimeoutError, finance_gate.GateError) as exc:

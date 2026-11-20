@@ -7,5 +7,5 @@ ConditionPathExists=/var/lib/3dprinta-native-deployer/pending.json
 Type=oneshot
 UMask=0077
 LimitCORE=0
-TimeoutStartSec=4min
+TimeoutStartSec=12min
 ExecStart=/usr/bin/python3 -I /usr/local/libexec/wbozon-cd/cd.py recover

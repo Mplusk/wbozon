@@ -50,6 +50,7 @@ MARKET_REPORT_SUCCESSORS = (
     '45994e7a52912e22db23dff882f3918f12ad8c49c51cf39d20886f7f0cca87d6',
     '111547d294fe9cd1eb19d2c61dad5affbc2a25d539292ce2adf0f75dd9388947',
     'a094ef579306339ced3409c36e22976b0947c8cb46e11a5057285d6b908fd29e',
+    'd418976fe8131e28dbfe28a15bc29a82ecb802fa055a6596fe4404b3796932da',
 )
 
 
@@ -262,7 +263,9 @@ class Transaction:
         # A timed-out marked loopback probe is safe to repeat. Keep the same
         # Gunicorn master invocation and require Host.drain to prove both workers idle.
         identity = self.host.process(name)
-        deadline = time.monotonic() + (60 if require_healthy else 35)
+        # Managed reports may need 75 seconds to start and 45 seconds to finish.
+        # Both activation and rollback prove that threads and children have exited.
+        deadline = time.monotonic() + 155
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:

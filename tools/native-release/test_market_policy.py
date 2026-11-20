@@ -71,11 +71,13 @@ class CutoverRecovery(unittest.TestCase):
         txn = Transaction(host)
         identity = (123, 'generation', '/unit')
         host.process.return_value = identity
-        host.drain.side_effect = [TimeoutError(), identity]
-        with patch('cd.time.monotonic', side_effect=[0, 1, 24]), patch('cd.time.sleep'):
-            self.assertEqual(txn.drain('old', 7, require_healthy=True), identity)
-        self.assertEqual([c.kwargs['seconds'] for c in host.drain.call_args_list], [59, 36])
-        self.assertTrue(all(c.kwargs['require_healthy'] for c in host.drain.call_args_list))
+        for healthy in (True, False):
+            host.drain.reset_mock()
+            host.drain.side_effect = [TimeoutError(), identity]
+            with patch('cd.time.monotonic', side_effect=[0, 1, 124]), patch('cd.time.sleep'):
+                self.assertEqual(txn.drain('old', 7, require_healthy=healthy), identity)
+            self.assertEqual([c.kwargs['seconds'] for c in host.drain.call_args_list], [154, 31])
+            self.assertTrue(all(c.kwargs['require_healthy'] == healthy for c in host.drain.call_args_list))
 
         host.drain.reset_mock()
         host.drain.side_effect = TimeoutError()
@@ -85,7 +87,7 @@ class CutoverRecovery(unittest.TestCase):
         host.drain.assert_called_once()
 
         host.process.side_effect = None
-        with patch('cd.time.monotonic', side_effect=[0, 1, 35]), patch('cd.time.sleep'):
+        with patch('cd.time.monotonic', side_effect=[0, 1, 155]), patch('cd.time.sleep'):
             with self.assertRaisesRegex(ReleaseError, 'drain probe timed out'):
                 txn.drain('old', 7)
 

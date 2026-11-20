@@ -1,5 +1,6 @@
 """Dispatch authenticated marketplace reads inside the portal's deadline worker."""
 
+from contextvars import ContextVar
 from decimal import Decimal, localcontext
 import json
 import hashlib
@@ -51,8 +52,14 @@ def credentials(vault, name):
     return creds
 
 
+request_seller_mappings = ContextVar("request_seller_mappings", default=None)
+
+
 def _seller_mappings(directory):
     # Alias to seller codes is private deployment data. MCP input cannot select a filename.
+    snapshot = request_seller_mappings.get()
+    if snapshot is not None:
+        return snapshot
     file = Path(directory).parent / "supply-articles.json"
     try:
         with file.open("rb") as stream:
@@ -798,6 +805,10 @@ def execute(name, args, creds, directory, deadline):
                         data["status"] = "partial_catalog_identity" if verified else "catalog_identity_unavailable"
             import seller_insights
             seller_insights.enrich(name,args,data,wires,mapping,creds,directory,deadline)
+            if name == "unit_economics":
+                # Keep full precision in all calculations, including compensation reconciliation.
+                for row in data.get("items", []):
+                    seller_insights.display_unit_amounts(row)
             if name=="sales_drop_check":
                 def display(value):
                     if isinstance(value,dict):return {k:display(v) for k,v in value.items()}
