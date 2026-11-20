@@ -356,6 +356,7 @@ def _read_article_summary(args,creds,deadline):
 
 PROVIDER_DEADLINE_SECONDS = 20
 PROVIDER_STARTUP_SECONDS = 30
+FAST_READ_TOTAL_SECONDS = 24  # Reserve time for the enclosing 30-second HTTP worker.
 REPORT_WORKERS = (frozenset(market_specs.TOOLS) - finance_gate.FINANCE_OPERATIONS - {'mcp_health'}) | {'archive_market_day'}
 PREPARED_OPERATIONS = REPORT_WORKERS | frozenset(('market_api_read','market_api_propose','ozon_products',
     'ozon_prices','wb_products','wb_prices','wb_commissions','wb_box_tariffs'))
@@ -386,7 +387,7 @@ def _prepare_provider_worker(operation):
     import market_transport  # Also used by the allowlisted request diagnostics.
     VerifiedHTTPS()
 
-def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=None, report_mappings=None):
+def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=None, report_mappings=None, report_deadline=None):
     """Bound the entire provider operation, including DNS and response reads.
 
     Credentials go over a private stdin pipe, never argv or the environment.
@@ -397,10 +398,15 @@ def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=Non
                and os.environ.get('MCP_PREPARE_MARKET_WORKERS') == '1')
     # A resumed read is observed through its task receipt. Its cold startup
     # and execution do not consume the external client's HTTP deadline.
-    managed_report = report_mappings is not None and operation in market_specs.RESUMABLE_READS
+    # A previous public job can still be resumed after a view moves to the fast path.
+    managed_report = report_mappings is not None
     startup_seconds = 75 if managed_report else PROVIDER_STARTUP_SECONDS
     execution_seconds = 45 if managed_report else PROVIDER_DEADLINE_SECONDS
     hard_deadline=started+execution_seconds+(startup_seconds if prepare else 0)
+    if operation in market_specs.FAST_SELLER_READS and not managed_report:
+        hard_deadline=min(hard_deadline,started+FAST_READ_TOTAL_SECONDS)
+    if report_deadline is not None:
+        hard_deadline=min(hard_deadline,report_deadline)
     if finance_gate_dir is None and operation not in finance_gate.FINANCE_OPERATIONS:
         finance_gate_dir = os.environ.get('OZON_FINANCE_GATE_DIR')
         if finance_gate_dir is None and os.environ.get('VAULT_PATH'):
@@ -426,7 +432,7 @@ def provider_read(operation, args, creds, finance_gate_dir=None, *, dispatch=Non
             try:
                 if prepare:
                     import select
-                    remaining_startup=started+startup_seconds-time.monotonic()
+                    remaining_startup=min(started+startup_seconds,hard_deadline)-time.monotonic()
                     if remaining_startup<=0 or not select.select([process.stdout],[],[],remaining_startup)[0]:
                         raise subprocess.TimeoutExpired(process.args,startup_seconds)
                     if os.read(process.stdout.fileno(),1) != b'R':
@@ -550,7 +556,7 @@ def _provider_worker():
             if request['operation'] in market_specs.TOOLS:
                 import expansion_gateway
                 snapshot = request.get('report_mappings')
-                if snapshot is not None and (request['operation'] not in market_specs.RESUMABLE_READS or
+                if snapshot is not None and (request['operation'] not in (market_specs.RESUMABLE_READS | market_specs.FAST_SELLER_READS) or
                                              not isinstance(snapshot, dict)):
                     raise ValueError('Invalid report mapping')
                 token = expansion_gateway.request_seller_mappings.set(snapshot)
@@ -715,11 +721,7 @@ class Portal:
                 if name in market_specs.TOOLS: market_specs.validate(name,probe)
                 elif name in ozon_mcp.OPERATIONS: ozon_mcp.validate_args(name,probe)
                 else: wb_mcp.validate_args(name,probe)
-                if name in market_specs.seller_reports.GROUPS:
-                    route,_=market_specs.seller_reports.request(name,probe)
-                    account=market_catalog.read_credentials(self.vault,route)
-                else:
-                    account=accounts(self.vault,name)
+                account=accounts(self.vault,name)
                 if account:
                     try:
                         data=self.read_gateway(name,probe,account)
@@ -776,8 +778,7 @@ class Portal:
             # A managed worker records its own admission and completion in order.
             # A foreground poll can finish just after the worker has recorded ready.
             in_progress = (value.get("status") == "pending" and
-                           str(value.get("task_id", "")).startswith("mcpjob_") and
-                           value.get("reason") in ("report_in_progress", "local_limiter"))
+                           str(value.get("task_id", "")).startswith("mcpjob_"))
             if not in_progress:
                 self._observe(operation,creds,value.get('status') or ('partial' if value.get('complete') is False else 'ok'))
             if self.gateway is provider_read:
@@ -801,14 +802,18 @@ class Portal:
     def _dispatch_read(self, operation, args, creds):
         if operation not in finance_gate.FINANCE_OPERATIONS:
             if self.gateway is provider_read:
-                if (operation in market_specs.RESUMABLE_READS and os.name == "posix"
+                legacy_job = (operation in market_specs.FAST_SELLER_READS and
+                              isinstance(args.get("task_id"), str) and args["task_id"].startswith("mcpjob_"))
+                if ((operation in market_specs.RESUMABLE_READS or legacy_job) and os.name == "posix"
                         and os.environ.get("MCP_PREPARE_MARKET_WORKERS") == "1"):
                     import report_jobs
                     try:
                         return report_jobs.run(operation, args, creds, self.finance_gate_dir,
-                            lambda query, snapshot: provider_read(operation, query, creds,
-                                finance_gate_dir=self.finance_gate_dir, report_mappings=snapshot),
-                            observe=lambda status: self._observe(operation, creds, status))
+                            lambda query, snapshot, deadline: provider_read(operation, query, creds,
+                                finance_gate_dir=self.finance_gate_dir, report_mappings=snapshot,
+                                report_deadline=deadline),
+                            observe=lambda status: self._observe(operation, creds, status),
+                            deadline_aware=True)
                     except report_jobs.InvalidTask:
                         raise external_mcp.MCPToolError("invalid_arguments") from None
                 try:
@@ -918,23 +923,17 @@ class Portal:
                             return result
                     if operation=='mcp_health':
                         return self.read_gateway(operation,args,{},include_avito=current_access=="all")
-                    if operation in market_specs.seller_reports.GROUPS:
-                        route, inputs=market_specs.seller_reports.request(operation,args)
-                        if inputs is None:
-                            return market_specs.seller_reports.execute(operation,args,{},self.finance_gate_dir,time.monotonic())
-                        creds=market_catalog.read_credentials(self.vault,route)
-                    else:
-                        creds=(market_catalog.read_credentials(self.vault,market_catalog.routes()[args['operation_id']]) if operation=='market_api_read'
-                           else self.vault.read('avito') if operation in avito_mcp.PUBLIC_CONTRACTS else
-                           expansion_gateway.credentials(self.vault,operation,include_avito=current_access=="all"))
-                    if not creds and operation!='mcp_health':
+                    creds=(market_catalog.read_credentials(self.vault,market_catalog.routes()[args['operation_id']]) if operation=='market_api_read'
+                       else self.vault.read('avito') if operation in avito_mcp.PUBLIC_CONTRACTS else
+                       expansion_gateway.credentials(self.vault,operation,include_avito=current_access=="all"))
+                    if not creds:
                         self._unconfigured_read(operation)
                         raise external_mcp.MCPToolError('not_configured')
                     return self.read_gateway(operation,args,creds)
                 except market_actions.ActionError as exc:
                     return {'status':'action_unavailable','reason':str(exc)}
                 except urllib.error.HTTPError as exc:
-                    if (operation=='market_api_read' or operation in market_specs.seller_reports.GROUPS) and exc.code!=429:
+                    if operation=='market_api_read' and exc.code!=429:
                         status=exc.code
                         exc.close()
                         return {'status':'provider_error','http_status':status,'reason':{400:'invalid_provider_parameters',
@@ -1009,6 +1008,9 @@ class Portal:
                 op=data['operation']; args=data['arguments']
                 if op=='archive_market_day':
                     if not bridge_authorized or not isinstance(args,dict) or set(args)!={'dataset'} or args['dataset'] not in market_archive.DATASETS: raise ValueError()
+                elif op in market_specs.seller_reports.GROUPS:
+                    if not bridge_authorized: raise ValueError()
+                    market_specs.validate(op,args)
                 elif op in market_specs.TOOLS: market_specs.validate(op,args)
                 elif op in ozon_mcp.OPERATIONS: ozon_mcp.validate_args(op,args)
                 elif op in wb_mcp.OPERATIONS:
@@ -1019,7 +1021,13 @@ class Portal:
             except (ValueError,TypeError,UnicodeError): return reply({'error':'invalid_request'},'400 Bad Request',True)
             try:
                 selection=args['dataset'] if op=='archive_market_day' else op
-                creds=expansion_gateway.credentials(self.vault,{'ozon_availability':'ozon_stocks_analytics','wb_availability':'wb_stocks'}.get(selection,selection))
+                if op in market_specs.seller_reports.GROUPS:
+                    route, inputs=market_specs.seller_reports.request(op,args)
+                    if inputs is None:
+                        return reply(market_specs.seller_reports.execute(op,args,{},self.finance_gate_dir,time.monotonic()),json_response=True)
+                    creds=market_catalog.read_credentials(self.vault,route)
+                else:
+                    creds=expansion_gateway.credentials(self.vault,{'ozon_availability':'ozon_stocks_analytics','wb_availability':'wb_stocks'}.get(selection,selection))
                 if not creds and op!='mcp_health':
                     record_bridge(op,'not_configured')
                     return reply({'error':'not_configured'},'409 Conflict',True)

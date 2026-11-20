@@ -486,7 +486,9 @@ def check_state(python, old, new, root, *, previous_is_v2=False):
     upgraded = run_state(python, new, data, 'candidate', previous_is_v2=previous_is_v2)
     if previous_is_v2:
         before_names, after_names = set(first['names']), set(upgraded['names'])
-        if len(before_names - SELLER_GROUPS - V3_SELLER_VIEWS) != 58 or not before_names <= after_names:
+        removed = before_names - after_names
+        if (len(before_names - SELLER_GROUPS - V3_SELLER_VIEWS) != 58
+                or removed not in (frozenset(), SELLER_GROUPS)):
             raise AssertionError('previous marketplace tools disappeared')
         additions = after_names - before_names
         if additions not in (frozenset(), SELLER_GROUPS, V3_SELLER_VIEWS, SELLER_GROUPS | V3_SELLER_VIEWS):

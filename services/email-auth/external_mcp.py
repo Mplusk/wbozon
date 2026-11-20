@@ -148,7 +148,8 @@ for tool in TOOLS:
             tool['description']+=' Для сводки по всем артикулам месяца передайте all_articles=true.'
         elif name=='ozon_orders_analytics':
             tool['description']+=' Для штук и суммы по SKU задайте dimension=sku и при необходимости article.'
-TOOLS.extend(_tool(name, contract[0], *market_specs.schema(name)) for name, contract in market_specs.TOOLS.items())
+TOOLS.extend(_tool(name, contract[0], *market_specs.schema(name)) for name, contract in market_specs.TOOLS.items()
+             if name not in market_specs.seller_reports.GROUPS)
 TOOL_NAMES = frozenset(tool['name'] for tool in TOOLS)
 
 _ERRORS = {
@@ -361,7 +362,7 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
                           else {'content':[{'type':'text','text':text}]})
                 if name in market_specs.TOOLS and data.get('status')=='provider_access_denied':
                     result['isError']=True
-                if (name in market_catalog.PUBLIC_TOOLS or name in market_specs.seller_reports.GROUPS) and data.get('status') in ('action_unavailable','provider_error'):
+                if name in market_catalog.PUBLIC_TOOLS and data.get('status') in ('action_unavailable','provider_error'):
                     result['isError']=True
             except MCPToolError as exc:
                 result = _tool_error(name,exc.code,exc.retry_after_seconds,exc.reason,getattr(exc,'diagnostic',None),exc.http_status)

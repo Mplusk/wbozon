@@ -16,6 +16,11 @@ from market_transport import Wire, _id
 
 PREFIX = "mcpjob_"
 WAIT_SECONDS = 3
+# Keep every background thread within the native deployment drain budget.
+MAX_BACKGROUND_SECONDS = 125
+MAX_JOBS = 4
+MAX_WORKERS = 2
+MIN_RETRY_SECONDS = 5
 
 
 class InvalidTask(ValueError):
@@ -37,7 +42,7 @@ def _sources(value):
             for child in entry:
                 yield from walk(child)
         elif isinstance(entry, dict):
-            if "http_status" in entry or "retry_after_seconds" in entry:
+            if "http_status" in entry or "retry_after_seconds" in entry or "status" in entry:
                 yield entry
             for field, child in entry.items():
                 if field not in ("items", "rows", "data", "response", "payload"):
@@ -111,7 +116,7 @@ def _failure(name, exc, creds):
     return result
 
 
-def run(name, args, creds, directory, dispatch, observe=None):
+def run(name, args, creds, directory, dispatch, observe=None, *, deadline_aware=False):
     from expansion_gateway import _seller_mappings
     args = dict(args)
     supplied = args.pop("task_id", None)
@@ -140,10 +145,31 @@ def run(name, args, creds, directory, dispatch, observe=None):
             bind("native", supplied, task)
 
     key = _id([scope, "result", task])
+    # Use at most 4096 lock files, independent of the number of expired reports.
+    lock_name = "report-" + key[:3]
+    owner_key = _id(["report-lock-owner", lock_name])
+    owner = key.encode("ascii")
 
-    def saved():
+    def saved(check_worker=True):
         raw = wire.cached(key)
-        return _replay(raw) if raw is not None else None
+        if raw is None:
+            return None
+        value = _replay(raw)
+        if value.get("background_retry") is True:
+            # A cached receipt can outlive a crashed Gunicorn worker. Only
+            # advertise an active retry while its job lock is held.
+            active = False
+            if check_worker:
+                try:
+                    root = finance_gate._root(str(Path(directory).parent / ".mcp-report-locks"))
+                    with finance_gate._lock(root, lock_name):
+                        pass
+                except finance_gate.GateError as exc:
+                    if exc.reason == "busy":
+                        active = wire.cached(owner_key) == owner
+            if not active:
+                value.update(background_retry=False, reason="retry_later")
+        return value
 
     value = saved()
     if value is not None:
@@ -151,12 +177,14 @@ def run(name, args, creds, directory, dispatch, observe=None):
     locks = ExitStack()
     try:
         root = finance_gate._root(str(Path(directory).parent / ".mcp-report-locks"))
-        locks.enter_context(finance_gate._lock(root, "report-" + key[:3]))
-        value = saved()
+        locks.enter_context(finance_gate._lock(root, lock_name))
+        value = saved(check_worker=False)
         if value is not None:
             locks.close()
             return value
-        for slot in ("worker-0", "worker-1"):
+        # Reserve a bounded job place independently of the two provider slots.
+        # A queued job can therefore start without requiring another client poll.
+        for slot in ("job-" + str(i) for i in range(MAX_JOBS)):
             try:
                 locks.enter_context(finance_gate._lock(root, slot))
                 break
@@ -169,6 +197,10 @@ def run(name, args, creds, directory, dispatch, observe=None):
         native = lookup("resume", task) or lookup("known", task)
         if native:
             args["task_id"] = native
+        try:
+            wire.store(owner_key, owner, MAX_BACKGROUND_SECONDS + 2)
+        except (OSError, sqlite3.Error):
+            pass
     except finance_gate.GateError as exc:
         locks.close()
         if exc.reason != "busy":
@@ -180,34 +212,104 @@ def run(name, args, creds, directory, dispatch, observe=None):
 
     finished = threading.Event()
     result = {}
+    end = time.monotonic() + MAX_BACKGROUND_SECONDS
 
     def work():
         try:
+            current_native = native
+            while time.monotonic() < end - 2:
+                if mappings != _seller_mappings(directory):
+                    result["value"] = _pending(name, default_task, "seller_mapping_changed")
+                    result["value"].pop("task_id")
+                    finished.set()
+                    return
+                worker = ExitStack()
+                acquired = False
+                try:
+                    for slot in ("worker-" + str(i) for i in range(MAX_WORKERS)):
+                        try:
+                            worker.enter_context(finance_gate._lock(root, slot))
+                            acquired = True
+                            break
+                        except finance_gate.GateError as exc:
+                            if exc.reason != "busy":
+                                raise
+                    if not acquired:
+                        result["value"] = _pending(name, task, "waiting_worker", 3)
+                        try:
+                            wire.store(key, json.dumps({"value": result["value"], "saved_at": time.time()}).encode(), 3)
+                        except (OSError, sqlite3.Error):
+                            pass
+                        finished.set()
+                        time.sleep(min(1, max(0, end - time.monotonic() - 2)))
+                        continue
+                    query = dict(args)
+                    if current_native:
+                        query["task_id"] = current_native
+                    try:
+                        value = (dispatch(query, mappings, end) if deadline_aware else dispatch(query, mappings))
+                    except Exception as exc:
+                        value = _failure(name, exc, creds)
+                finally:
+                    worker.close()
+                if mappings != _seller_mappings(directory):
+                    result["value"] = _pending(name, default_task, "seller_mapping_changed")
+                    result["value"].pop("task_id")  # Restart with the current seller mapping.
+                    finished.set()
+                    return
+                ttl = _ttl(name, args, value)
+                next_task = value.get("task_id")
+                pending = value.get("status") == "pending"
+                issues = list(_sources(value))
+                # Do not turn transport failures into a tight or blind retry loop.
+                retriable = pending and not any(row.get("status") == "source_unavailable" for row in issues)
+                waits = [row.get("retry_after_seconds") for row in (value, *issues)]
+                delay = max([MIN_RETRY_SECONDS] + [n for n in waits if type(n) is int and n >= 0])
+                retry = retriable and time.monotonic() + delay + 2 < end
+                if next_task or pending:
+                    value = dict(value, task_id=task)
+                if pending:
+                    value.update(reason="retry_scheduled" if retry else "retry_later",
+                                 retry_after_seconds=delay, background_retry=retry)
+                record = {"value": value, "saved_at": time.time()}
+                try:
+                    if next_task:
+                        bind("resume", task, next_task, max(86400, ttl + 3600))
+                        bind("native", next_task, task, max(86400, ttl + 3600))
+                        current_native = next_task
+                    elif not current_native or value.get("complete") is True:
+                        bind("resume", task, None)
+                    wire.store(key, json.dumps(record, ensure_ascii=False, allow_nan=False).encode(), ttl)
+                except (OSError, sqlite3.Error):
+                    # Do not dispatch another page when its continuation was not persisted.
+                    retry = False
+                    if pending:
+                        value.update(reason="retry_later", background_retry=False)
+                result["value"] = value
+                if observe:
+                    try:
+                        observe(value.get("status") or ("partial" if value.get("complete") is False else "ok"))
+                    except Exception:
+                        pass  # Diagnostics must not stop the report.
+                finished.set()
+                if not retry:
+                    return
+                time.sleep(delay)
+            value = _pending(name, task, "retry_later", 3)
+            value["background_retry"] = False
+            result["value"] = value
             try:
-                value = dispatch(args, mappings)
-            except Exception as exc:
-                value = _failure(name, exc, creds)
-            if mappings != _seller_mappings(directory):
-                result["value"] = _pending(name, default_task, "seller_mapping_changed")
-                result["value"].pop("task_id")  # Restart with the current seller mapping.
-                return
-            ttl = _ttl(name, args, value)
-            next_task = value.get("task_id")
-            if next_task or value.get("status") == "pending":
-                value = dict(value, task_id=task)
-            record = {"value": value, "saved_at": time.time()}
-            try:
-                if next_task:
-                    bind("resume", task, next_task, max(86400, ttl + 3600))
-                    bind("native", next_task, task, max(86400, ttl + 3600))
-                elif not native or value.get("complete") is True:
-                    bind("resume", task, None)
-                wire.store(key, json.dumps(record, ensure_ascii=False, allow_nan=False).encode(), ttl)
+                wire.store(key, json.dumps({"value": value, "saved_at": time.time()}).encode(), 3)
             except (OSError, sqlite3.Error):
                 pass
+        except Exception as exc:
+            # A failed scheduler/lock must not leave a phantom active receipt.
+            value = _failure(name, exc, creds)
             result["value"] = value
-            if observe:
-                observe(value.get("status") or ("partial" if value.get("complete") is False else "ok"))
+            try:
+                wire.store(key, json.dumps({"value": value, "saved_at": time.time()}).encode(), 5)
+            except (OSError, sqlite3.Error):
+                pass
         finally:
             locks.close()
             finished.set()
@@ -217,7 +319,10 @@ def run(name, args, creds, directory, dispatch, observe=None):
     thread = threading.Thread(target=work, name="mcp-report", daemon=True)
     try:
         if observe:
-            observe("pending")
+            try:
+                observe("pending")
+            except Exception:
+                pass
         thread.start()
     except BaseException:
         locks.close()

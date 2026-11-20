@@ -52,16 +52,72 @@ def _compensations(r):
                 reports=r.pages(PAY,kind,{"body":{"page":1,"page_size":100,"report_type":typ}},
                                 "result.reports",("body","page",None,100))
                 yield from seller_workbooks.settlements(r,reports,month,typ)
+            issue_start=len(r.issues)
             yield from r.section(kind,collect)
+            for issue in r.issues[issue_start:]:
+                if issue.get("status") in ("no_confirmed_export_for_month","export_not_ready"):
+                    issue["guidance"]={
+                        "where":"Ozon Seller → Финансы → Документы → Компенсации и прочие начисления",
+                        "what":"Выберите указанный месяц и найдите отчёт о компенсациях или декомпенсациях; проверьте, готов ли он. Если документа нет, уточните его доступность у Ozon.",
+                        "retry":"После появления готового отчёта повторите этот запрос; отсутствие выгрузки не означает отсутствие начислений.",
+                        "source":"https://seller.ozon.ru/media/news/fbs-o-novyh-statusah-kompensacij/",
+                    }
 
 
 def _buyouts(r):
-    r.meta.update(unit_basis="products_purchased_by_ozon_under_upd",currency_basis="provided_per_amount_when_present")
+    import re
+    import time
+    import urllib.error
+    import finance_gate
+    import ozon_mcp
+
+    def currency(*values):
+        present=[v for v in values if v is not None and v!=""]
+        if any(not isinstance(v,str) or not re.fullmatch(r"[A-Z]{3}",v) for v in present):
+            raise ValueError("Invalid buyout currency")
+        if len(set(present))>1:raise ValueError("Conflicting buyout currency")
+        creds=getattr(r.wire,"creds",{})
+        if isinstance(creds,dict) and any(secret and secret in value for value in present
+                                         for secret in creds.values() if isinstance(secret,str)):
+            raise ValueError("Unsafe buyout currency")
+        return present[0] if present else None
+
+    r.meta.update(unit_basis="products_purchased_by_ozon_under_upd",currency_basis="explicit_report_currency_only")
+    missing_currency=False
     for a,b in spans(r.first,r.last,31):
         for item in r.fetch(PAY,"buyouts",{"body":{"date_from":a.isoformat(),"date_to":b.isoformat()}})["products"]:
-            yield from r.product({"posting_number":item.get("posting_number"),"quantity":int(item["quantity"]),
-                                  **_money(item.get("amount")), "buyout_price":_money(item.get("buyout_price"))["amount"]},
-                                 item.get("offer_id"),item.get("sku"))
+            total=_money(item.get("amount"))
+            price=_money(item.get("buyout_price"))
+            common=currency(item.get("currency_code"),item.get("currency"))
+            total_currency=currency(common,total["currency"])
+            price_currency=currency(common,price["currency"])
+            selected=r.product({"posting_number":item.get("posting_number"),"quantity":int(item["quantity"]),
+                                "amount":total["amount"],"currency":total_currency,
+                                "buyout_price":price["amount"],"buyout_price_currency":price_currency},
+                               item.get("offer_id"),item.get("sku"))
+            if selected and total["amount"] is not None and not total_currency:missing_currency=True
+            yield from selected
+    if missing_currency:
+        r.meta["currency_note"]="API выкупов не указал валюту для части сумм; суммы с неизвестной валютой не складываются. Валюта компании, если доступна, приведена отдельно и не подтверждает валюту отчёта."
+        r.meta["company_currency_status"]="unavailable"
+        original_deadline=getattr(r.wire,"deadline",None)
+        now=time.monotonic()
+        if isinstance(original_deadline,(int,float)) and now+3<min(original_deadline,r.deadline):
+            try:
+                r.wire.deadline=min(original_deadline-1.5,r.deadline-1.5,now+3)
+                profile=r.wire("POST",ozon_expansion.BASE+"/v1/seller/info",body={},ttl=1800)
+                creds=getattr(r.wire,"creds",{})
+                value=ozon_mcp.project_company_currency(profile,creds if isinstance(creds,dict) else {})
+                if value:
+                    r.meta.update(company_currency=value,company_currency_status="provided_unverified_for_buyout",
+                                  company_currency_source="/v1/seller/info company.currency")
+            except urllib.error.HTTPError as exc:
+                exc.close()
+            except (SourceIssue,finance_gate.GateError,finance_gate.ProviderResponseTooLarge,
+                    TimeoutError,urllib.error.URLError,OSError,KeyError,ValueError,TypeError):
+                pass
+            finally:
+                r.wire.deadline=original_deadline
 
 
 def _balance(r):
@@ -160,16 +216,25 @@ def _promotions(r,card):
 
 def _slots(r):
     cluster=r.args.get("cluster_id")
-    warehouses=None
-    if cluster:
-        raw=r.fetch(FBO,"macroclusters",ttl=86400)["result"]
-        warehouses={str(w["warehouse_id"]) for c in raw if str(c["macrolocal_cluster_id"])==str(cluster) for w in c["data"].get("fulfillments") or []}
-    def capacity():
-        for entry in r.fetch(FBO,"warehouse_workload",ttl=900)["result"]:
-            w=entry["warehouse"]
-            if warehouses is None or str(w["id"]) in warehouses:
-                yield {"scope":"warehouse","warehouse_id":w["id"],"warehouse":w.get("name"),"capacity_schedule":entry.get("schedule")}
-    yield from r.section("warehouse_workload",capacity)
+    if r.ids:
+        r.meta["warehouse_workload_status"] = "product_eligibility_not_reported"
+    elif "order_id" not in r.args or cluster:
+        def capacity():
+            warehouses = None
+            if cluster:
+                raw = r.fetch(FBO,"macroclusters",ttl=86400)["result"]
+                warehouses = {str(w["warehouse_id"]) for c in raw if str(c["macrolocal_cluster_id"]) == str(cluster)
+                              for w in c["data"].get("fulfillments") or []}
+            for entry in r.fetch(FBO,"warehouse_workload",ttl=900)["result"]:
+                w = entry["warehouse"]
+                if warehouses is None or str(w["id"]) in warehouses:
+                    yield {"scope":"warehouse","warehouse_id":w["id"],"warehouse":w.get("name"),
+                           "capacity_schedule":entry.get("schedule")}
+        capacity_rows = r.section("warehouse_workload",capacity)
+        r.meta["warehouse_workload_scope"] = "cluster" if cluster else "account"
+        r.meta["warehouse_workload_count"] = len(capacity_rows)
+        if r.args.get("mode") == "details":
+            yield from capacity_rows
     if r.ids:
         for d in r.section("placement_zones",lambda:r.fetch(FBO,"placement_zones",{"body":{"skus":list(r.ids)}})["products_placement"]):
             yield from r.product({"placement_zone":d.get("placement_zone")},None,d.get("sku"))
@@ -180,8 +245,9 @@ def _slots(r):
             for slot in (result.get("timeslots_info") or {}).get("timeslots") or []:
                 yield dict(scope="supply_order",order_id=r.args["order_id"],**slot)
     else:r.meta["slot_status"]="requires_supply_order_id"
-    rows=r.section("shipment_compliance",lambda:[r.fetch(FBO,"shipment_compliance")])
-    if rows:r.meta["shipment_compliance"]=rows[0]
+    if not r.ids and "order_id" not in r.args:
+        rows=r.section("shipment_compliance",lambda:[r.fetch(FBO,"shipment_compliance")])
+        if rows:r.meta["shipment_compliance"]=rows[0]
 
 
 def read(r):

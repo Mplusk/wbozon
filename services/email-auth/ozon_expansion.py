@@ -828,7 +828,7 @@ def read(name, args, request):
             path = "/v1/analytics/local-sale/total"
             raw = request("POST", BASE + path, body={"period": filters["period"]}, ttl=1800)
             metrics = raw["local_data"]
-            return result([dict(article=None, sku=None, cluster_id=None, local_units=metrics.get("local_quantity"),
+            return result([dict(scope="account_total", cluster_id=None, local_units=metrics.get("local_quantity"),
                                 total_units=metrics.get("total_quantity"), locality_index=metrics.get("index"),
                                 average_delivery_hours=None)], complete=False, source=path, scope="account_total",
                           issues=["article_sku_or_cluster_required_for_breakdown"],
@@ -838,6 +838,7 @@ def read(name, args, request):
                       "sort_by":"LOCALITY","sort_dir":"DESC"},ttl=1800)
         page = rows(raw.get("items"))
         items = []
+        products = []
         for row in page:
             if "cluster_id" in args:
                 product, cluster = row["item"], row["cluster_to_id"]
@@ -848,8 +849,31 @@ def read(name, args, request):
                 cluster = row["macrolocal_cluster_to_id"]
             if selected_skus and str(product.get("sku")) not in selected_skus:
                 raise ValueError("Unexpected Ozon locality SKU")
-            metrics = row["metrics"]["local_data"]
-            items.append(dict(_identity(product), cluster_id=cluster,
+            if args.get("article") and product.get("offer_id") not in (None, "", args["article"]):
+                raise ValueError("Unexpected Ozon locality article")
+            products.append((product, cluster, row["metrics"]["local_data"]))
+        unresolved = {str(p["sku"]) for p, _, _ in products if not p.get("offer_id") and not args.get("article")}
+        article_by_sku = {}
+        identity_issue = {}
+        if unresolved:
+            from market_composites import observed
+            if not all(sku.isascii() and sku.isdecimal() and int(sku) > 0 for sku in unresolved):
+                raise ValueError("Invalid Ozon locality SKU")
+            skus_to_lookup = sorted(unresolved, key=int)
+            identity = observed(lambda: ozon_details._products(
+                {"skus": skus_to_lookup},
+                request("POST", BASE+"/v3/product/info/list", body={"sku":[int(s) for s in skus_to_lookup]}, ttl=1800), None))
+            if not identity.get("conflicts") and not identity.get("unmatched_row_indices"):
+                article_by_sku = {sku: card["offer_id"] for card in identity["items"] if card.get("offer_id")
+                                  for sku in card.get("matched_identifiers", ())}
+            identity_issue = {k:identity[k] for k in ("status","http_status","retry_after_seconds","reason") if k in identity}
+        unresolved_rows = 0
+        for product, cluster, metrics in products:
+            article = product.get("offer_id") or args.get("article") or article_by_sku.get(str(product.get("sku")))
+            if not article:
+                unresolved_rows += 1
+                continue
+            items.append(dict(_identity(dict(product,offer_id=article)), cluster_id=cluster,
                               local_units=metrics.get("local_quantity"), total_units=metrics.get("total_quantity"),
                               locality_index=metrics.get("index"), average_delivery_hours=None))
         total = raw.get("total")
@@ -863,8 +887,19 @@ def read(name, args, request):
             for item in items:
                 item["cluster_name"]=names.get(str(item["cluster_id"]))
                 item["cluster_name_status"]="reported" if item["cluster_name"] else "directory_unavailable"
+        identity_pending = (identity_issue.get("http_status") == 429
+                            or identity_issue.get("status") in ("busy","cooldown","retry_time_unknown"))
+        if unresolved_rows:
+            if identity_issue.get("http_status") == 429 and identity_issue.get("retry_after_seconds") is None:
+                identity_issue["retry_after_seconds"] = 60
+            identity_issue.setdefault("status","article_mapping_unresolved")
+            identity_issue["source"] = "/v3/product/info/list"
         return result(items,offset+len(page) if page and offset+len(page)<total else None,
-                      complete=offset+len(page)>=total,source=path, time_coverage="actual_delivery_duration_unavailable_in_current_seller_schema",
+                      complete=offset+len(page)>=total and not unresolved_rows,source=path,
+                      **({"issues":["article_mapping_unresolved"],"unresolved_product_rows":unresolved_rows,
+                          "source_issues":[identity_issue],
+                          "status":"pending" if identity_pending else "partial"} if unresolved_rows else {}),
+                      time_coverage="actual_delivery_duration_unavailable_in_current_seller_schema",
                       provider_notice=retirement)
     if name == "ozon_sku_daily":
         return _daily(args, request)

@@ -1,6 +1,7 @@
 """Exercise the authenticated portal boundary for every read-only MCP operation."""
 import unittest
 import urllib.error
+from unittest.mock import patch
 import test_portal
 
 
@@ -8,6 +9,27 @@ class GatewayTests(unittest.TestCase):
     setUp = test_portal.Tests.setUp
     tearDown = test_portal.Tests.tearDown
     request = test_portal.Tests.request
+
+    def test_fast_seller_reads_bypass_saturated_report_pool_and_old_receipts_resume(self):
+        import portal
+        import report_jobs
+        calls = []
+        def direct(operation, args, creds, **kwargs):
+            calls.append((operation, args))
+            return {'status':'ready', 'complete':True, 'items':[]}
+        self.app.gateway = direct
+        with (patch('portal.provider_read', direct), patch('portal.os.name', 'posix'),
+              patch.dict('portal.os.environ', {'MCP_PREPARE_MARKET_WORKERS':'1'}),
+              patch.object(report_jobs, 'run', return_value={'status':'pending','reason':'waiting_worker'}) as queued):
+            for name in ('wb_questions', 'wb_claims', 'wb_seller_info', 'ozon_supply_acts',
+                         'ozon_promotions', 'ozon_competitor_prices'):
+                with self.subTest(name=name):
+                    self.assertEqual(self.app._dispatch_read(name, {}, {} )['status'], 'ready')
+            queued.assert_not_called()
+            # Receipts created by the previous release must remain resumable.
+            self.app._dispatch_read('wb_questions', {'task_id':'mcpjob_'+'a'*32}, {})
+            queued.assert_called_once()
+        self.assertEqual(len(calls), 6)
 
     def test_all_operations_route_to_the_correct_saved_credentials(self):
         self.vault.save('ozon', {'client_id':'synthetic-id', 'api_key':'synthetic-ozon'})

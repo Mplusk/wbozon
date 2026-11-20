@@ -1,5 +1,5 @@
 import contextlib
-from datetime import date
+from datetime import date, datetime, timedelta
 import io
 from pathlib import Path
 import tempfile
@@ -47,6 +47,21 @@ class Contracts(unittest.TestCase):
             raise finance_gate.GateError("cooldown",50)
         self.assertEqual(r.section("sample",numbers),[{"quantity":1}])
         self.assertEqual((r.issues[0]["reason"],r.issues[0]["http_status"]),("local_limiter",None))
+
+    def test_wb_rating_requests_latest_closed_day_for_today(self):
+        reader = self.reader("wb_card_issues", {})
+        today = datetime.now(market_specs.MOSCOW).date()
+        reader.first = reader.last = today
+        reader.fetch = lambda *_: {"report": [], "data": {"quarantineGoods": []}}
+        requests = {}
+        def pages(group, choice, arguments, *_):
+            requests[choice] = arguments
+            return []
+        reader.pages = pages
+        list(seller_wb_views._card_issues(reader))
+        closed_day = (today-timedelta(days=1)).isoformat()
+        self.assertEqual(requests["item_rating"]["body"]["currentPeriod"], {"start":closed_day,"end":closed_day})
+        self.assertEqual(reader.meta["rating_period_requested"], {"start":today.isoformat(),"end":today.isoformat()})
 
     def test_compensation_dates_identity_and_duplicate_operations(self):
         r=self.reader("ozon_compensations",{"article":"fixture"})

@@ -2,6 +2,8 @@
 from collections import Counter
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+import re
+import sqlite3
 import time
 
 import market_history
@@ -14,6 +16,7 @@ FIN="wb_settlement_reports"
 INFO="wb_seller_information"
 CARD="wb_product_reports"
 PROMO="wb_promotion_reports"
+WB_AGGREGATE_NAMES = frozenset(("склад wb рф", "склад wb", "склады wb рф"))
 
 
 def _nm(r):
@@ -27,6 +30,9 @@ def _history(r,dataset):
 def _inventory(r):
     today=datetime.now(MOSCOW).date().isoformat()
     nm=_nm(r); history=_history(r,"wb_warehouse_daily")
+    office_dataset="wb_warehouse_offices_nm_"+str(nm) if nm else None
+    office_history=_history(r,office_dataset) if office_dataset else {}
+    current_offices_stamp=None
     if today not in history and r.first.isoformat()<=today<=r.last.isoformat():
         params={"nmIds":[nm]} if nm else {}
         current=list(r.pages(STOCK,"stock_now",{"body":{"limit":1000,"offset":0,**params}},"data.items",("body","offset",None,1000)))
@@ -35,39 +41,102 @@ def _inventory(r):
     for day,(stamp,positions) in sorted(history.items()):
         if stamp:r.stamps.append(stamp)
         for p in positions:
-            if r.args.get("warehouse_id") and str(r.args["warehouse_id"])!=str(p.get("warehouseId")):continue
             rows.extend(r.product({"date":day,"warehouse_id":p.get("warehouseId"),"warehouse":p.get("warehouseName"),
                 "size_id":p.get("chrtId"),"stock":int(p["quantity"]),"to_buyer":p.get("inWayToClient"),
                 "from_buyer":p.get("inWayFromClient"),"basis":"observed_snapshot"},p.get("vendorCode"),p.get("nmId")))
     current_rows=[row for row in rows if row["date"]==today]
-    if (nm and r.article and current_rows and not r.args.get("warehouse_id") and
-            all(row.get("warehouse")=="Склад WB РФ" for row in current_rows)):
+    articles={row.get("article") for row in current_rows}
+    if (nm and current_rows and len(articles)==1 and None not in articles and
+            all(str(row.get("warehouse") or "").casefold() in WB_AGGREGATE_NAMES for row in current_rows)):
+        article=next(iter(articles))
         def offices():
             params={"currentPeriod":{"start":today,"end":today},"stockType":"wb","skipDeletedNm":False,"nmIDs":[nm]}
             for region in r.fetch(STOCK,"offices",{"body":params})["data"]["regions"]:
+                if not isinstance(region.get("offices"),list):raise ValueError("data.regions.offices")
+                region_count=region["metrics"].get("stockCount")
+                if type(region_count) is not int or region_count<0:raise ValueError("region.stockCount")
+                if not region["offices"]:
+                    m=region["metrics"]
+                    if m["stockCount"]:
+                        yield dict(date=today,warehouse_id=None,warehouse=region["regionName"],article=article,nm_id=nm,
+                                   stock=m["stockCount"],to_buyer=m.get("toClientCount"),from_buyer=m.get("fromClientCount"),
+                                   basis="current_region_aggregate")
+                office_total=0
                 for office in region["offices"]:
                     m=office["metrics"]
-                    yield dict(date=today,warehouse_id=office["officeID"],warehouse=office["officeName"],
-                               article=r.article,nm_id=nm,stock=int(m["stockCount"]),to_buyer=m.get("toClientCount"),
-                               from_buyer=m.get("fromClientCount"),basis="current_office_metrics")
+                    if type(office.get("officeID")) is not int or not isinstance(office.get("officeName"),str) or not office["officeName"]:
+                        raise ValueError("office.identity")
+                    if type(m.get("stockCount")) is not int or m["stockCount"]<0:raise ValueError("office.stockCount")
+                    office_total+=m["stockCount"]
+                    aggregate = office["officeID"] <= 0 or office["officeName"].casefold() in WB_AGGREGATE_NAMES
+                    yield dict(date=today,warehouse_id=None if aggregate else office["officeID"],warehouse=office["officeName"],
+                               article=article,nm_id=nm,stock=m["stockCount"],to_buyer=m.get("toClientCount"),
+                               from_buyer=m.get("fromClientCount"),basis="current_region_aggregate" if aggregate else "current_office_metrics")
+                if region["offices"] and office_total!=region_count:raise ValueError("region.stockCount mismatch")
         old_issues=len(r.issues)
+        old_stamps=len(r.stamps)
         detail=r.section("offices",offices)
-        if len(r.issues)>old_issues:
-            r.meta["office_directory_issues"]=r.issues[old_issues:]
-            del r.issues[old_issues:]
-        if detail and len({d["warehouse_id"] for d in detail})==len(detail) and sum(d["stock"] for d in detail)==sum(d["stock"] for d in current_rows):
+        office_ids=[d["warehouse_id"] for d in detail if d["warehouse_id"] is not None]
+        if len(office_ids)!=len(set(office_ids)):
+            r.issues.append({"source":"offices","status":"provider_response_invalid","field":"officeID"})
+        if detail and len(r.issues)==old_issues:
+            aggregate=sum(d["stock"] for d in current_rows)
+            detailed=sum(d["stock"] for d in detail)
+            r.meta["warehouse_snapshot_comparison"]={"stock_now":aggregate,"offices":detailed,
+                "totals_match":aggregate==detailed,"note":"Источники обновляются с разной периодичностью."}
+            current_offices_stamp=r.stamps[-1] if len(r.stamps)>old_stamps else None
+            if current_offices_stamp:
+                for d in detail:d["observed_at"]=current_offices_stamp
+            r.meta["office_snapshot_source"]="current_response"
             rows=[d for d in rows if d["date"]!=today]+detail
+            r.meta["office_detail_status"] = "reported" if office_ids else "provider_aggregate"
+            # Save only an authenticated, dated observation of today's complete response.
+            if office_ids:
+                _save_offices(r, office_dataset, today, current_offices_stamp, detail)
+        elif len(r.issues)==old_issues:
+            r.issues.append({"source":"offices","status":"warehouse_detail_unavailable"})
+        r.meta["office_data_scope"]="current_day_only"
+        r.meta["office_refresh_interval_hours"]=2
         r.meta["warehouse_reporting_notice"]="https://dev.wildberries.ru/release-notes?id=605"
-    observation_dates=set(history)
+    # Prefer the most recent saved office observation to an account-wide aggregate.
+    observed_office_days=set()
+    for day,(stamp,positions) in sorted(office_history.items()):
+        if day==today and current_offices_stamp:
+            try:
+                saved_at=datetime.fromisoformat(stamp.replace("Z","+00:00"))
+                current_at=datetime.fromisoformat(current_offices_stamp.replace("Z","+00:00"))
+                if saved_at.utcoffset() is None or current_at.utcoffset() is None or saved_at<=current_at:continue
+            except (TypeError,ValueError,AttributeError):continue
+        selected=[]
+        for position in positions:
+            selected.extend(r.product(position,position.get("article"),position.get("nm_id")))
+        if selected:
+            if stamp:r.stamps.append(stamp)
+            rows=[row for row in rows if row["date"]!=day]+selected
+            observed_office_days.add(day)
+            if day==today:r.meta["office_snapshot_source"]="newer_saved_observation"
+    if observed_office_days or r.meta.get("office_snapshot_archived"):
+        r.meta["office_history_basis"]="observed_snapshots_only_no_backfill"
+    observation_dates=set(history)|observed_office_days
     if r.args.get("download_id") and r.article and nm:
         archive=seller_reports.stock_csv(r.args["download_id"],r.article,nm,r.first.isoformat(),r.last.isoformat(),r.wire)
         if archive.get("data_as_of"):r.stamps.append(archive["data_as_of"])
         for office,days in archive["offices"].items():
-            if r.args.get("warehouse_id") and not any(line["warehouse"]==office for line in rows):continue
+            archive_id=None
+            if r.args.get("warehouse_id"):
+                matching={str(line["warehouse_id"]) for line in rows if line.get("warehouse")==office and line.get("warehouse_id") is not None}
+                if matching!={str(r.args["warehouse_id"])}:continue
+                archive_id=r.args["warehouse_id"]
             for d,stock in days.items():
                 if d not in history and stock is not None:
-                    rows.append(dict(date=d,warehouse=office,article=r.article,nm_id=nm,stock=stock,basis="23_59_moscow"))
+                    rows.append(dict(date=d,warehouse=office,warehouse_id=archive_id,article=r.article,nm_id=nm,stock=stock,basis="23_59_moscow"))
                     observation_dates.add(d)
+    if r.args.get("warehouse_id"):
+        if any(row.get("warehouse_id") is None for row in rows):
+            r.issues.append({"source":"warehouse_filter","status":"aggregate_not_attributable"})
+        rows=[row for row in rows if str(row.get("warehouse_id"))==str(r.args["warehouse_id"])]
+        # An account-wide snapshot does not establish an observation for this warehouse.
+        observation_dates={row["date"] for row in rows}
     r.meta["observed_days"]=len(observation_dates)
     r.meta["missing_dates"]=[(r.first+timedelta(days=i)).isoformat() for i in range((r.last-r.first).days+1)
                             if (r.first+timedelta(days=i)).isoformat() not in observation_dates]
@@ -75,7 +144,8 @@ def _inventory(r):
     if rows:
         last=max(row["date"] for row in rows)
         r.meta["closing_observed_stock"]={"date":last,"quantity":sum(row["stock"] for row in rows if row["date"]==last)}
-        r.meta["warehouse_scope"]="provider_aggregate" if all(str(x.get("warehouse") or "").casefold() in ("склад wb рф","склад wb","склады wb рф") for x in rows) else "reported_warehouses"
+        aggregate=[x for x in rows if x.get("basis")=="current_region_aggregate" or str(x.get("warehouse") or "").casefold() in WB_AGGREGATE_NAMES]
+        r.meta["warehouse_scope"]="provider_aggregate" if len(aggregate)==len(rows) else "mixed_aggregate_and_warehouses" if aggregate else "reported_warehouses"
     if nm and r.article:
         evidence=seller_reports.availability_days(r.article,nm,r.first.isoformat(),min(r.last,datetime.now(MOSCOW).date()-timedelta(days=1)).isoformat(),r.wire) if r.first < datetime.now(MOSCOW).date() else {}
         r.meta["stockout_days"]=evidence.get("whole_day_stockouts",[])
@@ -96,6 +166,33 @@ def _inventory(r):
                    "to_buyer":total("to_buyer"),"from_buyer":total("from_buyer"),
                    "observed_days":len(values),"zero_on_observation_dates":sorted(d for d,rs in values.items() if sum(r["stock"] for r in rs)==0)}
     else:yield from rows
+
+
+def _save_offices(reader, dataset, today, stamp, rows):
+    try:
+        observed = datetime.fromisoformat(stamp.replace("Z","+00:00")) if stamp else None
+        creds = reader.wire.creds
+        analytics_creds = getattr(reader.wire,"category_keys",{}).get("wb_analytics",creds)
+        owner = market_history.scope("wb",creds)
+        if (not observed or observed.utcoffset() is None or observed.astimezone(MOSCOW).date().isoformat() != today
+                or market_history.scope("wb",analytics_creds) != owner):
+            raise ValueError("unverified observation identity or timestamp")
+        archive = market_history.History(reader.directory)
+        archive.save_day(owner,dataset,today,rows,stamp)
+        archive.confirm(creds,owner)
+        reader.meta["office_snapshot_archived"] = True
+    except (OSError, sqlite3.Error, RuntimeError, ValueError, TypeError, AttributeError):
+        reader.meta["office_snapshot_archived"] = False
+        reader.issues.append({"source":"offices_history","status":"observation_not_saved"})
+
+
+def _tariff_number(value):
+    if isinstance(value, str):
+        value = value.strip()
+        if not re.fullmatch(r"[+-]?(?:[0-9]+|[0-9]{1,3}(?:[ \u00a0\u202f][0-9]{3})+)(?:[.,][0-9]+)?", value):
+            return value
+        value = value.translate(str.maketrans({",": ".", " ": "", "\u00a0": "", "\u202f": ""}))
+    return num(value) if type(value) in (str, int, float, Decimal) else value
 
 
 def _tariffs(r):
@@ -129,7 +226,8 @@ def _tariffs(r):
     for d in raw["warehouseList"]:
         if office and office.casefold()!=str(d.get("warehouseName","")).casefold():continue
         yield {"scope":"warehouse","warehouse":d["warehouseName"],"kind":kind,"effective_on":day,"currency":raw.get("currency"),
-               "tariffs":{k:v for k,v in d.items() if k!="warehouseName"}}
+               "tariffs":{k:_tariff_number(v) if k.startswith(("deliveryDump","palletDelivery","palletStorage")) else v
+                          for k,v in d.items() if k!="warehouseName"}}
 
 
 def _balance(r):
@@ -223,7 +321,16 @@ def _card_issues(r):
             if choice=="blocked":
                 batch=r.fetch(CARD,choice,{"query":{"sort":"nmId","order":"asc"}})["report"]
             elif choice=="item_rating":
-                body={"currentPeriod":{"start":r.first.isoformat(),"end":r.last.isoformat()},"offset":0,"limit":100,
+                today = datetime.now(MOSCOW).date()
+                if r.first > today:
+                    raise SourceIssue(source="item_rating", status="rating_period_not_started")
+                end = min(r.last, today-timedelta(days=1))
+                start = min(r.first, end)
+                period = {"start":start.isoformat(), "end":end.isoformat()}
+                r.meta["rating_period"] = period
+                if (start, end) != (r.first, r.last):
+                    r.meta["rating_period_requested"] = {"start":r.first.isoformat(), "end":r.last.isoformat()}
+                body={"currentPeriod":period,"offset":0,"limit":100,
                       "orderBy":{"field":"feedbackRating","mode":"desc"},**({"nmIds":[nm]} if nm else {})}
                 batch=r.pages(CARD,choice,{"body":body},"data.items",("body","offset",None,100))
             elif choice=="price_quarantine":
@@ -244,7 +351,14 @@ def _card_issues(r):
                 yield from row
             counts[choice]=count
             if choice=="item_rating":counts["shadowed"]=shadow
+        before=len(r.issues)
         yield from r.section(choice,collect)
+        for issue in r.issues[before:]:
+            if choice=="item_rating" and issue.get("http_status")==400:
+                issue.update(reason="provider_rejected_request",period=r.meta.get("rating_period"),
+                             documentation="https://dev.wildberries.ru/docs/openapi/analytics#tag/Ocenka-tovara/operation/postV2ItemRating")
+            if choice=="content_recommendations" and issue.get("http_status")==403:
+                issue.update(required_category="Рекомендации",reason="token_category_access_denied")
     r.meta["counts"]=counts
 
 

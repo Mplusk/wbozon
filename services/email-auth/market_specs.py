@@ -225,7 +225,11 @@ for _group, (_description, _) in seller_reports.GROUPS.items():
 for _view, (_description, _keys, _enums) in seller_views.VIEWS.items():
     TOOLS[_view]=(_description, "", "")
 
-RESUMABLE_READS = frozenset(seller_views.VIEWS) | {
+FAST_SELLER_READS = frozenset({
+    "wb_questions", "wb_claims", "wb_seller_info", "ozon_supply_acts",
+    "ozon_promotions", "ozon_competitor_prices",
+})
+RESUMABLE_READS = (frozenset(seller_views.VIEWS) - FAST_SELLER_READS) | {
     "unit_economics", "sales_drop_check", "supply_plan", "wb_retentions", "wb_ads",
     "ozon_reviews", "ozon_delivery_time", "wb_acceptance_slots", "ozon_stocks_by_cluster",
     "ozon_stocks_analytics", "ozon_sku_daily",

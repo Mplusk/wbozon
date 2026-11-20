@@ -50,10 +50,19 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
     def test_authenticated_seller_read_queries_are_not_rate_limited_at_thirty(self):
         _,token=self.app.external_keys.create("Read reports",secrets.token_urlsafe(16),self.app.login.clock(),"marketplaces")
         query={"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-            "name":"ozon_fbo_reports","arguments":{"report":"macroclusters"}}}
+            "name":"ozon_clusters","arguments":{}}}
         for _ in range(35):
             response=json.loads(self.mcp(query, token)['body'])['result']
-            self.assertEqual(json.loads(response['content'][0]['text'])['status'],'schema')
+            self.assertEqual(json.loads(response['content'][0]['text'])['status'],'not_configured')
+
+    def test_generic_report_groups_are_available_only_through_the_internal_bridge(self):
+        _,token=self.app.external_keys.create("Read reports",secrets.token_urlsafe(16),self.app.login.clock(),"all")
+        name='ozon_fbo_reports'
+        args={'report':'macroclusters'}
+        data={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':name,'arguments':args}}
+        self.assertEqual(json.loads(self.mcp(data,token)['body'])['error']['code'],-32602)
+        internal=self.request('/api/read','POST',{'operation':name,'arguments':args},auth=self.token,cookie=False)
+        self.assertEqual(json.loads(internal['body'])['status'],'schema')
 
     def test_session_origin_and_csrf_are_required(self):
         form=self.creation_form()
@@ -138,7 +147,8 @@ class ExternalMCPIntegrationTests(unittest.TestCase):
                                  'ozon_unallocated_accruals','ozon_fbo_supply_orders','ozon_fbo_supply_details','ozon_fbo_supply_items','ozon_fbo_volume_allocation',
                                  'ozon_posting_accruals','ozon_prices','ozon_orders_analytics',
                                  'ozon_posting_status','ozon_posting_candidates','wb_products','wb_prices','wb_commissions',
-                                 'wb_box_tariffs','wb_sales_summary'} | set(portal.market_specs.TOOLS))
+                                 'wb_box_tariffs','wb_sales_summary'}
+                         | (set(portal.market_specs.TOOLS) - portal.market_specs.seller_reports.GROUPS.keys()))
 
     def test_finance_429_propagates_delay_and_prevents_early_mcp_or_api_retry(self):
         token=re.search(r'value="(mcp_[A-Za-z0-9_-]{43})"',self.create()['body']).group(1)

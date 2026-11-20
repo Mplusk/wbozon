@@ -411,6 +411,18 @@ class WBExpansionContracts(unittest.TestCase):
                     list(seller_wb_views._tariffs(selected))
                 self.assertEqual(failure.exception.info['status'], expected)
 
+    def test_tariffs_normalize_numeric_fields_without_changing_warehouse_names(self):
+        from types import SimpleNamespace
+        from seller_wb_views import _tariffs
+
+        data = {"warehouseList": [{"warehouseName": "Склад 1 078,2", "deliveryDumpKgtOfficeBase": "1 078,2",
+                                   "deliveryDumpKgtOfficeLiter": "9,1", "deliveryDumpKgtReturnExpr": "—"}]}
+        report = SimpleNamespace(args={}, first=START, fetch=lambda *_: {"response": {"data": data}})
+        (row,) = _tariffs(report)
+        self.assertEqual(row["tariffs"], {"deliveryDumpKgtOfficeBase": "1078.2",
+                                         "deliveryDumpKgtOfficeLiter": "9.1", "deliveryDumpKgtReturnExpr": "—"})
+        self.assertEqual(row["warehouse"], "Склад 1 078,2")
+
     def test_restored_slots_preserve_blocked_free_and_paid_types_for_the_14_day_horizon(self):
         today = datetime.now(timezone(timedelta(hours=3))).date()
         def slot(day, box, coef, unload):

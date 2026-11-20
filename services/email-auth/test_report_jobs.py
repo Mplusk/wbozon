@@ -74,12 +74,19 @@ class ReportJobTests(unittest.TestCase):
         first = self.read()
         second = self.read(article="other")
         third = self.read(article="third")
-        self.assertEqual(third["reason"], "local_limiter")
+        fourth = self.read(article="fourth")
+        fifth = self.read(article="fifth")
+        self.assertIn(third["reason"], ("waiting_worker","report_in_progress"))
+        self.assertIn(fourth["reason"], ("waiting_worker","report_in_progress"))
+        self.assertEqual(fifth["reason"], "local_limiter")
         self.assertIsNone(third["http_status"])
         self.assertNotEqual(first["task_id"], second["task_id"])
+        self.assertEqual(len(self.started), 2)
         self.finish.set()
         self.poll(**self.args)
         self.poll(article="other")
+        self.poll(article="third")
+        self.poll(article="fourth")
 
     def test_provider_wait_is_replayed_without_another_outbound_request(self):
         import urllib.error
@@ -108,7 +115,7 @@ class ReportJobTests(unittest.TestCase):
                 return {"status": "ready", "complete": True, "items": []}
             return {"status": "pending", "task_id": "native-id", "retry_after_seconds": 30,
                     "source_issues": [{"http_status": 429, "retry_after_seconds": 32}]}
-        with patch.object(report_jobs, "WAIT_SECONDS", 2), patch("time.time", return_value=now) as clock:
+        with patch.object(report_jobs, "WAIT_SECONDS", 2), patch.object(report_jobs, "MAX_BACKGROUND_SECONDS", 20), patch("time.time", return_value=now) as clock:
             def read(**extra):
                 return report_jobs.run("wb_funnel_history", dict(self.args, **extra), self.creds, self.gate, provider)
             receipt = read()["task_id"]
@@ -116,13 +123,112 @@ class ReportJobTests(unittest.TestCase):
             for given in (receipt, "native-id", None):
                 page = read(**({"task_id": given} if given else {}))
                 self.assertEqual(page["task_id"], receipt)
-                self.assertEqual(page["retry_after_seconds"], 20)
+                self.assertEqual(page["retry_after_seconds"], 22)
                 self.assertEqual(page["source_issues"][0]["retry_after_seconds"], 22)
                 self.assertIsNone(page["source_issues"][0]["http_status"])
             self.assertEqual(len(calls), 1)
             clock.return_value = now + 33
             self.assertTrue(read(task_id=receipt)["complete"])
             self.assertEqual(calls, [self.args, dict(self.args, task_id="native-id")])
+
+    def test_pending_report_continues_without_polling_and_keeps_provider_receipt(self):
+        calls = []
+        completed = threading.Event()
+        def dispatch(args, mappings):
+            calls.append(dict(args))
+            if len(calls) == 1:
+                return {"status": "pending", "task_id": "native-id", "retry_after_seconds": 0}
+            completed.set()
+            return {"status": "ready", "complete": True, "items": []}
+        with patch.object(report_jobs, "WAIT_SECONDS", 0.5), patch.object(report_jobs, "MIN_RETRY_SECONDS", 0.02):
+            initial = report_jobs.run("wb_funnel_history", self.args, self.creds, self.gate, dispatch)
+            self.assertEqual(initial["reason"], "retry_scheduled")
+            self.assertTrue(initial["background_retry"])
+            self.assertTrue(completed.wait(3), "report did not continue without polling")
+            for _ in range(100):
+                result = report_jobs.run("wb_funnel_history", dict(self.args, task_id=initial["task_id"]), self.creds, self.gate, dispatch)
+                if result.get("complete"): break
+                time.sleep(0.01)
+            self.assertTrue(result["complete"])
+        self.assertEqual(calls, [self.args, dict(self.args, task_id="native-id")])
+
+    def test_waiting_job_starts_without_another_client_poll(self):
+        third_started = threading.Event()
+        def dispatch(args, mappings):
+            self.started.append(dict(args))
+            if args['article'] == 'third':
+                third_started.set()
+            else:
+                self.finish.wait(5)
+            return {'status':'ready','complete':True,'items':[]}
+        def read(article):
+            return report_jobs.run('unit_economics', {'article':article}, self.creds, self.gate, dispatch)
+        read('first'); read('second')
+        queued = read('third')
+        self.assertEqual(queued['reason'], 'waiting_worker')
+        self.assertFalse(third_started.is_set())
+        self.finish.set()
+        self.assertTrue(third_started.wait(3), 'queued report did not start without polling')
+        for _ in range(100):
+            result = read('third')
+            if result.get('complete'): break
+            time.sleep(0.01)
+        self.assertTrue(result['complete'])
+
+    def test_long_provider_cooldown_is_never_shortened_or_held_past_drain(self):
+        calls = []
+        def dispatch(args, mappings):
+            calls.append(args)
+            return {"status": "pending", "task_id": "native-id", "source_issues": [
+                {"status": "rate_limited", "retry_after_seconds": 3600, "http_status": 429}]}
+        with patch.object(report_jobs, "WAIT_SECONDS", 1):
+            result = report_jobs.run("wb_funnel_history", self.args, self.creds, self.gate, dispatch)
+        self.assertEqual(result["reason"], "retry_later")
+        self.assertFalse(result["background_retry"])
+        self.assertEqual(result["retry_after_seconds"], 3600)
+        self.assertEqual(len(calls), 1)
+
+    def test_source_transport_failure_is_not_retried_blindly(self):
+        calls = []
+        def dispatch(args, mappings):
+            calls.append(args)
+            return {"status": "pending", "source_issues": [{"status": "source_unavailable"}]}
+        with patch.object(report_jobs, "WAIT_SECONDS", 1):
+            result = report_jobs.run("wb_funnel_history", self.args, self.creds, self.gate, dispatch)
+        self.assertEqual(result["reason"], "retry_later")
+        self.assertFalse(result["background_retry"])
+        self.assertEqual(len(calls), 1)
+
+    def test_cached_receipt_does_not_claim_a_worker_after_a_crash(self):
+        import expansion_gateway
+        from market_transport import Wire, _id
+        name = 'wb_funnel_history'
+        wire = Wire('mcp-report', self.creds, self.gate, time.monotonic())
+        mappings = expansion_gateway._seller_mappings(self.gate)
+        scope = _id([wire.scope, 'mcp-public-report-v2', name, self.args, mappings])
+        task = report_jobs.PREFIX + _id([scope, None])[:32]
+        key = _id([scope, 'result', task])
+        wire.store(key, json.dumps({'saved_at':time.time(), 'value':{
+            'status':'pending', 'task_id':task, 'background_retry':True,
+            'reason':'retry_scheduled', 'retry_after_seconds':30}}).encode(), 60)
+        result = report_jobs.run(name, self.args, self.creds, self.gate, self.dispatch)
+        self.assertFalse(result['background_retry'])
+        self.assertEqual(result['reason'], 'retry_later')
+        self.assertEqual(self.started, [])
+
+    def test_reports_in_same_lock_bucket_keep_distinct_receipts(self):
+        original = report_jobs._id
+        def short_collision(value):
+            digest = original(value)
+            return 'abc' + digest[3:] if len(value) == 3 and value[1] == 'result' else digest
+        with patch.object(report_jobs, '_id', short_collision):
+            first = self.read()
+            second = self.read(article='other')
+            self.assertNotEqual(first['task_id'], second['task_id'])
+            self.assertEqual(len(self.started), 1)
+            self.finish.set()
+            self.poll(**self.args)
+            self.poll(article='other')
 
     def test_cached_accounting_preserves_nested_provider_deadline_and_public_row(self):
         issue = {"status": "rate_limited", "http_status": 429, "retry_after_seconds": 3600}

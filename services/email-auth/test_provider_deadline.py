@@ -14,6 +14,32 @@ from portal import provider_read
 
 
 class ProviderDeadlineTests(unittest.TestCase):
+    def test_background_deadline_stops_worker_even_if_report_budget_is_larger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = Path(tmp)/'worker.py'
+            worker.write_text('import sys,time\nsys.stdin.buffer.read()\ntime.sleep(5)\n', encoding='utf-8')
+            with patch('portal.PROVIDER_WORKER', str(worker)), patch.dict(os.environ, {'MCP_PREPARE_MARKET_WORKERS':'0'}):
+                started = time.monotonic()
+                with self.assertRaises(TimeoutError):
+                    provider_read('wb_funnel_history', {}, {'api_token':'synthetic'},
+                                  report_mappings={}, report_deadline=started + 0.6)
+                self.assertLess(time.monotonic() - started, 2.5)
+
+    @unittest.skipUnless(os.name=='posix', 'native Linux worker readiness pipe')
+    def test_fast_view_total_deadline_expires_before_credentials_are_sent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = Path(tmp)/'worker.py'
+            marker = Path(tmp)/'received'
+            worker.write_text('import pathlib,sys,time\ntime.sleep(2)\nif sys.stdin.buffer.read(): pathlib.Path('+repr(str(marker))+').touch()\n', encoding='utf-8')
+            with (patch('portal.PROVIDER_WORKER', str(worker)),
+                  patch('portal.FAST_READ_TOTAL_SECONDS', 0.3),
+                  patch.dict(os.environ, {'MCP_PREPARE_MARKET_WORKERS':'1'})):
+                started = time.monotonic()
+                with self.assertRaises(TimeoutError):
+                    provider_read('wb_questions', {}, {'api_token':'synthetic'})
+                self.assertLess(time.monotonic() - started, 1.5)
+            self.assertFalse(marker.exists())
+
     def test_simple_reads_start_without_loading_portal_or_cache_encryption(self):
         portal_path = Path(__file__).with_name('portal.py').resolve()
         script = """import io, json, pathlib, runpy, sys, urllib.request

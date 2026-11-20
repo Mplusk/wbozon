@@ -62,6 +62,9 @@ class Reports(unittest.TestCase):
 
     def test_locality_by_sku_uses_the_product_first_contract(self):
         def provider(method, url, *, body, ttl):
+            if url.endswith("/v3/product/info/list"):
+                self.assertEqual(body, {"sku":[17]})
+                return {"items":[{"id":2,"offer_id":"A","sku":17}]}
             self.assertTrue(url.endswith("/items-clusters/info"))
             self.assertEqual(body["filter"]["skus"], ["17"])
             self.assertNotIn("macrolocal_cluster_to_ids", body["filter"])
@@ -69,7 +72,7 @@ class Reports(unittest.TestCase):
                                "metrics": {"local_data": {"index": 67, "local_quantity": 2, "total_quantity": 3}}}],
                     "total": 1}
         (row,) = ozon_expansion.read("ozon_delivery_time", dict(self.dates, sku=17), provider)["items"]
-        self.assertEqual((row["sku"], row["cluster_id"], row["local_units"]), ("17", "7", 2))
+        self.assertEqual((row["article"], row["sku"], row["cluster_id"], row["local_units"]), ("A", "17", "7", 2))
 
     def test_unfiltered_locality_returns_account_total_without_inventing_clusters(self):
         def provider(method, url, *, body, ttl):
@@ -80,6 +83,22 @@ class Reports(unittest.TestCase):
         self.assertFalse(answer["complete"])
         self.assertEqual(answer["items"][0]["local_units"], 3)
         self.assertIsNone(answer["items"][0]["cluster_id"])
+        self.assertNotIn("article", answer["items"][0])
+
+    def test_supply_slots_by_sku_does_not_request_account_warehouse_workload(self):
+        from seller_ozon_views import _slots
+
+        def fetch(group, report, inputs):
+            self.assertEqual(report, "placement_zones")
+            self.assertEqual(inputs, {"body": {"skus": ["17"]}})
+            return {"products_placement": [{"sku": 17, "placement_zone": "zone"}]}
+
+        reader = SimpleNamespace(args={"sku":17}, ids={"17"}, meta={}, fetch=fetch,
+                                 section=lambda _, action: list(action()),
+                                 product=lambda row, _, sku: [dict(row, article="A", sku=sku)])
+        (row,) = _slots(reader)
+        self.assertEqual((row["article"], row["sku"]), ("A", 17))
+        self.assertEqual(reader.meta["warehouse_workload_status"], "product_eligibility_not_reported")
 
     def test_grouped_wb_orders_only_zero_fill_confirmed_days(self):
         args = {"article": "A", "group_by": "day"}
