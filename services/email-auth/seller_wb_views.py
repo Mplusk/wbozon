@@ -39,8 +39,10 @@ def _inventory(r):
         current=list(r.pages(STOCK,"stock_now",{"body":{"limit":1000,"offset":0,**params}},"data.items",("body","offset",None,1000)))
         stamp=r.stamps[-1] if r.stamps else None
         observed_day=datetime.fromisoformat(stamp).astimezone(MOSCOW).date().isoformat() if stamp else None
-        if observed_day == today:
+        if not stamp or observed_day == today:
             history[today]=(stamp,current)
+        elif r.first.isoformat() <= observed_day <= r.last.isoformat() and observed_day not in history:
+            history[observed_day]=(stamp,current)
     rows=[]
     for day,(stamp,positions) in sorted(history.items()):
         if stamp:r.stamps.append(stamp)
@@ -152,6 +154,7 @@ def _inventory(r):
         closing=[row for row in rows if row["date"]==last]
         r.meta["closing_observed_stock"]={"date":last,"quantity":sum(row["stock"] for row in closing),
             "observed_at":min((row["observed_at"] for row in closing if row.get("observed_at")),default=None)}
+        r.meta["snapshot_date_zone"]="Europe/Moscow"
         aggregate=[x for x in rows if x.get("basis")=="current_region_aggregate" or str(x.get("warehouse") or "").casefold() in WB_AGGREGATE_NAMES]
         r.meta["warehouse_scope"]="provider_aggregate" if len(aggregate)==len(rows) else "mixed_aggregate_and_warehouses" if aggregate else "reported_warehouses"
     if nm and r.article:

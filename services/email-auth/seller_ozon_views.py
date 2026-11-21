@@ -249,7 +249,7 @@ def _acts(r):
                     state["attempts"] += 1
                 if retryable and state["attempts"] < 3:
                     delay = issue.get("retry_after_seconds")
-                    state["retry_at"] = now + (delay if type(delay) is int and delay > 0 else 5)
+                    state["retry_at"] = time.time() + (delay if type(delay) is int and delay > 0 else 5)
                     break
                 state["failed"].append(dict(issue, failure_status=issue["status"], status="acceptance_read_failed"))
                 if listing:

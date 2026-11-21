@@ -87,6 +87,17 @@ class InventoryCardFixTests(unittest.TestCase):
         self.assertEqual(reader.meta["office_data_scope"],"current_day_only")
         self.assertTrue(reader.meta["warehouse_snapshot_comparison"]["totals_match"])
 
+    def test_cached_stock_from_yesterday_keeps_observation_day_and_leaves_today_missing(self):
+        reader = FakeReader()
+        reader.first = reader.last - timedelta(days=1)
+        stamp = reader.first.isoformat() + "T23:58:00+03:00"
+        reader.stamps = [stamp]
+        rows = self.inventory(reader)
+        self.assertEqual([(row["date"], row["observed_at"]) for row in rows],
+                         [(reader.first.isoformat(), stamp)])
+        self.assertEqual(reader.meta["missing_dates"], [reader.last.isoformat()])
+        self.assertEqual(reader.meta["closing_observed_stock"]["observed_at"], stamp)
+
     def test_different_snapshot_totals_are_explicit(self):
         reader=FakeReader()
         reader.office_result={"data":{"regions":[region(8,[office(1,"A",8)])]}}
