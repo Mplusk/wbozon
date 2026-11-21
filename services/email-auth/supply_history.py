@@ -1,13 +1,14 @@
 """Resume supply composition scans with a separate cursor for the list and each supply."""
 
+import calendar
 import math
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import urllib.error
 import finance_gate
 import wb_expansion
 import ozon_expansion
-from market_specs import result
+from market_specs import MOSCOW, result
 
 
 def _filters(args):
@@ -16,6 +17,17 @@ def _filters(args):
         for k, v in args.items()
         if k in ("date_from", "date_to", "states", "warehouse_id", "status_ids")
     }
+
+
+def _wb_listing_filters(filters):
+    first, last = (date.fromisoformat(filters[k]) for k in ("date_from", "date_to"))
+    today = datetime.now(MOSCOW).date()
+    month_end = last.replace(day=calendar.monthrange(last.year, last.month)[1])
+    return dict(date_from=first.replace(day=1).isoformat(), date_to=max(last, min(month_end, today)).isoformat())
+
+
+def _wb_article_scan_key(article, filters):
+    return ["wb_supplies", article, _wb_listing_filters(filters)]
 
 
 def saved_wb_page(args, wire):
@@ -27,7 +39,7 @@ def saved_wb_page(args, wire):
             return dict(saved["page"], refresh_status="pending")
         return None
     filters = _filters(args)
-    state = wire.progress_snapshot("article-supplies-v2", ["wb_supplies", args["article"], filters])
+    state = wire.progress_snapshot("wb-supplies-scan-v3", _wb_article_scan_key(args["article"], filters))
     finished = bool(state.get("finished_at"))
     if not finished and not state.get("last_ready"):
         return None
@@ -38,7 +50,8 @@ def report(name, args, wire):
     oz = name == "ozon_supply_orders"
     article = args["article"]
     filters = _filters(args)
-    with wire.progress("article-supplies-v2", [name, article, filters]) as (saved, save):
+    key = [name, article, filters] if oz else _wb_article_scan_key(article, filters)
+    with wire.progress("article-supplies-v2" if oz else "wb-supplies-scan-v3", key) as (saved, save):
         empty = {
             "list_cursor": None,
             "last_page": False,
@@ -97,7 +110,8 @@ def report(name, args, wire):
                         is_preorder=not parent["supply_id"],
                         offset=marker or 0,
                     )
-                    page = fetch(wb_expansion._goods, q, wire, include_packages=False)
+                    ttl = 86400 if parent.get("status_id") == 5 else 1800
+                    page = fetch(wb_expansion._goods, q, wire, include_packages=False, snapshot_ttl=ttl)
                 if page is None:
                     break
                 state["parts"].extend(page["items"])
@@ -141,7 +155,7 @@ def report(name, args, wire):
                     state["scanned"] = state.get("scanned", 0) + 1
                     state.update(parts=[], item_cursor=None, seen_items=[])
             elif not state["last_page"]:
-                q = dict(filters, limit=5)
+                q = dict(key[2], limit=5)
                 marker = state["list_cursor"]
                 if marker is not None:
                     q["cursor" if oz else "offset"] = marker
@@ -176,6 +190,7 @@ def report(name, args, wire):
                                     "preorder_id",
                                     "warehouse",
                                     "warehouse_id",
+                                    "created_at",
                                     "supply_date",
                                     "status_id",
                                 )
@@ -214,17 +229,20 @@ def report(name, args, wire):
                         if wait > 0:
                             delays.append(dict(status="cooldown", reason="local_limiter", http_status=None, retry_after_seconds=wait))
                         else:
-                            catalog = fetch(wb_expansion._warehouse_directory, {"include_warehouses": True}, wire, {}, required=True)
+                            catalog = fetch(wb_expansion._warehouse_directory,
+                                            {"include_warehouses": True, "include_fbs_offices": True}, wire, {}, required=True)
                             if catalog is None:
                                 retry = delays[-1].get("retry_after_seconds") if delays else None
                                 state["warehouse_directory_retry_at"] = time.time() + (retry if type(retry) is int else 60)
                             else:
                                 state.pop("warehouse_directory_retry_at", None)
-                    names = {r["name"] for r in (catalog or {}).get("warehouses", [])
-                             if str(r["warehouse_id"]) == str(warehouse_id) and r["name"]}
+                    matching = [r for r in (catalog or {}).get("warehouses", [])
+                                if str(r["warehouse_id"]) == str(warehouse_id) and r["name"]]
+                    names = {r["name"] for r in matching}
                     if len(names) == 1:
                         name_from_id = names.pop()
-                        detail.update(warehouse=name_from_id, warehouse_name=name_from_id, warehouse_basis="directory_by_id")
+                        detail.update(warehouse=name_from_id, warehouse_name=name_from_id, warehouse_basis="directory_by_id",
+                                      warehouse_name_source=matching[0].get("source"))
                         detail.pop("warehouse_name_status", None)
                     else:
                         detail["warehouse_name_status"] = "retry_pending" if catalog is None else catalog.get("warehouses_status", "unavailable")
@@ -247,14 +265,22 @@ def _supply_page(oz, args, filters, state, done, details_done, delays, *, refres
     snapshot = state.get("last_ready") if not ready else None
     records = snapshot["items"] if snapshot else state["supplies"]
     as_of = snapshot["at"] if snapshot else state.get("finished_at")
-    selected = [s for s in records if oz or "warehouse_id" not in args or str(args["warehouse_id"]) in
+    candidates = records
+    if not oz:
+        candidates = [row for row in records if row.get("created_at") and
+                      filters["date_from"] <= datetime.fromisoformat(row["created_at"]).astimezone(MOSCOW).date().isoformat()
+                      <= filters["date_to"] and ("status_ids" not in filters or row.get("status_id") in filters["status_ids"])]
+        if any(not row.get("created_at") for row in records):
+            delays = [*delays, dict(status="supply_creation_date_missing", source="/api/v1/supplies")]
+            ready = False
+    selected = [s for s in candidates if oz or "warehouse_id" not in args or str(args["warehouse_id"]) in
                 (str(s.get("warehouse_id")), str(s.get("actual_warehouse_id")))]
     offset, limit = args.get("offset", 0), args.get("limit", 100)
     more = offset + limit < len(selected)
     return result(
         selected[offset : offset + limit], offset + limit if more else None,
         complete=(ready or bool(snapshot)) and not more,
-        status="ready" if ready or snapshot else "pending",
+        status="ready" if ready or snapshot else "partial" if done and details_done else "pending",
         scanned_supplies=snapshot.get("scanned") if snapshot else state.get("scanned"), matched_supplies=len(selected),
         composition_complete=done or bool(snapshot), warehouses_checked=details_done or bool(snapshot), pending_sources=delays,
         **({"warehouse_names_complete":bool(ready or snapshot) and all(r.get("warehouse_name") for r in selected),

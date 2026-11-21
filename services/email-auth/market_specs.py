@@ -232,7 +232,7 @@ FAST_SELLER_READS = frozenset({
 RESUMABLE_READS = (frozenset(seller_views.VIEWS) - FAST_SELLER_READS) | {
     "unit_economics", "sales_drop_check", "supply_plan", "wb_retentions", "wb_ads",
     "ozon_reviews", "ozon_delivery_time", "wb_acceptance_slots", "ozon_stocks_by_cluster",
-    "ozon_stocks_analytics", "ozon_sku_daily",
+    "ozon_stocks_analytics", "ozon_sku_daily", "wb_orders", "wb_sales",
 }
 for _name in RESUMABLE_READS:
     _description, _keys, _required = TOOLS[_name]

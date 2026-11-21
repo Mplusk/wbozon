@@ -729,6 +729,8 @@ class Portal:
                                                         'source','retry_after_seconds','refresh_status')}
                         if detail['status'] is None and isinstance(detail['complete'], bool):
                             detail['status'] = 'ready' if detail['complete'] else 'partial'
+                        if isinstance(data.get('source_issues'), list):
+                            detail['source_issues'] = data['source_issues']
                     except finance_gate.GateError as exc:
                         detail=dict(status=exc.reason, probe_origin='local_gate', http_status=None,
                                     reason='local_limiter', retry_after_seconds=exc.retry_after_seconds)
@@ -771,7 +773,9 @@ class Portal:
             value=self._dispatch_read(operation,args,creds)
         except Exception as exc:
             status=('provider_timeout' if isinstance(exc,TimeoutError) else 'http_'+str(exc.code) if isinstance(exc,urllib.error.HTTPError)
-                    else exc.reason if isinstance(exc,finance_gate.GateError) else 'failed')
+                    else exc.reason if isinstance(exc,finance_gate.GateError)
+                    else 'provider_response_invalid' if isinstance(exc,finance_gate.ProviderResponseInvalid)
+                    else 'transport_error' if isinstance(exc,urllib.error.URLError) else 'failed')
             self._observe(operation,creds,status)
             raise
         if isinstance(value,dict):
@@ -805,7 +809,7 @@ class Portal:
                 legacy_job = (operation in market_specs.FAST_SELLER_READS and
                               isinstance(args.get("task_id"), str) and args["task_id"].startswith("mcpjob_"))
                 batch_acts = operation == "ozon_supply_acts" and "supply_id" not in args
-                if ((operation in market_specs.RESUMABLE_READS or legacy_job or batch_acts) and os.name == "posix"
+                if ((operation in market_specs.RESUMABLE_READS or operation == "wb_sales_summary" or legacy_job or batch_acts) and os.name == "posix"
                         and os.environ.get("MCP_PREPARE_MARKET_WORKERS") == "1"):
                     import report_jobs
                     try:

@@ -1,6 +1,10 @@
 """Ozon seller-facing projections with supplier, date and financial scope preserved."""
+from contextlib import nullcontext
 from datetime import date, timedelta
 from decimal import Decimal
+from math import ceil
+import time
+
 import ozon_details
 import ozon_expansion
 from seller_views import SourceIssue, num, spans
@@ -161,46 +165,137 @@ def _removals(r):
         yield from r.section(name,collect)
 
 
-def _act_supplies(r):
-    a=r.args
-    if "supply_id" in a:
-        yield str(a["supply_id"]), a.get("order_id")
-        return
-    orders=[a["order_id"]] if "order_id" in a else []
-    if not orders:
-        start,end=_times(r)
-        query={"filter":{"states":["COMPLETED","REPORTS_CONFIRMATION_AWAITING","REPORT_REJECTED"],
-                         "timeslot_from_range":{"from":start,"to":end,"timeslot_filter_type":"BY_UTC_TIME"}},
-               "limit":100,"sort_by":"ORDER_CREATION","sort_dir":"DESC"}
-        seen=set()
-        while True:
-            page=r.cached("ozon_post_v3_supply_order_list",{"body":query})
-            orders.extend(page["order_ids"])
-            marker=page.get("last_id")
-            if not marker or not page["order_ids"]:break
-            if marker in seen:raise ValueError("Repeated supply order last_id")
-            seen.add(marker);query["last_id"]=marker
-    for order in dict.fromkeys(orders):
-        response=r.fetch(FBO,"acceptance_summary",{"body":{"order_id":order}})
-        for section in response["supplies_acts"]:
-            yield str(section["supply_id"]), order
+def _act_orders(r, cursor):
+    start, end = _times(r)
+    query = {"filter": {"states": ["COMPLETED", "REPORTS_CONFIRMATION_AWAITING", "REPORT_REJECTED"],
+                        "timeslot_from_range": {"from": start, "to": end, "timeslot_filter_type": "BY_UTC_TIME"}},
+             "limit": 100, "sort_by": "ORDER_CREATION", "sort_dir": "DESC"}
+    if cursor:
+        query["last_id"] = cursor
+    page = r.cached("ozon_post_v3_supply_order_list", {"body": query})
+    return page["order_ids"], page.get("last_id") if page["order_ids"] else None
+
+
+def _act_rows(r, supply, order):
+    doc = r.fetch(FBO, "accepted_products", {"body": {"supply_id": supply}})
+    defects = {str(i["sku"]): i.get("defect_reasons") for i in doc.get("skus_defects") or []}
+    for act in doc["supply_acts"]:
+        for line in act.get("items") or []:
+            details = line["sku_info"]
+            sku = details.get("sku")
+            expected, count = line.get("declared_quantity"), line.get("fact_quantity")
+            yield from r.product({"order_id": order, "supply_id": supply, "act_id": act.get("act_id"),
+                                  "act_type": act.get("type"), "declared": expected, "received": count,
+                                  "approved": line.get("approved_quantity"),
+                                  "difference": int(count) - int(expected) if count is not None and expected is not None else None,
+                                  "reasons": defects.get(str(sku), [])}, details.get("offer_id"), sku)
 
 
 def _acts(r):
-    seen=set()
-    for sid,order in _act_supplies(r):
-        if sid in seen:continue
-        seen.add(sid)
-        doc=r.fetch(FBO,"accepted_products",{"body":{"supply_id":sid}})
-        defects={str(i["sku"]):i.get("defect_reasons") for i in doc.get("skus_defects") or []}
-        for act in doc["supply_acts"]:
-            for line in act.get("items") or []:
-                details=line["sku_info"];sku=details.get("sku")
-                expected=line.get("declared_quantity");count=line.get("fact_quantity")
-                yield from r.product({"order_id":order,"supply_id":sid,"act_id":act.get("act_id"),"act_type":act.get("type"),
-                    "declared":expected,"received":count,"approved":line.get("approved_quantity"),
-                    "difference":int(count)-int(expected) if count is not None and expected is not None else None,
-                    "reasons":defects.get(str(sku),[])},details.get("offer_id"),sku)
+    order, supply = r.args.get("order_id"), r.args.get("supply_id")
+    key = [_times(r) if order is None and supply is None else None, order, supply, r.article, sorted(r.ids)]
+    scan = (r.wire.progress("ozon-acceptance-acts-v1", key) if hasattr(r.wire, "progress")
+            else nullcontext(({}, lambda *_: None)))
+    with scan as (saved, save):
+        state = saved or dict(orders=[order] if order is not None or supply is not None else [],
+                              supplies=[str(supply)] if supply is not None else None, cursor=None,
+                              seen_cursors=[], list_complete=order is not None or supply is not None,
+                              list_finished=order is not None or supply is not None, index=0, received={},
+                              failed=[], attempts=0, retry_at=0, last_issue=None,
+                              started=time.time(), stamps=[], terminal=False, unmapped=0)
+        r.stamps.extend(state["stamps"])
+        for _ in range(50):
+            if state["terminal"]:
+                break
+            now = time.time()
+            listing = not state["list_finished"]
+            if not listing and state["index"] >= len(state["orders"]):
+                state["terminal"] = True
+                break
+            if now >= state["started"] + 20 * 60:
+                state["terminal"] = True
+                state["failed"].append(dict(source="ozon_supply_acts", status="acceptance_scan_time_limit"))
+                break
+            if state["retry_at"] > now or time.monotonic() + 1 >= r.deadline:
+                break
+            current = None if listing else state["orders"][state["index"]]
+            sid = (state["supplies"] or [None])[0] if not listing else None
+            source = ("/v3/supply-order/list" if listing else "/v1/supply-order/act/product/get" if sid else
+                      "/v1/supply-order/act/summary/get")
+
+            def collect():
+                if listing:
+                    yield _act_orders(r, state["cursor"])
+                elif state["supplies"] is None:
+                    raw = r.fetch(FBO, "acceptance_summary", {"body": {"order_id": current}})
+                    yield list(dict.fromkeys(str(row["supply_id"]) for row in raw["supplies_acts"]))
+                elif sid and sid not in state["received"]:
+                    yield from _act_rows(r, sid, current)
+
+            before = len(r.issues)
+            unresolved = r.meta.get("unresolved_product_rows", 0)
+            rows = r.section(source, collect)
+            issues = r.issues[before:]
+            del r.issues[before:]
+            if issues:
+                r.meta["unresolved_product_rows"] = unresolved
+                issue = dict(issues[0], order_id=current, supply_id=sid)
+                state["last_issue"] = issue
+                local = issue.get("reason") in ("local_limiter", "request_deadline")
+                retryable = (issue["status"] in ("pending", "rate_limited", "source_unavailable", "provider_timeout")
+                             or issue.get("http_status") in (500, 502, 503, 504))
+                # Waiting for a previously recorded reset does not consume a new upstream attempt.
+                if not local:
+                    state["attempts"] += 1
+                if retryable and state["attempts"] < 3:
+                    delay = issue.get("retry_after_seconds")
+                    state["retry_at"] = now + (delay if type(delay) is int and delay > 0 else 5)
+                    break
+                state["failed"].append(dict(issue, failure_status=issue["status"], status="acceptance_read_failed"))
+                if listing:
+                    state["list_finished"] = True
+                elif sid:
+                    state["supplies"].pop(0)
+                else:
+                    state.update(index=state["index"] + 1, supplies=None)
+            elif listing:
+                found, cursor = rows[0]
+                state["orders"] = list(dict.fromkeys(state["orders"] + found))
+                if not cursor:
+                    state.update(list_complete=True, list_finished=True)
+                elif cursor in state["seen_cursors"] or len(state["orders"]) >= 1000:
+                    state["list_finished"] = True
+                    state["failed"].append(dict(source=source, status="acceptance_list_limit"))
+                else:
+                    state["seen_cursors"].append(cursor)
+                    state["cursor"] = cursor
+            elif state["supplies"] is None:
+                state["supplies"] = rows[0]
+            elif sid:
+                if sid not in state["received"]:
+                    state["received"][sid] = rows
+                    state["unmapped"] += r.meta.get("unresolved_product_rows", 0) - unresolved
+                state["supplies"].pop(0)
+            else:
+                state.update(index=state["index"] + 1, supplies=None)
+            state.update(attempts=0, retry_at=0, last_issue=None, stamps=r.stamps[-200:])
+            save(state, 86400)
+        save(state, 1800 if state["terminal"] else 86400)
+        r.meta.update(acceptance_terminal=state["terminal"], order_list_complete=state["list_complete"],
+                      completed_supply_count=len(state["received"]),
+                      unread_order_ids=list(dict.fromkeys(
+                          [i["order_id"] for i in state["failed"] if i.get("order_id") is not None] +
+                          [i for i in state["orders"][state["index"]:] if i is not None])),
+                      unread_supply_ids=list(dict.fromkeys(
+                          [i["supply_id"] for i in state["failed"] if i.get("supply_id")] + (state["supplies"] or []))),
+                      unresolved_product_rows=state["unmapped"])
+        r.issues.extend(state["failed"])
+        if not state["terminal"]:
+            issue = dict(state["last_issue"] or {"source": "ozon_supply_acts"})
+            issue.update(status="pending", retry_after_seconds=max(1, ceil(state["retry_at"] - time.time())))
+            r.issues.append(issue)
+        for rows in state["received"].values():
+            yield from rows
 
 
 def _promotion_price(value):

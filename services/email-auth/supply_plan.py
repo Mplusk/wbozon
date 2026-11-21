@@ -435,71 +435,35 @@ def _archived_stock(provider, article, nm, wire, day):
     return result(selected, stock_source="verified_daily_availability", stock_observed_at=stamp)
 
 
-def _warehouse_inventory(article, skus, wire):
-    """Read every page of the seller-wide free-to-sell report as one observation."""
-    import market_catalog
-    expected = set(map(str, skus))
-    if not expected:
+def archived_ozon_orders(wire, article, since, through):
+    if not hasattr(wire, "gate_dir"):
         return None
-    positions, seen = {}, set()
-    limit = 1000
-    for offset in range(0, 100000, limit):
-        if time.monotonic() + 1 >= wire.deadline:
-            break
-        response = market_catalog.transfer("market_api_read", {
-            "operation_id": "ozon_stock_on_warehouses",
-            "input": {"body": {"warehouse_type": "ALL", "offset": offset, "limit": limit}},
-        }, wire.creds, wire.gate_dir, wire.deadline)
-        payload = (response.get("data") or {}).get("result") or {}
-        rows = payload.get("rows")
-        if response.get("http_status") != 200 or not isinstance(rows, list) or len(rows) > limit:
-            return None
-        for row in rows:
-            if not isinstance(row, dict) or not row.get("item_code") or not row.get("sku"):
-                return None
-            sku, code = str(row["sku"]), row["item_code"]
-            if (sku in expected) != (code == article):
-                return None
-            if code != article:
-                continue
-            name, amount = row.get("warehouse_name"), row.get("free_to_sell_amount")
-            if not isinstance(name, str) or not name.strip() or type(amount) is not int or amount < 0:
-                return None
-            key = name.strip().casefold()
-            if (key, sku) in seen:
-                return None
-            seen.add((key, sku))
-            positions.setdefault(key, {})[sku] = amount
-        if len(rows) < limit:
-            if not positions or ("total" in payload and payload["total"] != offset + len(rows)):
-                return None
-            snapshot = dict(positions=positions, skus=sorted(expected), at=time.time(),
-                            observed_at=response["fetched_at"], source_rows=offset+len(rows))
-            return snapshot
-    return None
+    import market_history
+    history = market_history.History(wire.gate_dir)
+    pages = history.verified_days("ozon", wire.creds, "ozon_fbo_order_events", since, through)
+    dates = market_history.days_between(since, through)
+    if len(pages) != len(dates):
+        return None
+    return [row for day in dates for row in pages[day][1] if row["article"] == article]
 
 
-def _apply_warehouse_inventory(state, snapshot):
-    # Match all positive positions before using absence as evidence for a zero sellable balance.
-    locations = state["locations"]
-    by_name = {}
-    for loc in locations.values():
-        name = (loc.get("warehouse") or "").strip().casefold()
-        if not name or name in by_name or not set(loc["stock"]) <= set(snapshot["skus"]):
-            return False
-        by_name[name] = loc
-    if not snapshot["positions"].keys() <= by_name.keys():
-        return False
-    for name, loc in by_name.items():
-        balances = snapshot["positions"].get(name, {})
-        for sku in snapshot["skus"]:
-            # Preserve inbound only if it was actually reported by the primary source.
-            entry = loc["stock"].setdefault(sku, {"inbound": None, "transfers": None, "customer_returns": None})
-            entry["available"] = balances.get(sku, 0)
-        loc["sellable_evidence"] = "reported_position" if balances else "absent_from_exhausted_inventory"
-    state.update(inbound_observed_at=state.get("stock_observed_at"), stock_observed_at=snapshot["observed_at"],
-                 stock_source="/v2/analytics/stock_on_warehouses", inventory_source_rows=snapshot["source_rows"])
-    return True
+def ozon_wholesale(wire, article, since, through):
+    rows = archived_ozon_orders(wire, article, since, through)
+    if rows is None:
+        return None
+    state = dict(orders={}, locations={}, issues=set(), done={"orders": True})
+    _scan(state, "orders", {"items": rows}, "ozon", since, through)
+    if state["issues"] or len(state["orders"]) != len(rows):
+        return None
+    for loc in state["locations"].values():
+        loc["wholesale_daily"] = {}
+    detected = _wholesale(state, {"bulk_order_min_units": 10})
+    adjustments = _seller_wholesale(wire, state, "ozon", article, since, through)
+    return dict(source="ozon_fbo_order_events", gross_fbo_units=sum(row[2] for row in state["orders"].values()),
+                units=sum(sum(loc["wholesale_daily"].values()) for loc in state["locations"].values()),
+                detected_orders=len(detected), days=sorted({day for loc in state["locations"].values()
+                                                            for day in loc["wholesale_daily"]}),
+                seller_adjustment_count=sum(row["applied"] for row in adjustments))
 
 
 def _reuse_completed_orders(state, wire, key):
@@ -588,6 +552,12 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
             _reuse_completed_orders(state, wire, key)
         if provider == "wb":
             _use_wb_order_archive(state, wire, article, nm, since, as_of.isoformat())
+        elif not state["done"]["orders"] and not state["orders"]:
+            orders = archived_ozon_orders(wire, article, since, as_of.isoformat())
+            if orders is not None:
+                _scan(state, "orders", {"items": orders}, "ozon", since, as_of.isoformat())
+                state["done"]["orders"] = True
+                state["orders_source"] = "verified_fbo_order_events"
 
         def checkpoint():
             save(
@@ -735,22 +705,6 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
             except (finance_gate.GateError, TimeoutError, urllib.error.URLError, finance_gate.ProviderResponseTooLarge) as exc:
                 pending.append({"source": "cluster_directory", "status": exc.reason if isinstance(exc, finance_gate.GateError) else "unavailable"})
             checkpoint()
-            if (state["done"]["stock"] and hasattr(wire, "progress") and hasattr(wire, "gate_dir")
-                    and any(not loc["stock"] for loc in state["locations"].values())):
-                try:
-                    inventory = state.get("sellable_inventory")
-                    if not inventory or time.time() >= inventory["at"] + 900:
-                        inventory = _warehouse_inventory(article, ozon_expansion.lookup(article, wire), wire)
-                        if inventory is not None:
-                            state["sellable_inventory"] = inventory
-                            checkpoint()
-                    if inventory is not None:
-                        state = copy.deepcopy(state)
-                    if inventory is None or not _apply_warehouse_inventory(state, inventory):
-                        pending.append({"source": "sellable_warehouse_inventory", "status": "incomplete_identity_or_coverage"})
-                except (finance_gate.GateError, TimeoutError, urllib.error.URLError, finance_gate.ProviderResponseTooLarge,
-                        finance_gate.ProviderResponseInvalid) as exc:
-                    pending.append({"source": "sellable_warehouse_inventory", "status": getattr(exc, "reason", "unavailable")})
         if provider=="wb" and planning is not None and nm is not None and hasattr(wire,"creds") and hasattr(wire,"gate_dir"):
             import seller_reports
             from market_composites import observed
@@ -771,9 +725,6 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
                 evidence.update(closing_stock=dict(archive,warehouses=closing),positive_closing_stock_days=sorted(positive))
             state["wb_stock_evidence"] = evidence
         locations = _locations(state, horizon, as_of)
-        if state.get("inventory_source_rows") is not None:
-            for row in locations:
-                row["sellable_evidence"] = state["locations"][str(row["warehouse_id"])]["sellable_evidence"]
         unmapped = [
             key
             for key, location in state["locations"].items()
@@ -853,8 +804,6 @@ def _platform(provider, article, nm, wire, horizon, as_of, planning=None):
             "complete": complete,
             "source_complete": state["done"],
             "stock_source": state.get("stock_source"), "stock_observed_at": state.get("stock_observed_at"),
-            **({"inventory_source_rows": state["inventory_source_rows"], "inbound_observed_at": state.get("inbound_observed_at")}
-               if "inventory_source_rows" in state else {}),
             "orders_coverage": state.get("order_coverage") or ([since, as_of.isoformat()] if state["done"]["orders"] else None),
             "orders_source": state.get("orders_source", "marketplace_report"),
             **({"wb_stock_history":state["wb_stock_evidence"]} if "wb_stock_evidence" in state else {}),

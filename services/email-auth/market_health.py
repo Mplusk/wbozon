@@ -60,9 +60,14 @@ def read(vault, directory, args, names, credentials):
     if not set(chosen) <= set(all_names):
         raise ValueError("Unknown report")
     items = []
+    now = datetime.now(timezone.utc)
     for name in chosen:
         creds = credentials(vault, name)
-        status = db.check(creds or None, name)
+        status = (dict(status="ready", last_checked_at=now.isoformat()) if name == "mcp_health"
+                  else db.check(creds or None, name))
+        if stamp := status.get("last_checked_at"):
+            age = max(0, int((now - datetime.fromisoformat(stamp)).total_seconds()))
+            status.update(observation_age_seconds=age, observation_stale=age >= 86400)
         items.append(dict(tool=name, category=WB_CATEGORIES.get(WB_TOOLS.get(name)), **status))
     tokens = []
     for key, label in {

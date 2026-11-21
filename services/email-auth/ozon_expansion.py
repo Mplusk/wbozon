@@ -362,6 +362,7 @@ def _stocks(name, args, request):
         quantity_unit="pcs",
         stock_observed_at=observed,
         source="ozon_current_stock",
+        stock_source="/v1/analytics/stocks",
     )
 
 
@@ -511,13 +512,17 @@ def delivered_economics(period, article, wire):
 
 
 def _geo(args, request):
-    raw = _postings_page(args, request)
+    return _geo_page(args, _postings_page(args, request), request)
+
+
+def _geo_page(args, raw, request):
     items, issues = [], set()
     article_skus = None
     for p in rows(raw.get("postings")):
         a, f = p.get("analytics_data") or {}, p.get("financial_data") or {}
         posting_skus = set()
         for product in rows(p.get("products")):
+            sku = product.get("sku")
             row = dict(
                 _identity(product),
                 **select(product, "quantity"),
@@ -543,7 +548,9 @@ def _geo(args, request):
                     row.update(
                         article=args["article"], offer_id=args["article"], article_basis="catalog_sku"
                     )
-            if row["sku"] is None and ("article" not in args or row["article"] == args["article"]):
+            if sku is None and ("article" not in args or row["article"] == args["article"]):
+                issues.add("posting_product_identity_unknown")
+            if "article" not in args and not row["article"]:
                 issues.add("posting_product_identity_unknown")
             if matches(row, args):
                 sku = str(row["sku"])
@@ -645,20 +652,57 @@ def _cash_page(raw, page):
         ),
     }
     items = [_cash_detail(r, fields) for r in rows(data.get("cash_flows"))]
-    detail = data.get("details") or {}
-    if not isinstance(detail, dict):
-        raise ValueError("Invalid statement details")
+    detail = data.get("details")
+    blocks = [detail] if isinstance(detail, dict) else rows([] if detail is None else detail)
+    statements, issues = {}, set()
+    for block in blocks:
+        statement, problems = _cash_statement(block)
+        issues.update(problems)
+        key = statement["period_from"], statement["period_to"]
+        if key in statements and statements[key] != statement:
+            issues.add("conflicting_statement_period")
+        else:
+            statements[key] = statement
+    if not blocks:
+        issues.add("missing_statement_details")
+    count = data.get("page_count", raw.get("page_count"))
+    if count is not None and (type(count) is not int or count < 0):
+        raise ValueError("Invalid page count")
+    payouts = defaultdict(Decimal)
+    with localcontext() as ctx:
+        ctx.prec = 128
+        for statement in statements.values():
+            for code, value in statement["payout_by_currency"].items():
+                payouts[code] += money(value)
+    single = next(iter(statements.values())) if len(statements) == 1 else {}
+    return result(
+        items,
+        page + 1 if count is not None and page < count else None,
+        complete=count is not None and page >= count and not issues,
+        statements=list(statements.values()),
+        payments=single.get("payments"),
+        page_count=count,
+        issues=sorted(issues),
+        payout_by_currency={k: str(v) for k, v in payouts.items()} if not issues else {},
+        details=single.get("details", {}),
+        payout_basis="payments_in_returned_reporting_period",
+    )
+
+
+def _cash_statement(detail):
+    projected = _cash_detail(detail, STATEMENT_DETAIL)
+    period = projected.get("period") or {}
+    start, end = (
+        datetime.fromisoformat(period[k]).astimezone(timezone.utc).date().isoformat() if period.get(k) else None
+        for k in ("begin", "end")
+    )
     payments = detail.get("payments")
     if isinstance(payments, dict):
         payments = [payments]
     if payments is not None:
         payments = [_cash_detail(r, {"currency_code": "text", "payment": "number"}) for r in rows(payments)]
     totals = defaultdict(Decimal)
-    incomplete = (
-        payments is None
-        or not isinstance(detail.get("period"), dict)
-        or not all(detail["period"].get(k) for k in ("begin", "end"))
-    )
+    incomplete = payments is None or not start or not end or end < start
     seen = set()
     issues = []
     with localcontext() as ctx:
@@ -672,28 +716,21 @@ def _cash_page(raw, page):
                     issues.append("payment_rows_without_unique_ids")
                 seen.add((code, amount))
                 totals[code] += amount
-    count = data.get("page_count", raw.get("page_count"))
-    if count is not None and type(count) is not int:
-        raise ValueError("Invalid page count")
-    return result(
-        items,
-        page + 1 if count is not None and page < count else None,
-        complete=count is not None and page >= count and not incomplete and not issues,
+    if incomplete:
+        issues.append("incomplete_payment_amount_currency_or_period")
+    return dict(
+        period_from=start,
+        period_to=end,
         payments=payments,
-        page_count=count,
-        issues=sorted(
-            set(issues + (["incomplete_payment_amount_currency_or_period"] if incomplete else []))
-        ),
-        payout_by_currency={} if incomplete or issues else {k: str(v) for k, v in totals.items()},
-        details=_cash_detail(detail, STATEMENT_DETAIL),
-        payout_basis="payments_in_returned_reporting_period",
-    )
+        payout_by_currency={} if issues else {k: str(v) for k, v in totals.items()},
+        details=projected,
+    ), issues
 
 
 def _cash_summary(args, request):
     query = {k: v for k, v in args.items() if k != "mode"}
     scan = (
-        request.progress("ozon-cash-period-v1", query)
+        request.progress("ozon-cash-period-v2", query)
         if hasattr(request, "progress")
         else nullcontext(({}, lambda *args: None))
     )
@@ -727,20 +764,11 @@ def _cash_summary(args, request):
                     state["issues"].append("conflicting_cash_flow_rows")
                 else:
                     state["flows"][key] = row
-            period = page["details"].get("period") or {}
-            if period.get("begin") and period.get("end"):
-                start, end = (
-                    datetime.fromisoformat(period[k]).astimezone(timezone.utc).date().isoformat()
-                    for k in ("begin", "end")
-                )
+            for statement in page["statements"]:
+                start, end = statement["period_from"], statement["period_to"]
+                if not start or not end:
+                    continue
                 key = start + "/" + end
-                statement = {
-                    "period_from": start,
-                    "period_to": end,
-                    "payments": page["payments"],
-                    "payout_by_currency": page["payout_by_currency"],
-                    "details": page["details"],
-                }
                 if key in state["periods"] and state["periods"][key] != statement:
                     state["issues"].append("conflicting_statement_period")
                 else:

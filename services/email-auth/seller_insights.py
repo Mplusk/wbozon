@@ -22,6 +22,7 @@ def display_unit_amounts(row):
     compensation = row.get("compensation_income") or {}
     fields = ((row.get("amounts") or {}, None), (row.get("per_sold_unit") or {}, None),
               (net.get("signed_settlement_adjustments") or {}, None),
+              (row.get("settlement_components") or {}, ("service_remuneration_adjustment_including_vat",)),
               (net, ("amount", "per_sold_unit", "amount_before_compensations", "per_sold_unit_before_compensations")),
               (compensation, ("confirmed_adjustment",)), (row, ("margin_per_unit", "bank_payout_per_unit")))
     for record, names in fields:
@@ -29,6 +30,64 @@ def display_unit_amounts(row):
             value = record.get(field)
             if isinstance(value, (str, Decimal)) and Decimal(value).as_tuple().exponent < -4:
                 record[field] = seller_views.num(value)
+
+
+def _account_expense_estimate(row, page, period):
+    from market_specs import money
+
+    first, last = seller_views.period(period)
+    currency, units = row.get("currency"), row.get("sold_units")
+    net = row.get("net_after_expenses") or {}
+    estimate = dict(status="estimate_unavailable", currency=currency, date_from=first.isoformat(),
+                    date_to=last.isoformat(), source="/v1/finance/balance", estimate=True,
+                    allocation_basis="article_gross_realization_sales_share_of_account_gross_sales",
+                    amount=None, per_sold_unit=None)
+    row["net_after_account_expenses_estimate"] = estimate
+    if page.get("source_complete") is not True or page.get("next_cursor") is not None:
+        estimate["reason"] = page.get("status") or "account_balance_incomplete"
+        return
+    gross = money(row["amounts"].get("gross_sales"))
+    net_amount = money(net.get("amount"))
+    if not currency or not gross or gross < 0 or net_amount is None or not units:
+        estimate["reason"] = "article_settlement_incomplete"
+        return
+    windows = {(a.isoformat(), b.isoformat()) for a, b in seller_views.spans(first, last, 30)}
+    sales = {}
+    names = {"cross_docking", "promotion_with_cost_per_order", "pay_per_click"}
+    skipped = set()
+    if "ads" in net.get("deducted", []):
+        skipped = {"promotion_with_cost_per_order", "pay_per_click"}
+    costs = {}
+    for item in page.get("items", []):
+        kind, name = item.get("kind"), item.get("name")
+        if kind != "sales" and (kind != "service" or name not in names - skipped):
+            continue
+        window = item.get("date_from"), item.get("date_to")
+        value = money(item.get("amount"))
+        if window not in windows or item.get("currency") != currency or value is None:
+            estimate["reason"] = "account_currency_amount_or_period_unconfirmed"
+            return
+        if kind == "sales":
+            if window in sales or value < 0:
+                estimate["reason"] = "account_sales_not_additive"
+                return
+            sales[window] = value
+        else:
+            costs[name] = costs.get(name, Decimal(0)) - value
+    account_gross = sum(sales.values())
+    if sales.keys() != windows or gross > account_gross or not costs or any(v < 0 for v in costs.values()):
+        estimate["reason"] = "account_sales_or_expenses_unconfirmed"
+        return
+    share = gross / account_gross
+    allocated = {name: value * share for name, value in costs.items()}
+    amount = net_amount - sum(allocated.values())
+    estimate.update(status="estimated", amount=seller_views.num(amount), per_sold_unit=seller_views.num(amount / units),
+                    article_gross_sales=seller_views.num(gross), account_gross_sales=seller_views.num(account_gross),
+                    share_percent=seller_views.num(share * 100), article_net_before_allocation=seller_views.num(net_amount),
+                    account_costs={k: seller_views.num(v) for k, v in costs.items()},
+                    allocated_costs={k: seller_views.num(v) for k, v in allocated.items()},
+                    excluded_due_to_possible_overlap=sorted(skipped),
+                    note="Оценка по указанным расходам кабинета. Остальные неподтверждённые расходы остаются в исходном расчёте.")
 
 
 def _compensation_adjustment(row, report, ledger):
@@ -184,12 +243,14 @@ def _plan(row, read, wire, args, deadline):
         return
     stock = read("ozon_fbs_stocks", {})
     positions = stock.get("items", [])
-    complete = stock.get("complete") and all(isinstance(p.get("free_stock"), int) for p in positions)
+    complete = stock.get("complete") and all(type(p.get("free_stock")) is int and p["free_stock"] >= 0 for p in positions)
     available = sum(p["free_stock"] for p in positions) if complete else None
     row["seller_fulfillment"] = dict(stock=snapshot(stock), free_stock=available, scheme="FBS",
+        stock_status="reported" if complete else stock.get("status", "stock_unconfirmed"),
         demand=_fbs_orders(wire, row["article"], through, args.get("horizon_days", 14), available, args))
-    if complete and row["seller_fulfillment"]["demand"]["ordered_units"] is not None:
-        row["account_coverage"] = dict(status="partial", excluded=["rFBS"], included=["FBO","FBS"])
+    if complete:
+        row["account_coverage"] = dict(status="partial", excluded=["rFBS"], included=["FBO", "FBS_stock"],
+            fbs_demand_covered=row["seller_fulfillment"]["demand"]["ordered_units"] is not None)
     first=(date.fromisoformat(through)-timedelta(days=29)).isoformat()
     removals=read("ozon_removals",dict(date_from=first,date_to=through))
     row["removal_adjustments"] = dict(snapshot(removals),basis="completed_disposals_already_in_sellable_stock",
@@ -285,19 +346,24 @@ def enrich(name,args,data,wires,mapping,creds,directory,deadline):
         selector = {"article":row["article"]}
         if platform == "wb" and (mapping or {}).get("wb_nm_id"):
             selector["nm_id"]=mapping["wb_nm_id"]
-        def read(tool, query):
+        def read(tool, query, *, budget=4):
             if time.monotonic() + 1 >= deadline:
                 return dict(status="pending", complete=False, source=tool, reason="request_deadline")
             keys=seller_views.VIEWS[tool][1].split()
             product={k:v for k,v in selector.items() if k in keys}
             return market_composites.observed(lambda:seller_views.execute(tool, dict(product, **query),
-                creds[platform], directory, min(deadline-0.5,time.monotonic()+4)))
+                creds[platform], directory, min(deadline-0.5,time.monotonic()+budget)))
         if name == "unit_economics":
             import expansion_gateway
             def ledger(tool, query):
                 if time.monotonic()+2>=deadline:return {}
                 return market_composites.observed(lambda:expansion_gateway.regulated_ozon(tool,query,wire))
-            _units(row, read, {k:args[k] for k in ("month","date_from","date_to") if k in args}, ledger)
+            period = {k: args[k] for k in ("month", "date_from", "date_to") if k in args}
+            if platform == "ozon":
+                balance = read("ozon_balance", dict(period, mode="details", limit=100), budget=12)
+            _units(row, read, period, ledger)
+            if platform == "ozon":
+                _account_expense_estimate(row, balance, period)
         elif name == "supply_plan":
             _plan(row, read, wire, args, deadline)
         elif name == "sales_drop_check":

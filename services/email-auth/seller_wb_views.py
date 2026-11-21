@@ -37,14 +37,17 @@ def _inventory(r):
     if today not in history and r.first.isoformat()<=today<=r.last.isoformat():
         params={"nmIds":[nm]} if nm else {}
         current=list(r.pages(STOCK,"stock_now",{"body":{"limit":1000,"offset":0,**params}},"data.items",("body","offset",None,1000)))
-        history[today]=(r.stamps[-1] if r.stamps else None,current)
+        stamp=r.stamps[-1] if r.stamps else None
+        observed_day=datetime.fromisoformat(stamp).astimezone(MOSCOW).date().isoformat() if stamp else None
+        if observed_day == today:
+            history[today]=(stamp,current)
     rows=[]
     for day,(stamp,positions) in sorted(history.items()):
         if stamp:r.stamps.append(stamp)
         for p in positions:
             rows.extend(r.product({"date":day,"warehouse_id":p.get("warehouseId"),"warehouse":p.get("warehouseName"),
                 "size_id":p.get("chrtId"),"stock":int(p["quantity"]),"to_buyer":p.get("inWayToClient"),
-                "from_buyer":p.get("inWayFromClient"),"basis":"observed_snapshot"},p.get("vendorCode"),p.get("nmId")))
+                "from_buyer":p.get("inWayFromClient"),"basis":"observed_snapshot","observed_at":stamp},p.get("vendorCode"),p.get("nmId")))
     current_rows=[row for row in rows if row["date"]==today]
     articles={row.get("article") for row in current_rows}
     if (nm and current_rows and len(articles)==1 and None not in articles and
@@ -110,7 +113,8 @@ def _inventory(r):
             except (TypeError,ValueError,AttributeError):continue
         selected=[]
         for position in positions:
-            selected.extend(r.product(position,position.get("article"),position.get("nm_id")))
+            selected.extend(r.product(dict(position, observed_at=position.get("observed_at") or stamp),
+                                      position.get("article"),position.get("nm_id")))
         if selected:
             if stamp:r.stamps.append(stamp)
             rows=[row for row in rows if row["date"]!=day]+selected
@@ -130,7 +134,8 @@ def _inventory(r):
                 archive_id=r.args["warehouse_id"]
             for d,stock in days.items():
                 if d not in history and stock is not None:
-                    rows.append(dict(date=d,warehouse=office,warehouse_id=archive_id,article=r.article,nm_id=nm,stock=stock,basis="23_59_moscow"))
+                    rows.append(dict(date=d,warehouse=office,warehouse_id=archive_id,article=r.article,nm_id=nm,
+                                     stock=stock,basis="23_59_moscow",observed_at=archive.get("data_as_of")))
                     observation_dates.add(d)
     if r.args.get("warehouse_id"):
         if any(row.get("warehouse_id") is None for row in rows):
@@ -144,7 +149,9 @@ def _inventory(r):
     if r.meta["missing_dates"]:r.issues.append({"source":"daily_inventory_archive","status":"history_not_observed"})
     if rows:
         last=max(row["date"] for row in rows)
-        r.meta["closing_observed_stock"]={"date":last,"quantity":sum(row["stock"] for row in rows if row["date"]==last)}
+        closing=[row for row in rows if row["date"]==last]
+        r.meta["closing_observed_stock"]={"date":last,"quantity":sum(row["stock"] for row in closing),
+            "observed_at":min((row["observed_at"] for row in closing if row.get("observed_at")),default=None)}
         aggregate=[x for x in rows if x.get("basis")=="current_region_aggregate" or str(x.get("warehouse") or "").casefold() in WB_AGGREGATE_NAMES]
         r.meta["warehouse_scope"]="provider_aggregate" if len(aggregate)==len(rows) else "mixed_aggregate_and_warehouses" if aggregate else "reported_warehouses"
     if nm and r.article:
@@ -164,6 +171,7 @@ def _inventory(r):
                 vals=[p.get(field) for p in positions]
                 return sum(vals) if all(type(v) is int for v in vals) else None
             yield {"article":article,**({"nm_id":nm} if nm else {}),"warehouse_id":wid,"warehouse":office,"stock":total("stock"),"date":day,
+                   "observed_at":min((p["observed_at"] for p in positions if p.get("observed_at")),default=None),
                    "to_buyer":total("to_buyer"),"from_buyer":total("from_buyer"),
                    "observed_days":len(values),"zero_on_observation_dates":sorted(d for d,rs in values.items() if sum(r["stock"] for r in rs)==0)}
     else:yield from rows

@@ -1,4 +1,5 @@
 import contextlib
+import copy
 from datetime import date, datetime, timedelta
 import io
 from pathlib import Path
@@ -49,6 +50,60 @@ class Contracts(unittest.TestCase):
             raise finance_gate.GateError("cooldown",50)
         self.assertEqual(r.section("sample",numbers),[{"quantity":1}])
         self.assertEqual((r.issues[0]["reason"],r.issues[0]["http_status"]),("local_limiter",None))
+
+    def test_acceptance_scan_retains_acts_and_stops_after_three_upstream_failures(self):
+        state = {}
+        calls = []
+
+        @contextlib.contextmanager
+        def progress(*_):
+            yield copy.deepcopy(state), lambda value, ttl: state.update(copy.deepcopy(value))
+
+        def fetch(group, choice, params):
+            body = params["body"]
+            calls.append((choice, body))
+            if choice == "accepted_products":
+                return {"supply_acts": [{"act_id": 7, "items": [
+                    {"sku_info": {"sku": 101, "offer_id": "fixture"}, "declared_quantity": 4, "fact_quantity": 3}]}]}
+            if body["order_id"] == 1:
+                return {"supplies_acts": [{"supply_id": 61}]}
+            raise seller_views.SourceIssue(source="/v1/supply-order/act/summary/get",
+                                          status="rate_limited", http_status=429, retry_after_seconds=60)
+
+        def read():
+            reader = self.reader("ozon_supply_acts", {})
+            reader.wire.progress = progress
+            reader.cached = lambda *_: {"order_ids": [1, 2]}
+            reader.fetch = fetch
+            return seller_views.render(reader, seller_ozon_views._acts)
+
+        with patch.object(seller_ozon_views.time, "time") as clock:
+            clock.return_value = 1000
+            first = read()
+            self.assertEqual((first["status"], first["items"][0]["difference"], first["unread_order_ids"]),
+                             ("pending", -1, [2]))
+            clock.return_value = 1040
+            self.assertEqual(read()["source_issues"][-1]["retry_after_seconds"], 20)
+            self.assertEqual(len(calls), 3)
+            clock.return_value = 1060
+            self.assertEqual(read()["status"], "pending")
+            clock.return_value = 1120
+            final = read()
+            self.assertEqual((final["status"], final["unread_order_ids"], len(final["items"])), ("partial", [2], 1))
+            self.assertEqual((read()["status"], len(calls)), ("partial", 5))
+
+    def test_account_expenses_allocate_signed_costs_without_repeating_item_ads(self):
+        window = {"date_from": "2026-09-01", "date_to": "2026-09-30"}
+        rows = [dict(window, currency="RUB", kind="sales", amount="1000"),
+                dict(window, currency="RUB", kind="service", name="cross_docking", amount="-50"),
+                dict(window, currency="RUB", kind="service", name="pay_per_click", amount="-20")]
+        row = {"currency": "RUB", "sold_units": 10, "amounts": {"gross_sales": "300"},
+               "net_after_expenses": {"amount": "150", "deducted": ["ads"]}}
+        seller_insights._account_expense_estimate(row, {"source_complete": True, "items": rows}, window)
+        actual = row["net_after_account_expenses_estimate"]
+        self.assertEqual((actual["amount"], actual["per_sold_unit"], actual["allocated_costs"]),
+                         ("135", "13.5", {"cross_docking": "15"}))
+        self.assertEqual(row["net_after_expenses"]["amount"], "150")
 
     def test_wb_rating_requests_latest_closed_day_for_today(self):
         reader = self.reader("wb_card_issues", {})

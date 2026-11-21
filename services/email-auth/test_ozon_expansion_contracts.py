@@ -524,6 +524,25 @@ class OzonExpansionContracts(unittest.TestCase):
         self.assertFalse(out['complete'], out)
         self.assertEqual(out['payout_by_currency'], {})
 
+    def test_cash_summary_accepts_multiple_details_in_one_page(self):
+        path = '/v1/finance/cash-flow-statement/list'
+        def block(day, amount):
+            return {'period': {'id': day, 'begin': f'2026-10-{day:02d}T00:00:00Z',
+                               'end': f'2026-10-{day:02d}T23:59:59Z'},
+                    'payments': [{'payment': amount, 'currency_code': 'RUB'}]}
+        details = [block(2, '0.25'), block(1, '1.03')]
+        payload = {'result': {'page_count': 1, 'cash_flows': [], 'details': details}}
+        args = {'date_from': '2026-10-01', 'date_to': '2026-10-02', 'mode': 'summary'}
+        out, _ = self.read('ozon_cash_flow', args, {path: payload})
+        self.assertTrue(out['complete'], out)
+        self.assertEqual([s['period_from'] for s in out['statements']], ['2026-10-01', '2026-10-02'])
+        self.assertEqual(out['payout_by_currency'], {'RUB': '1.28'})
+        details.append(block(2, '2'))
+        out, _ = self.read('ozon_cash_flow', args, {path: payload})
+        self.assertFalse(out['complete'])
+        self.assertIn('conflicting_statement_period', out['issues'])
+        self.assertEqual(out['payout_by_currency'], {})
+
     def test_cash_summary_resumes_after_rate_limit_without_double_counting(self):
         path = '/v1/finance/cash-flow-statement/list'
         class Resumable(SellerFixture):

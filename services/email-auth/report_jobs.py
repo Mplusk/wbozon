@@ -48,7 +48,7 @@ def _sources(value):
                 if field not in ("items", "rows", "data", "response", "payload"):
                     yield from walk(child)
 
-    for field in ("sources", "source_issues", "unavailable_marketplaces", "catalog_verification_issues"):
+    for field in ("sources", "source_issues", "pending_sources", "unavailable_marketplaces", "catalog_verification_issues"):
         yield from walk(value.get(field))
 
 
@@ -257,6 +257,10 @@ def run(name, args, creds, directory, dispatch, observe=None, *, deadline_aware=
                     result["value"].pop("task_id")  # Restart with the current seller mapping.
                     finished.set()
                     return
+                if name in ("wb_orders", "wb_sales", "wb_sales_summary", "wb_supplies") and (
+                        value.get("status") in ("rate_limited", "cooldown", "busy", "retry_time_unknown")
+                        or value.get("http_status") == 429):
+                    value = dict(value, provider_status=value.get("status"), status="pending")
                 ttl = _ttl(name, args, value)
                 next_task = value.get("task_id")
                 pending = value.get("status") == "pending"

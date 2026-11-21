@@ -195,11 +195,28 @@ def capabilities(vault, directory, refresh, read):
     import urllib.error
     import finance_gate
     import market_catalog
+    import market_health
+    import market_history
     from market_transport import Wire
     results = {}
     for key, (group, choice) in CAPABILITIES.items():
         route, params = request(group, {"report":choice, "input":{}})
         creds = market_catalog.read_credentials(vault, route)
+        if key == "wb_jam" and creds:
+            claims = market_history.claims(creds.get("api_token"))
+            if claims.get("acc") != 4:
+                seller = claims.get("sid")
+                candidates = [vault.read(slot) for slot in market_health.WB_CATEGORIES]
+                service = next((account for account in candidates if account and seller and
+                                (token := market_history.claims(account.get("api_token"))).get("sid") == seller
+                                and token.get("acc") == 4), None)
+                if service:
+                    creds = service
+                elif claims.get("acc") is not None:
+                    results[key] = dict(status="access_denied", state=None, reason="wb_service_token_required",
+                                        source=route["path"],
+                                        documentation="https://dev.wildberries.kg/docs/openapi/api-information")
+                    continue
         if not creds:
             results[key] = {"status":"not_configured"}
             continue
@@ -218,8 +235,13 @@ def capabilities(vault, directory, refresh, read):
                     if not all(isinstance(r,dict) and isinstance(r.get("name"),str) and isinstance(r.get("methods"),list) for r in roles):
                         raise ValueError("Unexpected roles")
                     methods=sorted({m for r in roles for m in r["methods"] if isinstance(m,str)})
+                    writes = {r["path"] for r in market_catalog.routes().values() if r["market"] == "ozon" and
+                              r["category"] == "write" and r.get("effect") in ("write", "destructive")}
+                    write_count = sum(m.split()[-1] in writes for m in methods if m.split())
                     row={"status":"ready","role_names":[r["name"] for r in roles],
                          "allowed_method_count":len(methods),"allowed_methods":methods,
+                         "confirmed_write_method_count":write_count,
+                         "credential_write_access":"confirmed" if write_count else "not_observed",
                          "expires_at":data.get("expires_at")}
                 elif key == "wb_jam" and (data is None or isinstance(data,dict)):
                     details=(data or {}).get("data",data) or {}

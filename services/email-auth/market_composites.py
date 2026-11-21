@@ -3,6 +3,7 @@
 import calendar
 from datetime import date, timedelta
 from decimal import Decimal, Inexact, localcontext
+import hashlib
 import time
 import urllib.error
 
@@ -487,6 +488,17 @@ def _period_metrics(provider, args, page):
     amount = total("order_sum" if wb else "revenue")
     views = total("open_count" if wb else "hits_view_pdp", count=True)
     carts = total("cart_count" if wb else "hits_tocart_pdp", count=True)
+    funnel = page.get("funnel")
+    if not wb and funnel and funnel.get("complete"):
+        rows = [r for r in funnel["items"] if args["date_from"] <= r["date"] <= args["date_to"]]
+        for key, field in (("views", "hits_view_pdp"), ("carts", "hits_tocart_pdp")):
+            values = [money(r.get(field)) for r in rows]
+            value = sum(values) if all(n is not None and n >= 0 and n == n.to_integral_value() for n in values) else None
+            if key == "views":
+                views = value
+            else:
+                carts = value
+        funnel = {k: v for k, v in funnel.items() if k != "items"}
     currencies = {r.get("currency") for r in items}
     return dict(
         complete=all(v is not None for v in (orders, amount, views, carts)),
@@ -498,46 +510,59 @@ def _period_metrics(provider, args, page):
         cart_to_view_percent=100 * carts / views if carts is not None and views else None,
         ordered_amount_per_unit=amount / orders if amount is not None and orders else None,
         currency=currencies.pop() if len(currencies) == 1 else None,
-        funnel=page.get("funnel"),
+        funnel=funnel,
         rows=len(items),
         **{k: args[k] for k in ("date_from", "date_to")},
     )
 
 
 def _ozon_comparison_page(query, wire):
+    first, last = query["date_from"], query["date_to"]
+    dates = market_history.days_between(first, last)
+    page = None
     if hasattr(wire,"gate_dir"):
         history=market_history.History(wire.gate_dir)
-        pages=history.verified_days("ozon",wire.creds,"ozon_posting_sku_daily",query["date_from"],query["date_to"])
-        dates=market_history.days_between(query["date_from"],query["date_to"])
+        pages=history.verified_days("ozon",wire.creds,"ozon_posting_sku_daily",first,last)
         if all(d in pages for d in dates):
             records=[r for d in dates for r in pages[d][1] if r.get("article")==query["article"]]
-            return result([dict(r,ordered_units=r.get("posting_units"),revenue=r.get("posting_item_value")) for r in records],
+            page = result([dict(r,ordered_units=r.get("posting_units"),revenue=r.get("posting_item_value")) for r in records],
                           source="ozon_posting_sku_daily", date_basis="posting_creation_utc",
                           amount_basis="posting_item_value", archived_dates=dates)
-    if (date.fromisoformat(query["date_to"]) - date.fromisoformat(query["date_from"])).days >= 90:
-        return result([], complete=False, status="period_exceeds_analytics_window")
-    page = observed(lambda: ozon_expansion.read("ozon_sku_daily", query, wire))
-    if not page.get("complete") or not page.get("items"):
-        return page
-    # Every seller can read ordered_units and revenue. Keep that observation
-    # when Premium Plus metrics or the next API quota slot are unavailable.
-    funnel = _comparison_extra(wire, lambda: ozon_expansion.read("ozon_sku_daily", dict(query, include_funnel=True), wire))
+    if len(dates) > 90:
+        return page or result([], complete=False, status="period_exceeds_analytics_window")
+    funnel = _comparison_extra(wire, lambda: _ozon_comparison_funnel(query, dates, wire), budget=8)
+    if page is None:
+        page = dict(funnel) if funnel.get("complete") else observed(
+            lambda: ozon_expansion._daily(dict(query, limit=1000), wire))
     page["funnel"] = {k: funnel.get(k) for k in ("complete", "status", "http_status", "retry_after_seconds")}
-    if funnel.get("complete"):
-        positions = {(str(r["sku"]), r["date"]): r for r in funnel["items"]}
-        if positions.keys() != {(str(r["sku"]), r["date"]) for r in page["items"]} or any(
-            any(positions[str(r["sku"]), r["date"]].get(k) != r.get(k) for k in ("ordered_units", "revenue"))
-            for r in page["items"]
-        ):
-            page["funnel"].update(complete=False, status="inconsistent_analytics_observations")
-            return page
-        for row in page["items"]:
-            extra = positions[str(row["sku"]), row["date"]]
-            row.update({k: extra.get(k) for k in ("hits_view_pdp", "hits_tocart_pdp")})
+    page["funnel"].update(source="ozon_sku_daily", date_basis="seller_api_reporting_day",
+                          items=funnel.get("items", []) if funnel.get("complete") else [])
     return page
 
 
-def _comparison_extra(wire, read):
+def _ozon_comparison_funnel(query, dates, wire):
+    first, last = dates[0], dates[-1]
+    history = None
+    if hasattr(wire, "gate_dir"):
+        history = market_history.History(wire.gate_dir)
+        dataset = "ozon_sku_funnel_" + hashlib.sha256(query["article"].encode()).hexdigest()
+        pages = history.verified_days("ozon", wire.creds, dataset, first, last)
+        if len(pages) == len(dates):
+            return result([row for day in dates for row in pages[day][1]], status="archived")
+    page = ozon_expansion._daily(dict(query, include_funnel=True, limit=1000), wire)
+    if history and page.get("complete"):
+        owner = market_history.scope("ozon", wire.creds)
+        days = {day: [] for day in dates}
+        for row in page["items"]:
+            days[row["date"]].append(row)
+        stamp = market_history.utc()
+        for day, rows in days.items():
+            history.save_day(owner, dataset, day, rows, stamp)
+        history.confirm(wire.creds, owner)
+    return page
+
+
+def _comparison_extra(wire, read, *, budget=4):
     deadline = getattr(wire, "deadline", None)
     if deadline is None:
         return observed(read)
@@ -545,7 +570,7 @@ def _comparison_extra(wire, read):
     if deadline - now <= 3:
         return result([], complete=False, status="request_budget_exhausted")
     try:
-        wire.deadline = min(deadline - 1.5, now + 4)
+        wire.deadline = min(deadline - 1.5, now + budget)
         return observed(read)
     finally:
         wire.deadline = deadline
@@ -607,8 +632,12 @@ def verified_comparison(args, wires, seller_mapping, identity_report):
 
 
 def comparison(args, wires, mapping):
+    import market_archive
+    import supply_plan
+
     data = []
     periods_by_market = {}
+    wholesale_pending = False
     for provider in ("ozon", "wb"):
         if provider not in wires:
             continue
@@ -621,11 +650,16 @@ def comparison(args, wires, mapping):
         queries = [dict(identity, date_from=args[a], date_to=args[b], limit=100)
                    for a,b in (("previous_from","previous_to"),("date_from","date_to"))]
         shared = None
+        wholesale = {}
+        wholesale_read = {}
         if provider == "ozon":
             first = min(q["date_from"] for q in queries)
             last = max(q["date_to"] for q in queries)
             if (date.fromisoformat(last) - date.fromisoformat(first)).days < 90:
                 shared = _ozon_comparison_page(dict(identity, date_from=first, date_to=last, limit=100), wire)
+            if hasattr(wire, "progress") and hasattr(wire, "gate_dir"):
+                wholesale_read = _comparison_extra(
+                    wire, lambda: market_archive.collect_fbo_order_range(wire, first, last), budget=15)
         periods = []
         for q in queries:
             page = shared
@@ -655,8 +689,25 @@ def comparison(args, wires, mapping):
             if page.get("source") in ("ozon_posting_sku_daily","wb_funnel_daily"):
                 metrics.update(source=page["source"],date_basis=page.get("date_basis","order_date_moscow"),
                                archived_days=len(page["archived_dates"]),amount_basis=page.get("amount_basis"))
-                if not page["items"] and page.get("complete"):
+                if not metrics.get("rows") and page.get("complete"):
                     metrics.update(ordered_units=0,ordered_amount=0)
+            if provider == "ozon":
+                key = q["date_from"], q["date_to"]
+                if key not in wholesale:
+                    wholesale[key] = supply_plan.ozon_wholesale(wire, identity["article"], *key)
+                evidence = wholesale[key]
+                gross = metrics.get("ordered_units")
+                covered = metrics.get("source") == "ozon_posting_sku_daily" and gross is not None and evidence is not None
+                if covered and evidence["gross_fbo_units"] <= gross and evidence["units"] <= evidence["gross_fbo_units"]:
+                    metrics.update(ordered_units_gross=gross, wholesale_units=evidence["units"],
+                                   ordered_units_excluding_wholesale=gross - evidence["units"],
+                                   wholesale={"status": "verified_fbo_order_groups", **evidence})
+                else:
+                    metrics.update(ordered_units_gross=gross, wholesale_units=None, ordered_units_excluding_wholesale=None,
+                                   wholesale={"status": "inconsistent_fbo_order_scope" if covered else
+                                              wholesale_read.get("status", "fbo_order_coverage_unavailable"),
+                                              "source": "/v3/posting/fbo/list"})
+                    wholesale_pending |= wholesale_read.get("status") in ("pending", "cooldown", "busy")
             periods.append(metrics)
         periods_by_market[provider] = identity, queries, periods
 
@@ -687,6 +738,7 @@ def comparison(args, wires, mapping):
                 metrics["stock_by_day"] = [
                     {
                         "date": d,
+                        "observed_at": stamp,
                         "warehouses": [
                             {
                                 k: r.get(k)
@@ -703,14 +755,27 @@ def comparison(args, wires, mapping):
                             if r.get("article") == identity["article"]
                         ],
                     }
-                    for d, (_, records) in hist.items()
+                    for d, (stamp, records) in hist.items()
                 ]
+                matched_days = []
+                empty_days = []
+                for d, (_, records) in hist.items():
+                    selected = [p.get("available_stock_count", p.get("quantity")) for p in records
+                                if p.get("article") == identity["article"] and p.get("kind", "warehouse") == "warehouse"]
+                    if selected and all(type(v) is int and v >= 0 for v in selected):
+                        matched_days.append(d)
+                        if not any(selected):
+                            empty_days.append(d)
+                metrics["stock_evidence"] = {"source": provider + "_availability", "basis": "observed_snapshots",
+                                             "observed_days": len(matched_days), "zero_stock_days": len(empty_days),
+                                             "zero_stock_dates": empty_days}
             metrics["metrics_complete"] = metrics["complete"]
             metrics["complete"] = bool(metrics["metrics_complete"] and ad.get("complete") and review.get("complete")
                                        and metrics.get("stock_days_observed", 0) ==
                                        (date.fromisoformat(query["date_to"]) - date.fromisoformat(query["date_from"])).days+1)
         changes = {}
-        for k in ("views", "carts", "ordered_units", "cart_to_view_percent", "ordered_amount_per_unit"):
+        for k in ("views", "carts", "ordered_units", "ordered_units_excluding_wholesale", "cart_to_view_percent",
+                  "ordered_amount_per_unit"):
             a, b = (r.get(k) for r in periods)
             if k == "ordered_amount_per_unit" and (
                 not periods[0].get("currency") or periods[0].get("currency") != periods[1].get("currency")
@@ -731,7 +796,8 @@ def comparison(args, wires, mapping):
         )
     hypotheses=[]
     for market in data:
-        change=market["changes"].get("ordered_units",{}).get("absolute")
+        demand = market["changes"].get("ordered_units_excluding_wholesale") or market["changes"].get("ordered_units", {})
+        change = demand.get("absolute")
         if change is None:continue
         if change<0:
             views=market["changes"].get("views",{}).get("absolute")
@@ -739,10 +805,35 @@ def comparison(args, wires, mapping):
             hypotheses.append({"marketplace":market["marketplace"],"hypothesis":reason,"ordered_units_change":change,
                 "views_change":views,"evidence":[market["previous"]["source"],market["current"]["source"]],
                 "certainty":"observed_change_cause_unconfirmed"})
+            previous, current = market["previous"], market["current"]
+            price = market["changes"].get("ordered_amount_per_unit", {})
+            if price.get("absolute", 0) > 0:
+                hypotheses.append(dict(marketplace=market["marketplace"], hypothesis="higher_order_value_per_unit",
+                    previous=previous["ordered_amount_per_unit"], current=current["ordered_amount_per_unit"],
+                    percent=price["percent"], currency=current["currency"], source=current["source"],
+                    certainty="observed_change_cause_unconfirmed"))
+            ad_before, ad_after = previous["ads"], current["ads"]
+            if ad_before["complete"] and ad_after["complete"]:
+                older, newer = ad_before["spend_by_currency"] or {}, ad_after["spend_by_currency"] or {}
+                for currency in sorted(older.keys() & newer.keys()):
+                    a, b = money(older[currency]), money(newer[currency])
+                    if a is not None and b is not None and a != b:
+                        hypotheses.append(dict(marketplace=market["marketplace"], hypothesis="changed_ad_spend",
+                            previous=a, current=b, currency=currency, percent=100 * (b - a) / a if a else None,
+                            certainty="observed_change_cause_unconfirmed"))
+            before, after = previous.get("stock_evidence") or {}, current.get("stock_evidence") or {}
+            n_a, n_b = before.get("observed_days", 0), after.get("observed_days", 0)
+            if n_a and n_b and after["zero_stock_days"] * n_a > before["zero_stock_days"] * n_b:
+                hypotheses.append(dict(marketplace=market["marketplace"], hypothesis="more_zero_stock_snapshots",
+                    previous_zero_days=before["zero_stock_days"], previous_observed_days=n_a,
+                    current_zero_days=after["zero_stock_days"], current_observed_days=n_b,
+                    dates=after["zero_stock_dates"], source=after["source"],
+                    certainty="observed_snapshot_change_cause_unconfirmed"))
         else:hypotheses.append({"marketplace":market["marketplace"],"observation":"no_decrease_in_ordered_units","ordered_units_change":change})
     return result(
         data,
         complete=all(r["previous"].get("complete") and r["current"].get("complete") for r in data),
+        **({"status": "pending"} if wholesale_pending else {}),
         basis="calendar_period_order_analytics",
         causal_diagnosis={"observations":hypotheses,"status":"reported" if hypotheses else "insufficient_comparable_data"},
     )

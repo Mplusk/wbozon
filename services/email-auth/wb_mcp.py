@@ -42,7 +42,7 @@ def validate_args(operation, args):
         'wb_prices': {'limit', 'offset', 'nm_id','cursor','vendor_code'},
         'wb_commissions': {'limit', 'subject_id', 'search'},
         'wb_box_tariffs': {'limit', 'date', 'warehouse','nm_id','rf_mgt'},
-        'wb_sales_summary': {'limit', 'offset', 'date_from', 'date_to','nm_ids','vendor_codes','group_by'},
+        'wb_sales_summary': {'limit', 'offset', 'date_from', 'date_to','nm_ids','vendor_codes','group_by','task_id'},
     }[operation]
     if set(args) - allowed:
         raise ValueError('Invalid arguments')

@@ -55,6 +55,7 @@ MARKET_REPORT_SUCCESSORS = (
     'eb32cdb0702fd82bdc10cad30506aa8de98abbe9846f311ab1bf1e55b33ce9ba',
     'c430d17e6bd0005cb87d1409cfb7e0e8c46057a506dee1f6556b12c19dfab115',
     'f458a6dad8b8f8414a0d7d3a17d038e6ae061aa1995ec2db0cfb84ec0ca7de41',
+    'f2bd3f4c664cc090f8179decc8fceee17152550be0bbd8b9f6be1d298f4371ed',
 )
 
 

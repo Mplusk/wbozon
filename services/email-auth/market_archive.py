@@ -1,6 +1,7 @@
 """Incrementally archive complete seller reporting days, respecting the interactive transport gates."""
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -23,23 +24,78 @@ DATASETS = (
 )
 
 
+def collect_fbo_order_range(wire, first, last):
+    history = market_history.History(wire.gate_dir)
+    owner = market_history.scope("ozon", wire.creds)
+    coverage = history.coverage(owner, "ozon_fbo_order_events") if history.authorized(wire.creds, owner) else {}
+    missing = [day for day in market_history.days_between(first, last) if day not in coverage]
+    if not missing:
+        return {"status": "archived"}
+    first, last = missing[0], missing[-1]
+    if len(market_history.days_between(first, last)) > 90:
+        return {"status": "period_exceeds_fbo_order_window"}
+    with wire.progress("ozon-fbo-orders-by-date-v1", [first, last]) as (saved, save):
+        state = saved or dict(cursor=None, seen=[], rows=[])
+        for _ in range(6):
+            if time.monotonic() + 2 >= wire.deadline:
+                break
+            query = dict(date_from=first, date_to=last, limit=100)
+            if state["cursor"]:
+                query["cursor"] = state["cursor"]
+            page = ozon_expansion._geo(query, wire)
+            if page["issues"] or any(not row["created_at"] for row in page["items"]):
+                return {"status": "provider_response_invalid", "issues": page["issues"]}
+            state["rows"].extend(page["items"])
+            if len(state["rows"]) > 30000:
+                return {"status": "posting_volume_exceeds_bound"}
+            if page["complete"]:
+                days = {day: [] for day in market_history.days_between(first, last)}
+                for row in state["rows"]:
+                    day = datetime.fromisoformat(row["created_at"]).astimezone(timezone.utc).date().isoformat()
+                    if day not in days:
+                        return {"status": "posting_date_outside_period"}
+                    days[day].append(row)
+                stamp = market_history.utc()
+                for day, rows in days.items():
+                    history.save_day(owner, "ozon_fbo_order_events", day, rows, stamp)
+                history.confirm(wire.creds, owner)
+                save({}, 1)
+                return {"status": "ready"}
+            marker = page["next_cursor"]
+            if not marker or marker in state["seen"] or len(state["seen"]) >= 500:
+                return {"status": "nonadvancing_postings_cursor"}
+            state["seen"].append(marker)
+            state["cursor"] = marker
+            save(state, 7 * 86400)
+    return {"status": "pending", "source": "/v3/posting/fbo/list"}
+
+
 def collect_posting_days(wire, history, day):
     import ozon_posting_status
     from market_specs import money
     start = (datetime.fromisoformat(day).date() - timedelta(days=6)).isoformat()
     owner = market_history.scope("ozon", wire.creds)
-    with wire.progress("ozon-posting-sku-days-v1", [start, day]) as (saved, save):
-        state = saved or {"scheme": 0, "cursor": "", "cursors": [], "seen": [], "groups": {}}
+    with wire.progress("ozon-posting-sku-days-v2", [start, day]) as (saved, save):
+        state = saved or {"scheme": 0, "cursor": "", "cursors": [], "seen": [], "groups": {},
+                          "fbo_events": [], "fbo_event_issues": False}
         for _ in range(8):
             if state["scheme"] == 2:
                 break
             scheme = ("FBO", "FBS")[state["scheme"]]
-            args = dict(date_from=start, date_to=day, scheme=scheme, cursor=state["cursor"], limit=100)
+            args = dict(date_from=start, date_to=day, scheme=scheme, cursor=state["cursor"], limit=100,
+                        include_geography=scheme == "FBO")
             req = ozon_posting_status.build_request(args, wire.creds)
             body = json.loads(req.data)
             body["sort_dir"] = "ASC"
             raw = wire("POST", req.full_url, body=body)
             postings, more, cursor = ozon_posting_status._page(args, raw, wire.creds)
+            if scheme == "FBO" and not state["fbo_event_issues"]:
+                events = ozon_expansion._geo_page(args, raw, wire)
+                state["fbo_event_issues"] = bool(events["issues"] or any(
+                    not row["warehouse_id"] or not row["created_at"] or not row["status"]
+                    for row in events["items"]))
+                if not state["fbo_event_issues"]:
+                    state["fbo_events"].extend(events["items"])
             seen = set(state["seen"])
             for posting in postings:
                 ident = posting.get("posting_number")
@@ -72,7 +128,7 @@ def collect_posting_days(wire, history, day):
                     if amount is not None and currency:
                         row["posting_item_value"] = str(Decimal(row["posting_item_value"]) + amount*units)
                         row["priced_units"] += units
-            if len(seen) > 20000 or len(state["groups"]) > 30000:
+            if len(seen) > 20000 or len(state["groups"]) > 30000 or len(state["fbo_events"]) > 30000:
                 return "posting_volume_exceeds_bound"
             if more:
                 if cursor in state["cursors"]:
@@ -92,6 +148,13 @@ def collect_posting_days(wire, history, day):
         stamp = market_history.utc()
         for d, records in groups.items():
             history.save_day(owner, "ozon_posting_sku_daily", d, records, stamp)
+        if not state["fbo_event_issues"]:
+            events = {d: [] for d in groups}
+            for row in state["fbo_events"]:
+                day_key = datetime.fromisoformat(row["created_at"]).astimezone(timezone.utc).date().isoformat()
+                events[day_key].append(row)
+            for d, records in events.items():
+                history.save_day(owner, "ozon_fbo_order_events", d, records, stamp)
         history.confirm(wire.creds, owner)
         save({}, 1)
         return "complete"
@@ -101,7 +164,7 @@ def target_day(history, owner, name, today):
     coverage = history.coverage(owner, name)
     if name.endswith("availability") or name=="wb_warehouse_daily":
         return today.isoformat() if today.isoformat() not in coverage else None
-    for n in range(1, 90):
+    for n in range(1, 91 if name.startswith("ozon") else 90):
         day = (today - timedelta(days=n)).isoformat()
         if day not in coverage:
             return day
@@ -258,7 +321,10 @@ def tick(name, credentials, directory, deadline):
     provider = name.split("_")[0]
     wire = expansion_gateway.make_wire(provider, credentials, directory, deadline)
     today = datetime.now(MOSCOW if provider == "wb" else timezone.utc).date()
-    day = target_day(db, market_history.scope(provider, wire.creds), name, today)
+    owner = market_history.scope(provider, wire.creds)
+    day = target_day(db, owner, name, today)
+    if name == "ozon_posting_sku_daily":
+        day = day or target_day(db, owner, "ozon_fbo_order_events", today)
     status = collect(wire, db, name, day) if day else "up_to_date"
     db.record(credentials, "archive_" + name, status)
     return {"dataset": name, "day": day, "status": status, "read_only": True}

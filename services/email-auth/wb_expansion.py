@@ -84,7 +84,7 @@ def supply_detail(parent, request):
     sid = parent["supply_id"]
     ident = sid or parent["preorder_id"]
     data = request("GET", SUPPLIES + "/" + str(ident), query={"isPreorderID": "false" if sid else "true"},
-                   group="fbw-detail", interval=2, basic_interval=1800, ttl=1800)
+                   group="fbw-detail", interval=2, basic_interval=1800, ttl=86400 if parent.get("status_id") == 5 else 1800)
     planned, actual = data.get("warehouseName"), data.get("actualWarehouseName")
     # The receiving warehouse may differ from the planned destination.
     row = dict(parent, status_id=data.get("statusID", parent.get("status_id")),
@@ -176,7 +176,7 @@ def supply_listing(args, wire):
         return page
 
 
-def _goods(args, request, *, include_packages=True):
+def _goods(args, request, *, include_packages=True, snapshot_ttl=1800):
     limit, offset = args.get("limit", 100), args.get("offset", 0)
     base = SUPPLIES + "/" + str(args["supply_id"])
     page = rows(
@@ -191,7 +191,7 @@ def _goods(args, request, *, include_packages=True):
             group="fbw-goods",
             interval=2,
             basic_interval=1800,
-            ttl=1800,
+            ttl=snapshot_ttl,
         )
     )
     items = [
@@ -1027,15 +1027,38 @@ def _warehouse_directory(args, request, data, *, required=False):
             complete=False,
         )
         exc.close()
-        return data
-    data.update(
-        warehouses_status="reported",
-        warehouses=[
-            {"warehouse_id": r.get("ID"), "name": r.get("name")}
-            for r in rows(catalog)
-            if "warehouse_id" not in args or str(r.get("ID")) == str(args["warehouse_id"])
-        ],
-    )
+        if not args.get("include_fbs_offices"):
+            return data
+    else:
+        data.update(
+            warehouses_status="reported",
+            warehouses=[
+                {"warehouse_id": r.get("ID"), "name": r.get("name"), "source": "/api/v1/warehouses"}
+                for r in rows(catalog)
+                if "warehouse_id" not in args or str(r.get("ID")) == str(args["warehouse_id"])
+            ],
+        )
+    if args.get("include_fbs_offices") and hasattr(request, "gate_dir"):
+        import market_catalog
+        op = "wb_get_api_offices"
+        with request.progress("wb-supply-fbs-offices-v1", [op]) as (cached, save):
+            if not cached:
+                try:
+                    response = market_catalog.transfer("market_api_read", {"operation_id": op, "input": {}},
+                                                       request.creds, request.gate_dir, request.deadline)
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 429:
+                        raise
+                    cached = {"status": "unavailable", "http_status": exc.code, "warehouses": []}
+                    exc.close()
+                else:
+                    cached = {"status": "reported", "warehouses": [
+                        {"warehouse_id": r.get("id"), "name": r.get("name"), "source": "/api/v3/offices"}
+                        for r in rows(response.get("data")) if type(r.get("id")) is int and r.get("name")
+                    ]}
+                save(cached, 86400 if cached["status"] == "reported" else 900)
+        data.setdefault("warehouses", []).extend(cached["warehouses"])
+        data["offices_catalog_status"] = cached["status"]
     return data
 
 

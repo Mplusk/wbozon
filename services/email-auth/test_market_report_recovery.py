@@ -55,26 +55,15 @@ class Recovery(unittest.TestCase):
                          [("order_number","bulk",13,13)])
         self.assertEqual(loc["daily"]["2026-09-09"]-loc["wholesale_daily"]["2026-09-09"],2)
 
-    def test_exhausted_sellable_inventory_replaces_one_snapshot_and_preserves_unknown_inbound(self):
+    def test_sales_uses_same_wholesale_groups_and_config_as_supply_plan(self):
+        day = "2026-09-09"
+        rows = [{"article": "A", "created_at": day + "T12:00:00+00:00", "warehouse_id": 8,
+                 "sku": 42, "posting_number": str(i), "order_number": "bulk" if i < 13 else str(i),
+                 "status": "delivered", "quantity": 1} for i in range(15)]
         wire = ResumeWire()
-        wire.creds, wire.gate_dir = {}, "/fixture"
-        def pos(name, n):
-            return {"sku":21,"item_code":"A","warehouse_name":name,"free_to_sell_amount":n}
-        def data(rows):
-            return {"http_status":200,"fetched_at":"2026-11-19T10:00:00Z","data":{"result":{"rows":rows}}}
-        with patch("market_catalog.transfer",return_value=data([pos("One",12),pos("ONE",1)])):
-            self.assertIsNone(supply_plan._warehouse_inventory("A",[21],wire))
-        with patch("market_catalog.transfer",return_value=data([pos("One",12)])):
-            snapshot = supply_plan._warehouse_inventory("A",[21],wire)
-        state = {"locations":{"1":{"warehouse":"ONE","stock":{"21":{"available":14,"inbound":2}}},
-                              "2":{"warehouse":"Two","stock":{}}}}
-        self.assertTrue(supply_plan._apply_warehouse_inventory(state,snapshot))
-        one, two = state["locations"].values()
-        self.assertEqual((one["stock"]["21"]["available"],two["stock"]["21"]["available"]),(12,0))
-        self.assertEqual((two["sellable_evidence"],two["stock"]["21"]["inbound"]),("absent_from_exhausted_inventory",None))
-        previous = copy.deepcopy(state)
-        self.assertFalse(supply_plan._apply_warehouse_inventory(state,dict(snapshot,positions={"unmapped":{"21":4}})))
-        self.assertEqual(previous,state)
+        with patch.object(supply_plan, "archived_ozon_orders", return_value=rows):
+            output = supply_plan.ozon_wholesale(wire, "A", "2026-09-01", "2026-09-30")
+        self.assertEqual((output["gross_fbo_units"], output["units"], output["detected_orders"]), (15, 13, 1))
 
     def test_wb_net_accounts_once_for_commission_advertising_and_loyalty(self):
         raw = {v:0 for v in wb_expansion.FIN_FIELDS.values()}
@@ -198,16 +187,16 @@ class Recovery(unittest.TestCase):
         args = {"article":"A","date_from":"2026-09-01","date_to":"2026-09-30","limit":1,"offset":1}
         stamp = 1790000000.0
         state = {"supplies": [], "last_ready": {"at": stamp, "scanned": 7,
-                 "items": [{"supply_id": 10}, {"supply_id": 11}]}}
+                 "items": [{"supply_id": 10, "created_at": "2026-09-10T00:00:00+03:00"}, {"supply_id": 11, "created_at": "2026-09-11T00:00:00+03:00"}]}}
         wire = Mock()
         wire.progress_snapshot.return_value = state
         with patch.object(portal, "provider_read", side_effect=TimeoutError()) as reader, \
                 patch.object(expansion_gateway, "make_wire", return_value=wire):
             app = SimpleNamespace(gateway=reader, finance_gate_dir="/fixture")
             page = portal.Portal._dispatch_read(app, "wb_supplies", args, {"api_token":"fixture"})
-            self.assertEqual((page["status"],page["refresh_status"],page["items"]),("ready","pending",[{"supply_id":11}]))
+            self.assertEqual((page["status"],page["refresh_status"],page["items"]),("ready","pending",[{"supply_id":11,"created_at":"2026-09-11T00:00:00+03:00"}]))
             self.assertEqual(page["refresh_reason"],"provider_timeout")
-            wire.progress_snapshot.assert_called_once_with("article-supplies-v2",["wb_supplies","A",
+            wire.progress_snapshot.assert_called_once_with("wb-supplies-scan-v3",["wb_supplies","A",
                 {"date_from":"2026-09-01","date_to":"2026-09-30"}])
             wire.progress_snapshot.return_value = {}
             with self.assertRaises(TimeoutError):
@@ -401,7 +390,7 @@ class Recovery(unittest.TestCase):
 
     def test_summary_resumes_goods_before_metadata_and_never_requests_packages(self):
         wire = ResumeWire()
-        headers = market_specs.result([dict(supply_id=i, preorder_id=None) for i in range(1,5)])
+        headers = market_specs.result([dict(supply_id=i, preorder_id=None, created_at="2026-10-12T18:00:00+03:00") for i in range(1,5)])
         wait = finance_gate.GateError("cooldown", 60)
         page = market_specs.result([{"quantity": 77, "accepted_quantity": 76}])
         detail = lambda row, wire: dict(row, warehouse="Склад A", warehouse_id=1, actual_warehouse_id=None)
@@ -412,15 +401,15 @@ class Recovery(unittest.TestCase):
             first = supply_history.report("wb_supplies", args, wire)
             self.assertFalse(first["complete"])
             self.assertEqual(first["items"][0]["declared_units"], 77)
-            last = supply_history.report("wb_supplies", args, wire)
+            last = supply_history.report("wb_supplies", dict(args, date_to="2026-10-28"), wire)
             self.assertTrue(last["complete"])
             self.assertEqual([(r["supply_id"], r["warehouse"]) for r in last["items"]], [(i, "Склад A") for i in range(1, 5)])
-            self.assertTrue(all(c.kwargs == {"include_packages": False} for c in goods.call_args_list))
+            self.assertTrue(all(c.kwargs == {"include_packages": False, "snapshot_ttl": 1800} for c in goods.call_args_list))
 
     def test_ready_supply_snapshot_survives_a_refresh_and_can_be_replaced_by_confirmed_empty(self):
         wire = ResumeWire()
         args = dict(article="A",date_from="2026-09-01",date_to="2026-10-31")
-        header = market_specs.result([dict(supply_id=93, preorder_id=None)])
+        header = market_specs.result([dict(supply_id=93, preorder_id=None, created_at="2026-10-12T18:00:00+03:00")])
         good = market_specs.result([{"quantity":77,"accepted_quantity":77}])
         with patch.object(wb_expansion,"supply_headers", side_effect=[header,finance_gate.GateError("cooldown",12),market_specs.result([])]), patch.object(
                 wb_expansion,"_goods",return_value=good),patch.object(wb_expansion,"supply_detail",
@@ -437,7 +426,7 @@ class Recovery(unittest.TestCase):
     def test_unavailable_warehouse_directory_keeps_ready_goods_and_reported_id(self):
         wire = ResumeWire()
         args = dict(article="A", date_from="2026-10-01", date_to="2026-10-31")
-        headers = market_specs.result([dict(supply_id=i, preorder_id=None) for i in (1, 2)])
+        headers = market_specs.result([dict(supply_id=i, preorder_id=None, created_at="2026-10-12T18:00:00+03:00") for i in (1, 2)])
         goods = market_specs.result([dict(quantity=77, accepted_quantity=77)])
         detail = lambda parent, _: dict(parent, warehouse=None, warehouse_id=3026, actual_warehouse_id=3026)
         with patch.object(wb_expansion, "supply_headers", return_value=headers), patch.object(
@@ -456,7 +445,7 @@ class Recovery(unittest.TestCase):
     def test_warehouse_name_resumes_after_retry_after_without_reloading_goods(self):
         wire=ResumeWire()
         args=dict(article="A",date_from="2026-10-01",date_to="2026-10-31")
-        headers=market_specs.result([dict(supply_id=7,preorder_id=None)])
+        headers=market_specs.result([dict(supply_id=7,preorder_id=None,created_at="2026-10-12T18:00:00+03:00")])
         detail=lambda row,wire: dict(row,warehouse=None,warehouse_id=3026,actual_warehouse_id=None)
         limited=urllib.error.HTTPError("https://supplies-api.wildberries.ru/api/v1/warehouses",
                                       429,"limit",{"Retry-After":"60"},None)

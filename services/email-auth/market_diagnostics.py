@@ -6,12 +6,25 @@ from urllib.parse import urlsplit
 import urllib.request
 
 
+SELLER_SOURCE_PATHS = {
+    "common-api.wildberries.ru": {("GET", "/api/communications/v2/news"), ("GET", "/api/common/v1/subscriptions")},
+    "feedbacks-api.wildberries.ru": {("GET", "/api/common/v1/rating"), ("GET", "/api/v1/questions")},
+    "seller-analytics-api.wildberries.ru": {("GET", "/api/v1/analytics/banned-products/blocked"),
+                                           ("POST", "/api/analytics/v2/item-rating")},
+    "content-api.wildberries.ru": {("POST", "/api/content/v1/recommendations/list")},
+    "discounts-prices-api.wildberries.ru": {("GET", "/api/v2/quarantine/goods")},
+    "documents-api.wildberries.ru": {("GET", "/api/v1/documents/categories"), ("GET", "/api/v1/documents/list")},
+}
+
+
 def method(req):
     from market_transport import allowed_read
 
     parts = urlsplit(req.full_url)
     path = parts.path
     allowed = allowed_read(parts.netloc, req.get_method(), path)
+    if (req.get_method(), path) in SELLER_SOURCE_PATHS.get(parts.netloc, ()):
+        allowed = True
     if not allowed and parts.netloc == "api-seller.ozon.ru":
         import ozon_details, ozon_fbo, ozon_accrual_day, ozon_return_events, ozon_realization, ozon_unallocated
 
