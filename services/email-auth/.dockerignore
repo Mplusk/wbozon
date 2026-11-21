@@ -51,5 +51,9 @@
 !external_mcp.py
 !oauth_mcp.py
 !ui.py
+!calculator_ui.py
+!cost_catalog.py
+!cost_integration.py
+!cost_sync.py
 !smoke.py
 !candidate.py

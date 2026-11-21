@@ -11,6 +11,7 @@ COPY market_catalog.py market_actions.py market_https.py market_routes.jsonl ./
 COPY market_specs.py market_transport.py expansion_gateway.py ozon_expansion.py ozon_performance.py wb_expansion.py supply_plan.py seller_reports.py ./
 COPY seller_views.py seller_ozon_views.py seller_wb_views.py seller_workbooks.py seller_insights.py report_jobs.py ./
 COPY market_archive.py market_composites.py market_diagnostics.py market_health.py market_history.py posting_discovery.py supply_history.py wb_reports.py wb_legacy_reports.py ./
+COPY calculator_ui.py cost_catalog.py cost_integration.py cost_sync.py ./
 USER 10001:10001
 EXPOSE 8000
 CMD ["gunicorn", "--config", "gunicorn.conf.py", "--bind", "0.0.0.0:8000", "portal:create_portal()"]

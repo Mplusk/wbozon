@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlencode
 
 import cost_catalog as catalog
 import cost_sync
-from ui import document
+from ui import CALCULATOR_CSP, document
 
 BASE = "/settings?tab=calculator"
 LABELS = {"draft": "Черновик", "active": "В работе", "archived": "Архив",
@@ -413,4 +413,4 @@ def handle(portal, env, method, session, query, body, reply, start):
                    for key, label in nav)
     notice = '<p class="notice" role="status">Изменения приняты.</p>' if query.get("saved") == "1" else ""
     return reply(document("Калькулятор", '<main id="content" class="calculator"><h1>Калькулятор</h1><nav class="calc-tabs" aria-label="Калькулятор">' +
-                          tabs + "</nav>" + notice + content + "</main>", calculator=True))
+                          tabs + "</nav>" + notice + content + "</main>", calculator=True), csp=CALCULATOR_CSP)

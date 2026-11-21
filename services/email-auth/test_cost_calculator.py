@@ -10,6 +10,7 @@ import calculator_ui
 import cost_catalog
 import cost_integration
 import cost_sync
+from ui import CALCULATOR_CSP, CSP
 import market_specs
 from portal import LoginApp, Portal, Vault
 
@@ -137,19 +138,23 @@ class CalculatorTests(unittest.TestCase):
         finally:
             conn.close()
 
-        def call(method="GET", cookie=None, origin=None, fields=None):
+        def call(method="GET", cookie=None, origin=None, fields=None, query="tab=calculator&view=card&article=300030"):
             raw = urlencode(fields or {}).encode()
-            env = {"PATH_INFO": "/settings", "QUERY_STRING": "tab=calculator&view=card&article=300030",
+            env = {"PATH_INFO": "/settings", "QUERY_STRING": query,
                    "REQUEST_METHOD": method, "HTTP_HOST": "test.example", "HTTP_COOKIE": cookie or "",
                    "HTTP_ORIGIN": origin, "CONTENT_TYPE": "application/x-www-form-urlencoded",
                    "CONTENT_LENGTH": str(len(raw)), "wsgi.input": io.BytesIO(raw)}
             captured = []
             output = portal(env, lambda status, headers: captured.append((status, headers)))
-            return captured[0][0], b"".join(output).decode()
+            status, headers = captured[0]
+            return status, b"".join(output).decode(), dict(headers)
 
         self.assertEqual(call()[0], "401 Unauthorized")
-        status, page = call(cookie="__Host-sid=" + sid)
+        self.assertEqual(call()[2]["Content-Security-Policy"], CSP)
+        status, page, headers = call(cookie="__Host-sid=" + sid)
         self.assertEqual(status, "200 OK")
+        self.assertEqual(headers["Content-Security-Policy"], CALCULATOR_CSP)
+        self.assertEqual(call(cookie="__Host-sid=" + sid, query="")[2]["Content-Security-Policy"], CSP)
         self.assertIn("История себестоимости", page)
         self.assertIn("Test black PLA", page)
         self.assertEqual(call("POST", "__Host-sid=" + sid, "https://another.example", {"csrf": csrf})[0], "403 Forbidden")

@@ -72,8 +72,12 @@ if (csv) csv.addEventListener('change', async function () {
 });
 """
 CALCULATOR_HASH=base64.b64encode(hashlib.sha256(CALCULATOR_SCRIPT.encode()).digest()).decode()
-CSP=("default-src 'none'; style-src 'sha256-"+STYLE_HASH+"'; script-src 'sha256-"+SCRIPT_HASH+"' 'sha256-"+CALCULATOR_HASH+
-     "'; img-src 'self' https://*.ozone.ru https://*.ozon.ru https://*.wbbasket.ru https://*.wbbasket.net https://*.wildberries.ru https://*.wbstatic.net; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+STATIC_POLICY = "default-src 'none'; style-src 'sha256-" + STYLE_HASH + "'; script-src 'sha256-" + SCRIPT_HASH + "'"
+DOCUMENT_POLICY = "; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+CSP = STATIC_POLICY + DOCUMENT_POLICY
+CALCULATOR_CSP = (STATIC_POLICY + " 'sha256-" + CALCULATOR_HASH + "'" +
+    "; img-src 'self' https://*.ozone.ru https://*.ozon.ru https://*.wbbasket.ru https://*.wbbasket.net "
+    "https://*.wildberries.ru https://*.wbstatic.net" + DOCUMENT_POLICY)
 def document(title,content,auth=False,progress=False,calculator=False):
     head='<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>'+html.escape(title)+' — SIDZEN</title><style>'+CSS+'</style></head><body><a class="skip" href="#content">К содержимому</a>'
     brand='<a class="brand" href="/">SIDZEN<small>MARKETPLACE WORKSPACE</small></a>'

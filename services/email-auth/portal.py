@@ -896,10 +896,10 @@ class Portal:
                     start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
         if path not in OAUTH_PATHS and path not in ('/settings','/settings/catalog','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/mcp','/api/read','/healthz'):
             return self.login(e,start)
-        def reply(text,code='200 OK',json_response=False,extra_headers=()):
+        def reply(text,code='200 OK',json_response=False,extra_headers=(),*,csp=CSP):
             if not json_response and not text.lstrip().lower().startswith('<!doctype'): text=document('Кабинет', '<main id="content" class="error-card"><h1>Кабинет</h1><p>'+text+'</p></main>')
             body=(json.dumps(text) if json_response else text).encode()
-            start(code,[('Content-Type','application/json' if json_response else 'text/html; charset=utf-8'),('Content-Length',str(len(body))),('Cache-Control','no-store'),('Referrer-Policy','no-referrer' if json_response else 'strict-origin'),('X-Content-Type-Options','nosniff'),('Content-Security-Policy',CSP)]+list(extra_headers)); return [body]
+            start(code,[('Content-Type','application/json' if json_response else 'text/html; charset=utf-8'),('Content-Length',str(len(body))),('Cache-Control','no-store'),('Referrer-Policy','no-referrer' if json_response else 'strict-origin'),('X-Content-Type-Options','nosniff'),('Content-Security-Policy',csp)]+list(extra_headers)); return [body]
         if e.get('HTTP_HOST')!=urlsplit(self.login.origin).netloc: return reply('Invalid host','400 Bad Request')
         if path in OAUTH_PATHS:
             return oauth_mcp.handle(e,start,self.oauth,self.external_keys,self.login.origin)
