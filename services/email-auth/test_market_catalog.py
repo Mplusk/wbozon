@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import secrets
@@ -14,6 +15,7 @@ import market_actions as actions
 import market_catalog as catalog
 import market_https
 import market_transport
+import seller_reports
 import test_external_mcp_integration
 import test_portal
 
@@ -26,6 +28,79 @@ class CatalogTests(unittest.TestCase):
 
     def key(self,access):
         return self.app.external_keys.create(access,secrets.token_urlsafe(16),self.now,access)
+
+    @staticmethod
+    def wb_token(kind, category, seller='fixture-seller', expires=None):
+        claims = dict(acc=kind, sid=seller, s=1 << category, t=False,
+                      exp=int(time.time())+900 if expires is None else expires)
+        segment = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip('=')
+        return {'api_token':'fixture.'+segment+'.signature'}
+
+    def test_restricted_wb_reads_select_a_compatible_key_only_for_the_same_seller(self):
+        rating = catalog.find_route('wb_get_api_common_rating')
+        recs = catalog.find_route('wb_post_api_content_recommendations_list')
+        personal = self.wb_token(3,7)
+        service = self.wb_token(4,7)
+        other_seller = self.wb_token(4,7,seller='other-seller')
+        self.vault.save('wb_feedback',personal)
+        self.vault.save('wb',service)
+        self.assertEqual(catalog.read_credentials(self.vault,rating),service)
+        self.vault.save('wb',other_seller)
+        self.assertEqual(catalog.read_credentials(self.vault,rating),personal)
+        self.assertEqual(catalog.wb_read_access_issue(recs,service)['reason'],'wb_token_category_required')
+        self.assertEqual(catalog.wb_read_access_issue(rating,self.wb_token(4,7,expires=1))['reason'],'wb_token_expired')
+
+    def test_personal_wb_rating_token_is_reported_locally_without_an_http_request(self):
+        op = 'wb_get_api_common_rating'
+        creds = self.wb_token(3,7)
+        with patch('urllib.request.OpenerDirector.open') as send:
+            result = catalog.transfer('market_api_read',{'operation_id':op,'input':{}},creds,
+                                      self.app.finance_gate_dir,time.monotonic()+5)
+            debug = seller_reports.execute('wb_seller_information',{'report':'seller_rating','input':{}},creds,
+                                           self.app.finance_gate_dir,time.monotonic()+5)
+        send.assert_not_called()
+        self.assertEqual(result['access_issue']['reason'],'wb_token_type_required')
+        self.assertEqual(result['access_issue']['credential_type'],'Персональный')
+        self.assertEqual(result['access_issue']['supported_token_types'],['Сервисный'])
+        self.assertIsNone(result['http_status'])
+        self.assertFalse(result['complete'])
+        self.assertEqual(debug['status'],'provider_access_denied')
+
+    def test_recommendations_report_actual_wb_denial_without_guessing_subscription_state(self):
+        op = 'wb_post_api_content_recommendations_list'
+        creds = self.wb_token(3,1)
+        reply = io.BytesIO(json.dumps({'detail':creds['api_token']}).encode())
+        rejection = urllib.error.HTTPError('',403,'Forbidden',Message(),reply)
+        with patch('urllib.request.OpenerDirector.open',side_effect=rejection) as send:
+            result = catalog.transfer('market_api_read',{'operation_id':op,'input':{'body':{'limit':1}}},
+                                      creds,self.app.finance_gate_dir,time.monotonic()+5)
+        send.assert_called_once()
+        issue = result['access_issue']
+        self.assertEqual(issue['reason'],'content_recommendations_access_required')
+        self.assertEqual(issue['http_status'],403)
+        self.assertTrue(issue['category_allowed_by_token'])
+        self.assertEqual(issue['subscription_status'],'unverified')
+        self.assertIn('Джем',issue['required_subscription'])
+        self.assertNotIn(creds['api_token'],json.dumps(result))
+        self.assertTrue(reply.closed)
+
+    def test_compatible_wb_rating_and_recommendations_can_return_real_fields(self):
+        fixtures = (
+            ('wb_get_api_common_rating',self.wb_token(4,7),{}, {'valuation':4.7,'feedbackCount':10}),
+            ('wb_post_api_content_recommendations_list',self.wb_token(3,1),{'body':{'limit':1}},
+             {'data':[{'nmId':123,'recomNms':[456]}],'next':0}),
+        )
+        for operation, creds, inputs, data in fixtures:
+            with self.subTest(operation=operation):
+                response = io.BytesIO(json.dumps(data).encode())
+                response.status = 200
+                response.headers = Message()
+                response.headers['Content-Type'] = 'application/json'
+                with patch('urllib.request.OpenerDirector.open',return_value=response) as send:
+                    result = catalog.transfer('market_api_read',{'operation_id':operation,'input':inputs},creds,
+                                              self.app.finance_gate_dir,time.monotonic()+5)
+                self.assertEqual(send.call_args.args[0].get_header('Authorization'),creds['api_token'])
+                self.assertEqual(result['data'],data)
 
     def call(self,token,name,args):
         body=json.loads(self.mcp({'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':name,'arguments':args}},token)['body'])

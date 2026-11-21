@@ -43,7 +43,11 @@ def credentials(vault, name, *, include_avito=False):
         return keys
     if name.startswith("wb_"):
         preferred=market_health.WB_TOOLS.get(name)
-        creds=(vault.read(preferred) if preferred else None) or vault.read("wb")
+        if name == "wb_card_issues":
+            # This view reads analytics, prices and content through separate categories.
+            creds = vault.read("wb") or vault.read(preferred)
+        else:
+            creds=(vault.read(preferred) if preferred else None) or vault.read("wb")
         extras={p:c for p in market_health.WB_CATEGORIES if (c:=vault.read(p))}
         if extras:
             return dict(creds or next(iter(extras.values())),category_keys=extras)

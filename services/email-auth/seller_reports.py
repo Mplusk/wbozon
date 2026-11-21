@@ -156,6 +156,10 @@ def execute(name, args, creds, directory, deadline):
     query={"operation_id":route["operation_id"], "input":inputs}
     if name == "wb_csv_reports" and choice == "rows":
         return csv_rows(query, args.get("offset",0), args.get("limit",100), creds, directory, deadline)
+    if route["operation_id"] in market_catalog.WB_READ_REQUIREMENTS:
+        dedicated=creds.get("category_keys",{}).get(market_catalog.category_key(route["host"]))
+        general={k:v for k,v in creds.items() if k!="category_keys"}
+        creds=market_catalog.select_wb_read_credentials(route,dedicated,general)
     import urllib.error
     try:
         result=market_catalog.transfer("market_api_read",query,creds,directory,deadline)
@@ -168,7 +172,8 @@ def execute(name, args, creds, directory, deadline):
     data=result.get("data")
     failed=isinstance(data,dict) and (data.get("error") is True or data.get("success") is False)
     result.update(report=choice, read_only=True, untrusted_data=True, source=route["path"],
-                  status="provider_error" if failed else "ready", data_as_of=result.get("fetched_at") or result.get("observed_at"))
+                  status=result.get("status","provider_error" if failed else "ready"),
+                  data_as_of=result.get("fetched_at") or result.get("observed_at"))
     if choice == "macroclusters":
         directory_rows = []
         for cluster in result["data"]["result"]:

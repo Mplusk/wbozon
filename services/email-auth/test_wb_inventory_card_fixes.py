@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from market_specs import MOSCOW
 from seller_views import Reader, SourceIssue
+import market_catalog
 import seller_wb_views as wb
 
 
@@ -34,7 +35,8 @@ class FakeReader:
         elif choice=="item_rating":
             raise SourceIssue(source="/api/analytics/v2/item-rating",status="provider_error",http_status=400)
         elif choice=="content_recommendations":
-            raise SourceIssue(source="/api/content/v1/recommendations/list",status="provider_access_denied",http_status=403)
+            route=market_catalog.find_route("wb_post_api_content_recommendations_list")
+            raise SourceIssue(**market_catalog.wb_read_access_issue(route,self.wire.creds,http_status=403))
 
     def fetch(self, group, choice, *args):
         if choice=="offices":

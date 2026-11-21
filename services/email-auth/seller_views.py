@@ -8,6 +8,7 @@ import time
 import urllib.error
 
 import finance_gate
+import market_history
 import seller_reports
 
 
@@ -153,10 +154,14 @@ class Reader:
         row=market_catalog.find_route(op)
         if not row or row["category"]!="read" or row["market"]!=self.market:
             raise ValueError("Unexpected read operation")
-        creds=getattr(self.wire,"category_keys",{}).get(market_catalog.category_key(row["host"]),self.wire.creds)
-        if len(self.scopes)==0 or row["host"] not in self.scopes:
-            self.scopes[row["host"]]=Wire(self.market,creds,self.directory,self.deadline)
-        wire=self.scopes[row["host"]]
+        creds=self.wire.creds
+        if self.market=="wb":
+            dedicated=getattr(self.wire,"category_keys",{}).get(market_catalog.category_key(row["host"]))
+            creds=market_catalog.select_wb_read_credentials(row,dedicated,creds)
+        scope=(row["host"],market_history.credential_id(creds))
+        if scope not in self.scopes:
+            self.scopes[scope]=Wire(self.market,creds,self.directory,self.deadline)
+        wire=self.scopes[scope]
         spec=row["contract"]
         inputs=dict(inputs)
         if "body" in inputs:
@@ -184,6 +189,8 @@ class Reader:
                 except finance_gate.GateError as exc:
                     raise SourceIssue(source=row["path"],status="pending",http_status=None,reason="local_limiter",
                                       retry_after_seconds=exc.retry_after_seconds) from None
+                if issue:=fetched.get("access_issue"):
+                    raise SourceIssue(**issue)
                 raw=fetched.get("data")
                 if isinstance(raw,dict) and raw.get("error") is True:
                     raise SourceIssue(source=row["path"],status="provider_error",http_status=fetched.get("http_status"))

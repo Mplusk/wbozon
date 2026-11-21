@@ -340,6 +340,9 @@ jobs:
           prior_service="$RUNNER_TEMP/marketplace-prior-release/service"
           mkdir -p "$prior_service"
           git archive 189ef26ae95a572944ac9213b90774a6f5e7a61e:services/email-auth | tar -x -C "$prior_service"
+          production_service="$RUNNER_TEMP/marketplace-production-release/service"
+          mkdir -p "$production_service"
+          git archive 801cc0e22bcf8c2718f2b3301c16066746b5da60:services/email-auth | tar -x -C "$production_service"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit b151124d70320946c17d22b08b1daa63964018de \
@@ -360,6 +363,7 @@ jobs:
             --successor c5a2558817b4969ddea983d88157edf3820d32e2 "$resumable_reports" \
             --successor b970edd32559dc0445b7b26673153767652bd2e0 "$scoped_reports" \
             --successor 189ef26ae95a572944ac9213b90774a6f5e7a61e "$prior_service" \
+            --successor 801cc0e22bcf8c2718f2b3301c16066746b5da60 "$production_service" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -413,7 +417,9 @@ jobs:
           check_pair "$resumable_reports" "$scoped_reports"
           prior_service="$RUNNER_TEMP/marketplace-prior-release/service"
           check_pair "$scoped_reports" "$prior_service"
-          check_pair "$prior_service" "$packaged"
+          production_service="$RUNNER_TEMP/marketplace-production-release/service"
+          check_pair "$prior_service" "$production_service"
+          check_pair "$production_service" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

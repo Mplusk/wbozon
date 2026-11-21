@@ -8,12 +8,14 @@ from pathlib import Path
 import re
 import secrets
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import quote, urlencode
 
 import finance_gate
 import market_cooldown
 import market_health
+import market_history
 import market_transport
 
 
@@ -42,6 +44,22 @@ WB_EXTRA = {'marketplace-api':('wb_marketplace_key','Маркетплейс'),
             'buyer-chat-api':('wb_chat_key','Чаты с покупателями'),
             'user-management-api':('wb_users_key','Управление пользователями'),
             'returns-api':('wb_returns_key','Возвраты')}
+WB_TOKEN_TYPES = {1: 'Базовый', 2: 'Тестовый', 3: 'Персональный', 4: 'Сервисный'}
+WB_READ_REQUIREMENTS = {
+    'wb_get_api_common_rating': {
+        'category': 'wb_feedback',
+        'token_types': (4,),
+        'denial_reason': 'seller_rating_access_required',
+        'documentation': 'https://dev.wildberries.kg/docs/openapi/api-information',
+    },
+    'wb_post_api_content_recommendations_list': {
+        'category': 'wb_content',
+        'token_types': (3, 4),
+        'denial_reason': 'content_recommendations_access_required',
+        'subscription': 'Джем — Продвинутый или Премиальный',
+        'documentation': 'https://dev.wildberries.kg/docs/openapi/item-management',
+    },
+}
 
 
 def category_key(host):
@@ -95,6 +113,8 @@ def search(arguments):
 def describe(operation_id):
     row = routes()[operation_id]
     result = _public(row)
+    if requirements := _wb_access_requirements(row):
+        result['access_requirements'] = requirements
     if spec := row.get('contract'):
         result.update(input_parameters=spec['parameters'],required=spec['required'],
                       body_by_content_type=spec['media'],definitions=spec['definitions'],
@@ -224,13 +244,67 @@ def validate(tool, arguments):
         validate_inputs(row,arguments['input'])
 
 
+def _wb_access_requirements(row):
+    spec = WB_READ_REQUIREMENTS.get(row['operation_id'])
+    if not spec:
+        return None
+    result = dict(required_category=market_health.WB_CATEGORIES[spec['category']],
+                  supported_token_types=[WB_TOKEN_TYPES[kind] for kind in spec['token_types']],
+                  documentation=spec['documentation'])
+    if 'subscription' in spec:
+        result['required_subscription'] = spec['subscription']
+    return result
+
+
+def wb_read_access_issue(row, credentials, *, http_status=None):
+    spec = WB_READ_REQUIREMENTS.get(row['operation_id'])
+    if not spec:
+        return None
+    claims = market_history.claims(credentials.get('api_token'))
+    kind = claims.get('acc')
+    token_type = WB_TOKEN_TYPES.get(kind) if type(kind) is int else None
+    mask = claims.get('s')
+    category = (bool(mask & (1 << market_health.WB_CATEGORY_BITS[spec['category']]))
+                if type(mask) is int and mask >= 0 else None)
+    expiry = claims.get('exp')
+    if http_status is not None:
+        reason = spec['denial_reason']
+    elif type(expiry) is int and expiry <= time.time():
+        reason = 'wb_token_expired'
+    elif claims.get('t') is True or (token_type and kind not in spec['token_types']):
+        reason = 'wb_token_type_required'
+    elif category is False:
+        reason = 'wb_token_category_required'
+    else:
+        return None
+
+    result = dict(status='provider_access_denied', reason=reason, source=row['path'],
+                  http_status=http_status, credential_type=token_type, category_allowed_by_token=category,
+                  **_wb_access_requirements(row))
+    if 'subscription' in spec:
+        result['subscription_status'] = 'unverified'
+    return result
+
+
+def select_wb_read_credentials(row, dedicated, general):
+    if (not dedicated or not general or not wb_read_access_issue(row, dedicated)
+            or wb_read_access_issue(row, general)):
+        return dedicated or general
+    # Never fall back to another cabinet for a read of private seller data.
+    seller = market_history.claims(dedicated.get('api_token')).get('sid')
+    return general if seller and seller == market_history.claims(general.get('api_token')).get('sid') else dedicated
+
+
 def read_credentials(vault,row):
     if row['market']=='ozon':
         return vault.read('ozon')
     if row['host']==DIGITAL_HOST:
         return {'public_catalog':True} if row.get('authentication')=='public_catalog' else vault.read('wb_digital')
     category = category_key(row['host'])
-    return (vault.read(category) if category else None) or vault.read('wb')
+    dedicated = vault.read(category) if category else None
+    if dedicated and row['operation_id'] not in WB_READ_REQUIREMENTS:
+        return dedicated
+    return select_wb_read_credentials(row,dedicated,vault.read('wb'))
 
 
 def _scalar(value):
@@ -338,6 +412,14 @@ def transfer(tool, arguments, creds, directory, deadline, *, csv_download=False)
     row = find_route(arguments['operation_id'])
     if csv_download and (tool != 'market_api_read' or row['operation_id'] != 'wb_get_api_nm_report_downloads_file_downloadid'):
         raise ValueError('Unexpected report download')
+    restricted_read = tool == 'market_api_read' and row['operation_id'] in WB_READ_REQUIREMENTS
+
+    def access_denied(issue):
+        return dict(operation_id=row['operation_id'], status=issue['status'], http_status=issue['http_status'],
+                    access_issue=issue, data=None, complete=False, read_only=True)
+
+    if restricted_read and (issue := wb_read_access_issue(row, creds)):
+        return access_denied(issue)
     request = build_request(row,arguments['input'],creds)
     wire = market_transport.Wire(row['market'],creds,directory,deadline)
     if csv_download:
@@ -396,7 +478,14 @@ def transfer(tool, arguments, creds, directory, deadline, *, csv_download=False)
             group=row['host']+':'+row.get('quota_group',row['path'])
             return finance_gate.run(str(Path(directory).parent/'.catalog-method-gates'),group,paced,(token,),read_recovery=tool=='market_api_read')
         return paced()
-    with send() as response:
+    try:
+        response = send()
+    except urllib.error.HTTPError as exc:
+        if not restricted_read or exc.code not in (402, 403):
+            raise
+        exc.close()
+        return access_denied(wb_read_access_issue(row, creds, http_status=exc.code))
+    with response:
         status = response.status
         media = response.headers.get_content_type()
         content_range=response.headers.get('Content-Range','')

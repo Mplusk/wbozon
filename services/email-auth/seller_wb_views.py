@@ -361,11 +361,6 @@ def _card_issues(r):
             if choice=="item_rating" and issue.get("http_status")==400:
                 issue.update(reason="provider_rejected_request",period=r.meta.get("rating_period"),
                              documentation="https://dev.wildberries.ru/docs/openapi/analytics#tag/Ocenka-tovara/operation/postV2ItemRating")
-            if choice=="content_recommendations" and issue.get("http_status") in (402,403):
-                issue.update(required_category="Контент", required_subscription="Джем — Продвинутый или Премиальный",
-                             supported_token_types=["Персональный","Сервисный"],
-                             reason="content_recommendations_access_required",
-                             documentation="https://dev.wildberries.kg/docs/openapi/item-management")
     r.meta["counts"]=counts
 
 
