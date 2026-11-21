@@ -42,7 +42,8 @@ class CalculatorTests(unittest.TestCase):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
         self.addCleanup(gc.collect)
-        self.path = str(Path(self.folder.name) / "cost.sqlite3")
+        self.vault_path = str(Path(self.folder.name) / "vault.sqlite3")
+        self.path = cost_catalog.database_path(self.vault_path)
         self.store = cost_catalog.Store(self.path)
         self.initial = seed(self.store)
 
@@ -126,7 +127,7 @@ class CalculatorTests(unittest.TestCase):
 
     def test_browser_owner_session_and_origin_are_required(self):
         login = LoginApp(str(Path(self.folder.name) / "login.sqlite3"), "s" * 40, "https://test.example")
-        portal = Portal(login, Vault(self.path, b"v" * 32), "f" * 64,
+        portal = Portal(login, Vault(self.vault_path, b"v" * 32), "f" * 64,
                         finance_gate_dir=str(Path(self.folder.name) / "gate"))
         sid, csrf = "d" * 43, "a" * 32
         with cost_catalog.Store(self.path).connect() as conn:

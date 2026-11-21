@@ -714,7 +714,8 @@ class Portal:
     def read_gateway(self, operation, args, creds, *, include_avito=False):
         if operation in cost_catalog.TOOLS:
             market_specs.validate(operation, args)
-            return cost_catalog.read(cost_catalog.Store(self.vault.path), operation, args)
+            calculator = cost_catalog.Store(cost_catalog.database_path(self.vault.path))
+            return cost_catalog.read(calculator, operation, args)
         if operation=='mcp_health':
             from functools import partial
             configured=partial(expansion_gateway.credentials,include_avito=include_avito)
@@ -754,9 +755,10 @@ class Portal:
                 else:
                     detail=self._unconfigured_read(name)
             report=market_health.read(self.vault,self.finance_gate_dir,args,external_mcp.TOOL_NAMES,accounts)
-            if isinstance(self.vault, Vault) and cost_catalog.Store.exists(self.vault.path):
+            calculator_path = cost_catalog.database_path(self.vault.path) if isinstance(self.vault, Vault) else None
+            if calculator_path and cost_catalog.Store.exists(calculator_path):
                 import cost_sync
-                runs = cost_sync.runs(cost_catalog.Store(self.vault.path), 1)
+                runs = cost_sync.runs(cost_catalog.Store(calculator_path), 1)
                 report["calculator_sync"] = runs[0] if runs else {"status": "waiting_for_first_sync"}
                 for item in report["items"]:
                     if item["tool"] in cost_catalog.TOOLS:
@@ -784,12 +786,14 @@ class Portal:
             if detail: report['probe']=detail
             return report
         cost_card, calculator = None, None
-        if (isinstance(args, dict) and {"article", "offer_id", "vendor_code", "offer_ids", "vendor_codes"} & args.keys()
-                and isinstance(self.vault, Vault) and cost_catalog.Store.exists(self.vault.path)):
-            calculator = cost_catalog.Store(self.vault.path)
-            args, cost_card, resolved = cost_integration.prepare(calculator, operation, args)
-            if resolved is not None:
-                return resolved
+        if (isinstance(self.vault, Vault) and isinstance(args, dict)
+                and {"article", "offer_id", "vendor_code", "offer_ids", "vendor_codes"} & args.keys()):
+            calculator_path = cost_catalog.database_path(self.vault.path)
+            if cost_catalog.Store.exists(calculator_path):
+                calculator = cost_catalog.Store(calculator_path)
+                args, cost_card, resolved = cost_integration.prepare(calculator, operation, args)
+                if resolved is not None:
+                    return resolved
         try:
             value=self._dispatch_read(operation,args,creds)
         except Exception as exc:

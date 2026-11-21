@@ -7,6 +7,8 @@ from decimal import Decimal, ROUND_HALF_UP, localcontext
 import csv
 import io
 import json
+import os
+from pathlib import Path
 import re
 import sqlite3
 from urllib.parse import urlsplit
@@ -26,6 +28,10 @@ REFERENCES = {
 }
 DEFAULTS = {"electricity_per_kwh": None, "defect_percent": None, "labor_per_hour": "0"}
 TOOLS = frozenset(("cost_card", "cost_list", "cost_history", "cost_inbox"))
+
+
+def database_path(vault_path):
+    return str(vault_path) + ".cost-calculator"
 
 
 class CatalogError(ValueError):
@@ -266,13 +272,16 @@ class Store:
     @staticmethod
     def exists(path):
         try:
-            with closing(sqlite3.connect(path, timeout=1)) as conn:
+            uri = Path(path).absolute().as_uri() + "?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True, timeout=1)) as conn:
                 return conn.execute("SELECT 1 FROM sqlite_master WHERE name='cost_products'").fetchone() is not None
         except (OSError, sqlite3.Error):
             return False
 
     def __init__(self, path):
         self.path = str(path)
+        descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        os.close(descriptor)
         with self.connect() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS cost_products(article TEXT PRIMARY KEY, data TEXT NOT NULL, revision INTEGER NOT NULL);

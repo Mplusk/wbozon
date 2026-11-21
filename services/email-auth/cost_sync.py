@@ -292,11 +292,11 @@ def _worker(portal, store, run_id, payload):
 
 
 def kick(portal, *, manual=False, scheduled=False):
-    if not catalog.Store.exists(portal.vault.path):
-        if not manual and not scheduled:
-            return
+    path = catalog.database_path(portal.vault.path)
+    if not (manual or scheduled or catalog.Store.exists(path)):
+        return
     now = datetime.now(MOSCOW)
-    store = catalog.Store(portal.vault.path)
+    store = catalog.Store(path)
     with store.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT * FROM cost_sync WHERE status='pending' ORDER BY id LIMIT 1").fetchone()

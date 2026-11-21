@@ -341,7 +341,7 @@ def _form_product(values):
 
 
 def handle(portal, env, method, session, query, body, reply, start):
-    store = catalog.Store(portal.vault.path)
+    store = catalog.Store(catalog.database_path(portal.vault.path))
     csrf = session[1]
     if method == "POST":
         if env.get("HTTP_ORIGIN") != portal.login.origin:

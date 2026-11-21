@@ -26,6 +26,7 @@ SCOPED_BACKUP_SECONDS = 5
 # Table columns, constraints and unique indexes created by the reviewed KeyStore.
 SCOPED_KEYS_SCHEMA = '01adb0bd15e847f9d1fadccb4b45169c0271bb00a15f7667d69d796787278723'
 ACTION_SCHEMA = '990bf1ca3f3cd956f47988c1b16ad9bfe6d60ca16c2fc8fb5eed8f6933bf7ac1'
+CALCULATOR_SCHEMA = 'c4971f834854e57c45466f15ae4c32a69c7e01de08b2eb16906519d45ce9cdca'
 
 MARKET_BASE = 'b543e1568394095a20f14213feb3a194a456716c70d43b95c06b33c98cd32aed'
 MARKET_BRIDGE = '4fbd8858010f37f39b7676c4b34fede5526aa56623569bbc231e77524edce0cf'
@@ -56,7 +57,7 @@ MARKET_REPORT_SUCCESSORS = (
     'c430d17e6bd0005cb87d1409cfb7e0e8c46057a506dee1f6556b12c19dfab115',
     'f458a6dad8b8f8414a0d7d3a17d038e6ae061aa1995ec2db0cfb84ec0ca7de41',
     'f5a7dd7f826f809eb1c18b055841277fedad78630775ef3cbfa30ab46240e49e',
-    '41937debe65b472eb683121d3775a75201a8dbc5c585a22d74289a67d22c41f9',
+    'fac97daefafc0df78a42608f3c6a65077bc70e8252002a551feb4f6038acbc6d',
 )
 
 
@@ -69,9 +70,9 @@ def present(path):
 
 
 def backup_scoped_keys(host, txn):
-    """Snapshot optional grants and the action journal while both workers are drained."""
+    """Snapshot portal companion databases while both workers are drained."""
     for suffix,schema in (('.avito-keys',SCOPED_KEYS_SCHEMA),('.catalog-keys',SCOPED_KEYS_SCHEMA),
-                          ('.market-actions',ACTION_SCHEMA)):
+                          ('.market-actions',ACTION_SCHEMA),('.cost-calculator',CALCULATOR_SCHEMA)):
         backup_sidecar(host,txn,suffix,schema)
 
 
@@ -82,7 +83,7 @@ def backup_sidecar(host, txn, suffix, expected_schema):
     info = source.lstat()
     if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
             or info.st_uid != host.gate.parent.stat().st_uid or info.st_mode & 0o077):
-        raise ReleaseError('unexpected scoped key database')
+        raise ReleaseError('unexpected portal companion database')
     directory = secure(host.state / 'backups' / txn, True)
     snapshot = directory / source.name
     partial = directory / (source.name + '.partial')
@@ -90,7 +91,7 @@ def backup_sidecar(host, txn, suffix, expected_schema):
 
     def progress(status, remaining, total):
         if time.monotonic() >= deadline:
-            raise ReleaseError('scoped key database snapshot timed out')
+            raise ReleaseError('portal companion database snapshot timed out')
 
     with partial.open('xb') as stream:
         os.fchmod(stream.fileno(), 0o600)
@@ -102,7 +103,7 @@ def backup_sidecar(host, txn, suffix, expected_schema):
                 dest.execute('PRAGMA trusted_schema=OFF')
                 dest.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
                 if Host.schema(dest) != expected_schema or dest.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
-                    raise ReleaseError('scoped key snapshot verification failed')
+                    raise ReleaseError('portal companion snapshot verification failed')
         with partial.open('rb') as stream:
             os.fsync(stream.fileno())
         os.replace(partial, snapshot)

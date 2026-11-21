@@ -55,6 +55,8 @@ NEW_TOOLS = frozenset((
     'ozon_stocks_analytics', 'ozon_turnover', 'ozon_delivery_time',
     'wb_retentions', 'wb_region_sales', 'wb_returns_report', 'wb_ads_finance', 'wb_search_queries',
 ))
+CALCULATOR_TOOLS = frozenset(('cost_card', 'cost_history', 'cost_inbox', 'cost_list'))
+CALCULATOR_ARTICLE = 'synthetic-calculator-rollback-card'
 CREDS = {'client_id': '101', 'api_key': 'synthetic-v2-rollback-key'}
 ROTATED_CREDS = {'client_id': '101', 'api_key': 'synthetic-v2-rotated-key'}
 BRIDGE_TOKEN = 'b' * 48
@@ -275,6 +277,22 @@ def state_child():
         raise AssertionError('saved MCP credential is no longer valid')
     if app.external_keys.list_active()[0][3] != now:
         raise AssertionError('saved MCP last-use timestamp was not recorded')
+    tools = {item['name']: item for item in catalog['result']['tools']}
+    if tools.keys() & CALCULATOR_TOOLS:
+        if not CALCULATOR_TOOLS <= tools.keys() or any(
+                tools[name].get('annotations', {}).get('readOnlyHint') is not True for name in CALCULATOR_TOOLS):
+            raise AssertionError('incomplete or writable calculator MCP catalogue')
+        if stage == 'candidate':
+            import cost_catalog
+            store = cost_catalog.Store(cost_catalog.database_path(app.vault.path))
+            store.save_product({'article': CALCULATOR_ARTICLE, 'name': 'Synthetic cost card', 'status': 'draft'},
+                               '2026-10-01')
+        if stage in ('candidate', 'resume'):
+            status, card = request(app, '/mcp', {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call',
+                'params': {'name': 'cost_card', 'arguments': {'article': CALCULATOR_ARTICLE, 'date': '2026-10-01'}}}, token)
+            reply = json.loads(card['result']['content'][0]['text'])
+            if status != 200 or reply.get('internal_article') != CALCULATOR_ARTICLE or reply.get('status') != 'draft':
+                raise AssertionError('the calculator card did not survive the release transition')
     if stage == 'candidate':
         status, _ = request(app, '/api/read', {'operation': 'ozon_turnover', 'arguments': {}}, BRIDGE_TOKEN)
         if status != 200 or app.vault.bridge_activity('bridge') != ('unknown', 'ok', now):
@@ -487,10 +505,14 @@ def check_state(python, old, new, root, *, previous_is_v2=False):
     if previous_is_v2:
         before_names, after_names = set(first['names']), set(upgraded['names'])
         removed = before_names - after_names
-        if (len(before_names - SELLER_GROUPS - V3_SELLER_VIEWS) != 58
+        if (len(before_names - SELLER_GROUPS - V3_SELLER_VIEWS - CALCULATOR_TOOLS) != 58
                 or removed not in (frozenset(), SELLER_GROUPS)):
             raise AssertionError('previous marketplace tools disappeared')
         additions = after_names - before_names
+        calculator_added = additions & CALCULATOR_TOOLS
+        if calculator_added and calculator_added != CALCULATOR_TOOLS:
+            raise AssertionError('the calculator releases its four tools together')
+        additions -= CALCULATOR_TOOLS
         if additions not in (frozenset(), SELLER_GROUPS, V3_SELLER_VIEWS, SELLER_GROUPS | V3_SELLER_VIEWS):
             raise AssertionError('unexpected or incomplete marketplace tool additions')
     else:
@@ -518,6 +540,8 @@ def check_state(python, old, new, root, *, previous_is_v2=False):
         raise AssertionError('history encryption key is not private')
     check_history_key_loss(python, new, data, root)
     archive_digest = hashlib.sha256(history.read_bytes()).digest()
+    calculator = data / 'vault.sqlite.cost-calculator'
+    calculator_digest = hashlib.sha256(calculator.read_bytes()).digest() if calculator.exists() else None
     restored = run_state(python, old, data, 'restored', previous_is_v2=previous_is_v2)
     if restored['names'] != first['names']:
         raise AssertionError('rollback did not restore the previous MCP catalogue')
@@ -528,6 +552,8 @@ def check_state(python, old, new, root, *, previous_is_v2=False):
     resumed = run_state(python, new, data, 'resume', previous_is_v2=previous_is_v2)
     if resumed['names'] != upgraded['names']:
         raise AssertionError('re-upgrade did not restore the v2 MCP catalogue')
+    if calculator_digest and hashlib.sha256(calculator.read_bytes()).digest() != calculator_digest:
+        raise AssertionError('rollback or re-upgrade changed the calculator database')
     if any(schema(path) != before[path] for path in (auth, vault)):
         raise AssertionError('auth/vault schema changed after rollback or resume')
     if not before[reports].items() <= schema(reports).items():
