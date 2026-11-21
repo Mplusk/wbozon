@@ -346,6 +346,9 @@ jobs:
           active_service="$RUNNER_TEMP/marketplace-active-release/service"
           mkdir -p "$active_service"
           git archive dc1cf83880fbdddc7bb30cf5cbb1b4ff36a82768:services/email-auth | tar -x -C "$active_service"
+          candidate_base="$RUNNER_TEMP/marketplace-calculator-base/service"
+          mkdir -p "$candidate_base"
+          git archive bd89da546211a39066fc279c964c23478655e2e1:services/email-auth | tar -x -C "$candidate_base"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit b151124d70320946c17d22b08b1daa63964018de \
@@ -368,6 +371,7 @@ jobs:
             --successor 189ef26ae95a572944ac9213b90774a6f5e7a61e "$prior_service" \
             --successor 801cc0e22bcf8c2718f2b3301c16066746b5da60 "$production_service" \
             --successor dc1cf83880fbdddc7bb30cf5cbb1b4ff36a82768 "$active_service" \
+            --successor bd89da546211a39066fc279c964c23478655e2e1 "$candidate_base" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -427,7 +431,11 @@ jobs:
           mkdir -p "$active_service"
           git archive dc1cf83880fbdddc7bb30cf5cbb1b4ff36a82768:services/email-auth | tar -x -C "$active_service"
           check_pair "$production_service" "$active_service"
-          check_pair "$active_service" "$packaged"
+          candidate_base="$RUNNER_TEMP/marketplace-calculator-base/service"
+          mkdir -p "$candidate_base"
+          git archive bd89da546211a39066fc279c964c23478655e2e1:services/email-auth | tar -x -C "$candidate_base"
+          check_pair "$active_service" "$candidate_base"
+          check_pair "$candidate_base" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

@@ -392,6 +392,12 @@ def _daily(args, request):
         ttl=1800,
     )
     values = rows(raw["result"].get("data"))
+    # Ozon can successfully return only the two basic metrics for this request.
+    base_only = args.get("include_funnel") and bool(values) and all(
+        isinstance(row.get("metrics"), list) and len(row["metrics"]) == 2 for row in values
+    )
+    if base_only:
+        metrics = metrics[:2]
     items = []
     positions = set()
     for r in values:
@@ -417,12 +423,24 @@ def _daily(args, request):
                 currency=None,
             )
         )
+    cursor = offset + limit if len(values) == limit else None
+    funnel = {}
+    if args.get("include_funnel"):
+        funnel = {"funnel": dict(complete=not base_only and cursor is None,
+                                status="base_metrics_only" if base_only else "paginated" if cursor else "ready"),
+                  "base_metrics_complete": cursor is None}
+        if base_only:
+            funnel["funnel"].update(required_subscription="Premium Plus",
+                                    source="/v1/analytics/data",
+                                    documentation="https://dev.ozon.ru/news/589-Izmeneniia-v-rabote-s-analitikoi-v-Seller-API/")
     return result(
         items,
-        offset + limit if len(values) == limit else None,
+        cursor,
+        complete=cursor is None and not base_only,
         report_timestamp=raw.get("timestamp"),
         currency_basis="not_in_analytics_response",
         period_basis="seller_api_reporting_day",
+        **funnel,
     )
 
 

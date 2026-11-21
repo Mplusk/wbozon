@@ -166,6 +166,17 @@ def _products(args, data, secret):
                     'sku': _optional_sku(source_sku, secret),
                     'source': _text(source['source'], 128, empty=True, secret=secret)
                               if source.get('source') is not None else None})
+        if type(row.get("is_archived")) is bool:
+            product["is_archived"] = row["is_archived"]
+        pictures = []
+        for image_field in ("primary_image", "images"):
+            values = row.get(image_field) or []
+            if isinstance(values, str):
+                values = [values]
+            if isinstance(values, list):
+                pictures.extend(_text(value, 2048, secret=secret) for value in values[:10] if isinstance(value, str))
+        if pictures:
+            product["images"] = list(dict.fromkeys(pictures))[:10]
         stocks = row.get('stocks')
         if stocks is not None:
             if not isinstance(stocks, dict): raise ValueError('Invalid product stocks')

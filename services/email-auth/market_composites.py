@@ -532,11 +532,12 @@ def _ozon_comparison_page(query, wire):
         return page or result([], complete=False, status="period_exceeds_analytics_window")
     funnel = _comparison_extra(wire, lambda: _ozon_comparison_funnel(query, dates, wire), budget=8)
     if page is None:
-        page = dict(funnel) if funnel.get("complete") else observed(
+        page = dict(funnel, complete=True) if funnel.get("complete") or funnel.get("base_metrics_complete") else observed(
             lambda: ozon_expansion._daily(dict(query, limit=1000), wire))
     page["funnel"] = {k: funnel.get(k) for k in ("complete", "status", "http_status", "retry_after_seconds")}
+    page["funnel"].update(funnel.get("funnel", {}))
     page["funnel"].update(source="ozon_sku_daily", date_basis="seller_api_reporting_day",
-                          items=funnel.get("items", []) if funnel.get("complete") else [])
+                          items=funnel.get("items", []) if page["funnel"]["complete"] else [])
     return page
 
 

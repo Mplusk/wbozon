@@ -23,6 +23,7 @@ if not _worker_cli:
     import ozon_mcp, ozon_details, ozon_article_summary, wb_mcp, avito_mcp
     import external_keys, external_mcp, oauth_mcp, market_actions, market_catalog
     import expansion_gateway, market_health, market_history, market_archive, posting_discovery
+    import cost_catalog, cost_integration
 
 FIELDS = {'ozon': ('client_id', 'api_key'), 'wb': ('api_token',)}
 CHECK_OPERATIONS = {'ozon':'ozon_products', 'wb':'wb_prices', 'avito':'avito_get_user_info_self'}
@@ -711,9 +712,15 @@ class Portal:
         self.external_keys=external_key_store if external_key_store is not None else external_keys.KeyStore(vault.path)
         self.oauth=oauth_store if oauth_store is not None else oauth_mcp.OAuthStore(vault.path,signing_secret=login.secret,clock=login.clock)
     def read_gateway(self, operation, args, creds, *, include_avito=False):
+        if operation in cost_catalog.TOOLS:
+            market_specs.validate(operation, args)
+            return cost_catalog.read(cost_catalog.Store(self.vault.path), operation, args)
         if operation=='mcp_health':
             from functools import partial
-            accounts=partial(expansion_gateway.credentials,include_avito=include_avito)
+            configured=partial(expansion_gateway.credentials,include_avito=include_avito)
+
+            def accounts(vault, name):
+                return {} if name in cost_catalog.TOOLS else configured(vault, name)
             detail=None
             if 'probe_arguments' in args:
                 name,probe=args['tool_name'],args['probe_arguments']
@@ -722,7 +729,7 @@ class Portal:
                 elif name in ozon_mcp.OPERATIONS: ozon_mcp.validate_args(name,probe)
                 else: wb_mcp.validate_args(name,probe)
                 account=accounts(self.vault,name)
-                if account:
+                if account or name in cost_catalog.TOOLS:
                     try:
                         data=self.read_gateway(name,probe,account)
                         detail={k:data.get(k) for k in ('status','complete','data_as_of','http_status','task_id',
@@ -747,6 +754,13 @@ class Portal:
                 else:
                     detail=self._unconfigured_read(name)
             report=market_health.read(self.vault,self.finance_gate_dir,args,external_mcp.TOOL_NAMES,accounts)
+            if isinstance(self.vault, Vault) and cost_catalog.Store.exists(self.vault.path):
+                import cost_sync
+                runs = cost_sync.runs(cost_catalog.Store(self.vault.path), 1)
+                report["calculator_sync"] = runs[0] if runs else {"status": "waiting_for_first_sync"}
+                for item in report["items"]:
+                    if item["tool"] in cost_catalog.TOOLS:
+                        item.update(status="available", source="cost_calculator")
             report["seller_capabilities"]=market_specs.seller_reports.capabilities(self.vault,self.finance_gate_dir,
                     args.get("refresh_capabilities",False),self.read_gateway)
             caps=report["seller_capabilities"]
@@ -769,6 +783,13 @@ class Portal:
                             if "api" in (str(item.get("header"))+" "+str(item.get("content"))).casefold()][:50]}
             if detail: report['probe']=detail
             return report
+        cost_card, calculator = None, None
+        if (isinstance(args, dict) and {"article", "offer_id", "vendor_code", "offer_ids", "vendor_codes"} & args.keys()
+                and isinstance(self.vault, Vault) and cost_catalog.Store.exists(self.vault.path)):
+            calculator = cost_catalog.Store(self.vault.path)
+            args, cost_card, resolved = cost_integration.prepare(calculator, operation, args)
+            if resolved is not None:
+                return resolved
         try:
             value=self._dispatch_read(operation,args,creds)
         except Exception as exc:
@@ -779,6 +800,8 @@ class Portal:
             self._observe(operation,creds,status)
             raise
         if isinstance(value,dict):
+            if cost_card:
+                value = cost_integration.enrich(calculator, operation, args, cost_card, value)
             # A managed worker records its own admission and completion in order.
             # A foreground poll can finish just after the worker has recorded ready.
             in_progress = (value.get("status") == "pending" and
@@ -931,7 +954,7 @@ class Portal:
                     creds=(market_catalog.read_credentials(self.vault,market_catalog.routes()[args['operation_id']]) if operation=='market_api_read'
                        else self.vault.read('avito') if operation in avito_mcp.PUBLIC_CONTRACTS else
                        expansion_gateway.credentials(self.vault,operation,include_avito=current_access=="all"))
-                    if not creds:
+                    if not creds and operation not in cost_catalog.TOOLS and operation != "article_map":
                         self._unconfigured_read(operation)
                         raise external_mcp.MCPToolError('not_configured')
                     return self.read_gateway(operation,args,creds)
@@ -979,10 +1002,10 @@ class Portal:
             if status!='200 OK': headers.append(('Allow','GET, HEAD'))
             start(status,headers)
             return [b''] if method=='HEAD' else [payload]
-        def body(kind):
+        def body(kind, maximum=4096):
             if e.get('CONTENT_TYPE','').split(';')[0]!=kind: raise ValueError()
             n=int(e.get('CONTENT_LENGTH','0'))
-            if not 0<n<=4096: raise ValueError()
+            if not 0<n<=maximum: raise ValueError()
             raw=e['wsgi.input'].read(n)
             if len(raw)!=n: raise ValueError()
             return raw.decode('utf-8')
@@ -1011,7 +1034,9 @@ class Portal:
                 data=json.loads(body('application/json'))
                 if not isinstance(data,dict) or set(data)!={'operation','arguments'}: raise ValueError()
                 op=data['operation']; args=data['arguments']
-                if op=='archive_market_day':
+                if op=='sync_cost_catalog':
+                    if not bridge_authorized or args != {}: raise ValueError()
+                elif op=='archive_market_day':
                     if not bridge_authorized or not isinstance(args,dict) or set(args)!={'dataset'} or args['dataset'] not in market_archive.DATASETS: raise ValueError()
                 elif op in market_specs.seller_reports.GROUPS:
                     if not bridge_authorized: raise ValueError()
@@ -1025,7 +1050,17 @@ class Portal:
                 else: raise ValueError()
             except (ValueError,TypeError,UnicodeError): return reply({'error':'invalid_request'},'400 Bad Request',True)
             try:
+                if op == "sync_cost_catalog":
+                    import cost_sync
+                    run_id = cost_sync.kick(self, scheduled=True)
+                    return reply({"status": "scheduled" if run_id else "up_to_date"}, json_response=True)
                 selection=args['dataset'] if op=='archive_market_day' else op
+                if op == "archive_market_day" and selection == "wb_orders":
+                    import cost_sync
+                    try:
+                        cost_sync.kick(self)
+                    except (sqlite3.Error, OSError):
+                        pass
                 if op in market_specs.seller_reports.GROUPS:
                     route, inputs=market_specs.seller_reports.request(op,args)
                     if inputs is None:
@@ -1033,7 +1068,7 @@ class Portal:
                     creds=market_catalog.read_credentials(self.vault,route)
                 else:
                     creds=expansion_gateway.credentials(self.vault,{'ozon_availability':'ozon_stocks_analytics','wb_availability':'wb_stocks'}.get(selection,selection))
-                if not creds and op!='mcp_health':
+                if not creds and op not in cost_catalog.TOOLS | {"mcp_health", "article_map"}:
                     record_bridge(op,'not_configured')
                     return reply({'error':'not_configured'},'409 Conflict',True)
                 result=self.read_gateway(op,args,creds)
@@ -1087,6 +1122,19 @@ class Portal:
         except sqlite3.Error:
             return reply('Сервис временно недоступен. Повторите позже. <a href="/settings">Настройки</a>','503 Service Unavailable')
         if not session: return reply('Войдите заново на главной странице.','401 Unauthorized')
+        if path == '/settings' and 'tab=calculator' in e.get('QUERY_STRING', ''):
+            import calculator_ui
+            try:
+                parsed = parse_qs(e.get('QUERY_STRING', ''), max_num_fields=20)
+                if parsed.get("tab") == ["calculator"] and all(len(v) == 1 for v in parsed.values()):
+                    query = {k: value[0] for k, value in parsed.items()}
+                    return calculator_ui.handle(self, e, method, session, query, body, reply, start)
+            except cost_catalog.CatalogError as exc:
+                return reply(html.escape(str(exc)) + ' <a href="/settings?tab=calculator">Калькулятор</a>', '400 Bad Request')
+            except (ValueError, TypeError, UnicodeError, KeyError):
+                return reply('Проверьте поля калькулятора.', '400 Bad Request')
+            except (sqlite3.Error, OSError):
+                return reply('Хранилище калькулятора временно недоступно.', '503 Service Unavailable')
         if path=='/settings/catalog':
             try:
                 return market_actions.handle(self,e,method,session,now,body,reply,start)

@@ -400,7 +400,8 @@ def read(r):
     elif name=="ozon_wrong_volume":
         for d in r.pages(FBO,"wrong_dimensions",{"body":{"limit":100}},"products",("body","cursor","cursor",100)):
             yield from r.product({"product_id":d.get("product_id"),"name":d.get("name"),"provider_dimensions":{
-                k:d.get(k) for k in ("height","width","length","weight")},"wrong_volume":True},d.get("offer_id"),d.get("sku"))
+                k:d.get(k) for k in ("height","width","length","weight","dimension_unit","weight_unit")
+                if k in d},"wrong_volume":True},d.get("offer_id"),d.get("sku"))
     elif name=="ozon_competitor_prices":
         if card:
             raw=r.fetch(PROMO,"competitor_prices",{"body":{"product_id":card["product_id"]}})["result"]

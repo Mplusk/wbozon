@@ -427,6 +427,9 @@ def enrich_product_page(page, info):
         if not existing.issubset(observed):
             item['identity_status']='sku_mismatch';continue
         item['name']=candidate.get('name')
+        for field in ("is_archived", "images"):
+            if field in candidate:
+                item[field] = candidate[field]
         item['sku_candidates']=list(candidate.get('sku_candidates',[]))
         item['sku_sources']=list(candidate.get('sources',[]))
         item['stock_sku_sources']=list(candidate.get('stock_sources',[]))

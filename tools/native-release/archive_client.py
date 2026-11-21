@@ -4,6 +4,7 @@ import http.client
 import json
 from pathlib import Path
 import re
+import sys
 
 
 def main():
@@ -22,10 +23,12 @@ def main():
         "wb_warehouse_daily",
         "wb_funnel_daily",
     )
-    for dataset in datasets:
+    requests = (("calculator", "sync_cost_catalog", {}),) if sys.argv[1:] == ["--calculator-sync"] else (
+        (dataset, "archive_market_day", {"dataset": dataset}) for dataset in datasets)
+    for dataset, operation, arguments in requests:
         connection = http.client.HTTPConnection("127.0.0.1", settings["port"], timeout=50)
         try:
-            body = json.dumps({"operation": "archive_market_day", "arguments": {"dataset": dataset}})
+            body = json.dumps({"operation": operation, "arguments": arguments})
             connection.request(
                 "POST",
                 "/api/read",

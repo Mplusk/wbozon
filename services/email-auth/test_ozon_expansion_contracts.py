@@ -238,6 +238,20 @@ class OzonExpansionContracts(unittest.TestCase):
         self.assertEqual(str(item['revenue']), '113.25')
         self.assertIsNone(item.get('currency'))
 
+    def test_daily_funnel_keeps_basic_metrics_when_ozon_omits_advanced_columns(self):
+        path = '/v1/analytics/data'
+        row = {"dimensions": [{"id": SKU, "name": "Fixture"}, {"id": "2026-10-03", "name": "2026-10-03"}],
+               "metrics": [3, 113]}
+        args = {"sku": SKU, "date_from": "2026-10-03", "date_to": "2026-10-03", "include_funnel": True}
+        out, wire = self.read("ozon_sku_daily", args, {path: {"result": {"data": [row]}}})
+        self.assertIn("hits_view_pdp", wire.body_for(path)["metrics"])
+        self.assertEqual(out["funnel"]["status"], "base_metrics_only")
+        self.assertEqual(out["funnel"]["required_subscription"], "Premium Plus")
+        self.assertFalse(out["complete"])
+        self.assertTrue(out["base_metrics_complete"])
+        self.assertEqual(out["items"][0]["ordered_units"], 3)
+        self.assertNotIn("hits_view_pdp", out["items"][0])
+
     def test_supply_orders_fetch_details_without_losing_the_list_cursor(self):
         listing = '/v3/supply-order/list'
         details = '/v3/supply-order/get'

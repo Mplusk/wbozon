@@ -1,0 +1,15 @@
+[Unit]
+Description=Read marketplace catalogues for the WBOzon cost calculator
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -B -I /usr/local/libexec/wbozon-cd/cost_sync_client.py --calculator-sync
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+TimeoutStartSec=60

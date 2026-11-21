@@ -80,6 +80,8 @@ FIELDS = {
     "probe_arguments":{"type":"object","additionalProperties":True},
     "refresh_capabilities": {"type":"boolean"},
     "archive": {"type":"boolean"},
+    "date": DATE, "marketplace": choices("ozon", "wb", "site"),
+    "product_status": choices("draft", "active", "archived"), "has_cost": {"type": "boolean"},
     "mapping": {
         "type": "object",
         "properties": {"ozon_offer_id": TEXT, "wb_vendor_code": TEXT, "wb_nm_id": ID,"avito_item_id":ID,"avito_article":TEXT},
@@ -90,6 +92,13 @@ FIELDS = {
 
 # Parameters in the third column are mandatory; modes are available on every tool.
 TOOLS = {
+    "cost_card": ("Себестоимость и состав товара по внутреннему артикулу или коду площадки на дату.",
+                  "article marketplace date", "article"),
+    "cost_list": ("Товары калькулятора с себестоимостью, статусом и привязками.",
+                  "product_status has_cost marketplace query limit offset", ""),
+    "cost_history": ("Версии расчёта себестоимости товара за период.",
+                     "article marketplace date_from date_to limit offset", "article"),
+    "cost_inbox": ("Предложения синхронизации каталога, ожидающие подтверждения владельца.", "limit offset", ""),
     "wb_supplies": (
         "Поставки FBW за период по дате создания. Склады, даты, статус и коэффициент из деталей.",
         "date_from date_to status_ids warehouse_id limit offset article",
