@@ -341,3 +341,27 @@ class CalculatorTests(unittest.TestCase):
                       "PETG-NEW", "885", "Оранжевый", "Тестовый поставщик", "01.11.2026"):
             self.assertIn(value, listing)
         self.assertIn('name="ref_id" value="PETG-NEW"', page)
+        self.assertIn('value="saved:Оранжевый" selected>Оранжевый', page)
+        self.assertIn('value="saved:white">white', page)
+
+        color_card = dict(fields, article="test-colors", pack_ready="1", part_name=["body", "clip", "base", ""],
+                          part_count=["1", "1", "1", "1"], part_printer=["f1", "f1", "f1", ""],
+                          part_hours=["1", "1", "1", ""], part_material=["black", "white", "white", ""],
+                          part_weight=["40", "20", "15", ""], part_color=["saved:Оранжевый", "new", "", ""],
+                          part_color_new=["", "  Бордовый  ", "", ""])
+        self.assertEqual(call("POST", "__Host-sid=" + sid, "https://test.example",
+                              dict(color_card, part_color_new=["", "", "", ""]))[0], "400 Bad Request")
+        self.assertEqual(call("POST", "__Host-sid=" + sid, "https://test.example", color_card)[0], "303 See Other")
+        parts = self.store.resolve("test-colors")["parts"]
+        self.assertEqual([part["color"] for part in parts], ["Оранжевый", "Бордовый", ""])
+        self.assertCountEqual(self.store.at("test-colors", None)["calculation"]["colors"], ["Оранжевый", "Бордовый", "white"])
+        _, card_page, _ = call(cookie="__Host-sid=" + sid, query="tab=calculator&view=card&article=test-colors")
+        self.assertIn('value="saved:Бордовый" selected>Бордовый', card_page)
+        self.assertIn('value="" selected>Из материала', card_page)
+        self.assertIn('value="new">Новый цвет…', card_page)
+        self.assertIn('name="part_color_new"', card_page)
+
+        new_material = dict(edit_material, fixed_id="", ref_id="new-material", color="saved:Бордовый", color_new="")
+        self.assertEqual(call("POST", "__Host-sid=" + sid, "https://test.example", new_material, query=query)[0], "303 See Other")
+        self.assertEqual(next(r["color"] for r in self.store.references() if r["id"] == "new-material"), "Бордовый")
+        self.assertIn('value="saved:Бордовый">Бордовый', call(cookie="__Host-sid=" + sid, query=query)[1])

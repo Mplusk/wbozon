@@ -51,6 +51,36 @@ def select(label, key, choices, current=None):
     return f'<label>{h(label)}<select name="{h(key)}">{options}</select></label>'
 
 
+def _saved_colors(refs, products):
+    names = [ref.get("color") for ref in refs if ref["kind"] == "material"]
+    names.extend(part.get("color") for product in products for part in product.get("parts", []))
+    colors = {}
+    for name in names:
+        if name:
+            colors.setdefault(name.casefold(), name)
+    return colors
+
+
+def _color_select(key, colors, current, empty_label):
+    if current:
+        colors = {**colors, current.casefold(): current}
+    choices = [("", empty_label)]
+    choices.extend(("saved:" + color, color) for color in sorted(colors.values(), key=str.casefold))
+    choices.append(("new", "Новый цвет…"))
+    return ('<div data-cost-color>' + select("Цвет", key, choices, "saved:" + current if current else "") +
+            '<div data-cost-new-color hidden>' + control("Название нового цвета", key + "_new") + "</div></div>")
+
+
+def _submitted_color(value, new):
+    if new is None:
+        return catalog.text(value)
+    if value == "new":
+        return catalog.text(new, required=True)
+    if value and not value.startswith("saved:"):
+        raise catalog.CatalogError("Выберите цвет из списка.")
+    return catalog.text(value.removeprefix("saved:"))
+
+
 def hidden(name, value):
     return f'<input type="hidden" name="{h(name)}" value="{h(value)}">'
 
@@ -124,7 +154,7 @@ def _box(reference_rows, kind):
                             for p in reference_rows if p["kind"] == kind]
 
 
-def _parts(card, refs):
+def _parts(card, refs, colors):
     def row(data, material):
         return ('<div class="calc-input-row">' + control("Деталь", "part_name", data.get("name")) +
                 control("Штук в товаре", "part_count", data.get("quantity", 1)) +
@@ -132,7 +162,7 @@ def _parts(card, refs):
                 control("Печать, ч", "part_hours", data.get("hours")) +
                 select("Пластик", "part_material", _box(refs, "material"), material.get("id")) +
                 control("Вес, г", "part_weight", material.get("grams")) +
-                control("Цвет", "part_color", data.get("color")) + "</div>")
+                _color_select("part_color", colors, data.get("color"), "Из материала") + "</div>")
     return _rows("parts", row({}, {}), [row(d, m) for d in card.get("parts", []) for m in d["materials"]])
 
 
@@ -233,7 +263,8 @@ def _card(store, query, csrf):
     fields += control("Комментарий", "comment", data.get("comment"))
     fields += textarea("Фото · один адрес HTTPS на строку", "photos", "\n".join(data.get("photos", [])))
     fields += '<h3>Привязки</h3>' + _links(data if not copying else {})
-    fields += '<h3>Детали</h3><p class="calc-muted">Для нескольких материалов повторите название детали, количество и время печати.</p>' + _parts(data, refs)
+    fields += '<h3>Детали</h3><p class="calc-muted">Для нескольких материалов повторите название детали, количество и время печати.</p>'
+    fields += _parts(data, refs, _saved_colors(refs, store.products()))
     fields += "<h3>Комплектующие</h3>" + _components(data, refs)
     fields += "<h3>Упаковка</h3>" + _package(data, refs)
     fields += '<h3>Дополнительные расходы</h3><div class="calc-grid">' + select(
@@ -288,7 +319,8 @@ def _reference_page(store, query, csrf):
                       for key, label in columns)
     if kind == "material":
         fields += select("Тип пластика", "material_type", list(MATERIAL_TYPES.items()), data.get("type", "other"))
-        fields += control("Цвет", "color", data.get("color")) + control("Поставщик", "supplier", data.get("supplier"))
+        fields += _color_select("color", _saved_colors(refs, store.products()), data.get("color"), "Без цвета")
+        fields += control("Поставщик", "supplier", data.get("supplier"))
     if kind in ("component", "packaging"):
         fields += select("Единица", "unit", list(UNITS.items()), data.get("unit", "pcs"))
     fields += control("Изменения действуют с" if data else "Дата начала действия", "effective", catalog.today(), "date", True)
@@ -370,9 +402,13 @@ def _form_product(values):
             raise ValueError()
         return zip(*columns)
 
+    if "part_color_new" not in values:
+        values = {**values, "part_color_new": [None] * len(values.get("part_color", []))}
     parts = {}
-    for name, count, printer, hours, material, weight, color in lines(
-            ("part_name", "part_count", "part_printer", "part_hours", "part_material", "part_weight", "part_color")):
+    for name, count, printer, hours, material, weight, color_choice, new_color in lines(
+            ("part_name", "part_count", "part_printer", "part_hours", "part_material", "part_weight",
+             "part_color", "part_color_new")):
+        color = _submitted_color(color_choice, new_color)
         if not name and not material and not weight and not printer and not hours and not color:
             continue
         if not name:
@@ -425,7 +461,8 @@ def handle(portal, env, method, session, query, body, reply, start):
         elif action == "save_reference":
             kind, code, existing = get("kind"), get("ref_id"), get("fixed_id")
             data = dict(name=get("ref_name"), active=get("active") == "1", type=get("material_type"),
-                        color=get("color"), supplier=get("supplier"), unit=get("unit"), code=code)
+                        color=_submitted_color(get("color"), get("color_new", None)),
+                        supplier=get("supplier"), unit=get("unit"), code=code)
             data.update({key: get(key) for key in catalog.REFERENCES[kind]})
             ident = store.save_reference(kind, existing or code, data, get("effective"), actor, create=not existing)
             target = dict(view="references", kind=kind, id=ident)

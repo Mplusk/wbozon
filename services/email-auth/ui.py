@@ -65,6 +65,12 @@ document.addEventListener('click', function (event) {
     list.lastElementChild.querySelector('input,select').focus();
   }
 });
+document.addEventListener('change', function (event) {
+  if (!event.target.matches('[data-cost-color] select')) return;
+  const field = event.target.closest('[data-cost-color]').querySelector('[data-cost-new-color]');
+  field.hidden = event.target.value !== 'new';
+  if (!field.hidden) field.querySelector('input').focus();
+});
 const csv = document.getElementById('cost-csv-file');
 if (csv) csv.addEventListener('change', async function () {
   const file = csv.files[0];
