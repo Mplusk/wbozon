@@ -17,10 +17,12 @@ from market_specs import MOSCOW, money, result
 
 STATUSES = ("draft", "active", "archived")
 MARKETS = ("ozon", "wb", "site")
-COST_FIELDS = ("materials", "printing", "defects", "packaging", "marking", "labor", "other")
+COST_FIELDS = ("materials", "printing", "defects", "components", "packaging", "marking", "labor", "other")
+PURCHASE_UNITS = ("pcs", "m", "g")
 REFERENCES = {
     "material": ("price_per_kg",),
     "printer": ("purchase_price", "service_cost", "life_hours", "power_w", "manual_rate"),
+    "component": ("price",),
     "packaging": ("price",),
     "box": ("price", "length_cm", "width_cm", "height_cm", "units_per_box"),
     "marking": ("code_price", "application_price"),
@@ -141,6 +143,8 @@ def product(data):
                   for k in ("length_cm", "width_cm", "height_cm", "weight_g")}
     consumables = [{"id": text(r.get("id", ""), required=True), "quantity": number(r.get("quantity"), positive=True)}
                    for r in _entries(package.get("consumables", []), 50)]
+    components = [{"id": text(row.get("id", ""), required=True), "quantity": number(row.get("quantity"), positive=True)}
+                  for row in _entries(data.get("components", []), 50)]
     defect = number(data.get("defect_percent"), optional=True)
     if defect is not None and Decimal(defect) >= 100:
         raise CatalogError("Брак должен быть меньше 100%.")
@@ -151,7 +155,7 @@ def product(data):
     return dict(article=text(data.get("article", ""), required=True, maximum=128),
                 name=text(data.get("name", ""), required=True), status=state, links=links,
                 photos=list(dict.fromkeys(_photo(p) for p in photos)),
-                comment=text(data.get("comment", ""), maximum=1000), parts=parts,
+                comment=text(data.get("comment", ""), maximum=1000), parts=parts, components=components,
                 package=dict(dimensions, consumables=consumables, box=text(package.get("box", "")),
                              configured=package.get("configured") is True),
                 marking_required=marking_required, marking=marking if marking_required else "",
@@ -179,10 +183,10 @@ def reference(kind, value):
         if material_type not in ("PLA", "PETG", "ABS", "TPU", "other"):
             raise CatalogError("Выберите тип пластика.")
         data.update(type=material_type, color=text(value.get("color", "")), supplier=text(value.get("supplier", "")))
-    if kind == "packaging":
+    if kind in ("component", "packaging"):
         unit = value.get("unit", "pcs")
-        if unit not in ("pcs", "m", "g"):
-            raise CatalogError("Укажите единицу расходника.")
+        if unit not in PURCHASE_UNITS:
+            raise CatalogError("Укажите единицу измерения.")
         data["unit"] = unit
     return data
 
@@ -193,6 +197,7 @@ def dependencies(card):
         used.add(("printer", part["printer"]))
         used.update(("material", item["id"]) for item in part["materials"])
     used.update(("packaging", item["id"]) for item in card["package"]["consumables"])
+    used.update(("component", item["id"]) for item in card.get("components", []))
     if card["package"]["box"]:
         used.add(("box", card["package"]["box"]))
     if card["marking_required"]:
@@ -244,6 +249,18 @@ def calculate(card, refs):
                     colors.add(color)
         defect = Decimal(defect)
         costs["defects"] = (costs["materials"] + costs["printing"]) * defect / (100 - defect)
+        component_items = []
+        for item in card.get("components", []):
+            ref = refs["component", item["id"]]
+            quantity = Decimal(item["quantity"])
+            if ref["unit"] == "pcs" and quantity != quantity.to_integral_value():
+                raise CatalogError("Штучные комплектующие указываются целым количеством.")
+            amount = quantity * Decimal(ref["price"])
+            costs["components"] += amount
+            component_items.append(dict(id=item["id"], name=ref["name"], quantity=item["quantity"], unit=ref["unit"],
+                                        unit_price=display(ref["price"]), amount=display(amount)))
+        if not component_items:
+            costs.pop("components")
         for item in card["package"]["consumables"]:
             ref = refs["packaging", item["id"]]
             quantity = Decimal(item["quantity"])
@@ -262,7 +279,7 @@ def calculate(card, refs):
         total = sum(costs.values())
         return dict(status="calculated", currency="RUB", amount=display(total), exact=format(total, "f"),
                     components={key: {"amount": display(value), "percent": display(value / total * 100 if total else 0)}
-                                for key, value in costs.items()}, print_hours=format(hours, "f"),
+                                for key, value in costs.items()}, component_items=component_items, print_hours=format(hours, "f"),
                     plastic_grams=format(sum(grams.values()), "f"), colors=sorted(colors), printers=sorted(printers),
                     materials=[dict(id=key, name=refs["material", key]["name"], grams=format(weight, "f"))
                                for key, weight in sorted(grams.items())])

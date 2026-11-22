@@ -352,6 +352,9 @@ jobs:
           deployed_calculator="$RUNNER_TEMP/marketplace-calculator-deployed/service"
           mkdir -p "$deployed_calculator"
           git archive d091774eae685932afd71e781879f9cb931c593f:services/email-auth | tar -x -C "$deployed_calculator"
+          calculator_catalogue="$RUNNER_TEMP/marketplace-calculator-catalogue/service"
+          mkdir -p "$calculator_catalogue"
+          git archive ad46c43c5774ef67ef030345851f6a7804c900d9:services/email-auth | tar -x -C "$calculator_catalogue"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit b151124d70320946c17d22b08b1daa63964018de \
@@ -376,6 +379,7 @@ jobs:
             --successor dc1cf83880fbdddc7bb30cf5cbb1b4ff36a82768 "$active_service" \
             --successor bd89da546211a39066fc279c964c23478655e2e1 "$candidate_base" \
             --successor d091774eae685932afd71e781879f9cb931c593f "$deployed_calculator" \
+            --successor ad46c43c5774ef67ef030345851f6a7804c900d9 "$calculator_catalogue" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -443,7 +447,11 @@ jobs:
           mkdir -p "$deployed_calculator"
           git archive d091774eae685932afd71e781879f9cb931c593f:services/email-auth | tar -x -C "$deployed_calculator"
           check_pair "$candidate_base" "$deployed_calculator"
-          check_pair "$deployed_calculator" "$packaged"
+          calculator_catalogue="$RUNNER_TEMP/marketplace-calculator-catalogue/service"
+          mkdir -p "$calculator_catalogue"
+          git archive ad46c43c5774ef67ef030345851f6a7804c900d9:services/email-auth | tar -x -C "$calculator_catalogue"
+          check_pair "$deployed_calculator" "$calculator_catalogue"
+          check_pair "$calculator_catalogue" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

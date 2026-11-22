@@ -92,7 +92,7 @@ FIELDS = {
 
 # Parameters in the third column are mandatory; modes are available on every tool.
 TOOLS = {
-    "cost_card": ("Себестоимость и состав товара по внутреннему артикулу или коду площадки на дату.",
+    "cost_card": ("Себестоимость, состав товара и покупные комплектующие по внутреннему артикулу или коду площадки на дату.",
                   "article marketplace date", "article"),
     "cost_list": ("Товары калькулятора с себестоимостью, статусом и привязками.",
                   "product_status has_cost marketplace query limit offset", ""),

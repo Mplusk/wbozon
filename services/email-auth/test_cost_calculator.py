@@ -222,6 +222,40 @@ class CalculatorTests(unittest.TestCase):
         self.assertEqual(new.resolve("3000030")["article"], "300030")
         self.assertIsNotNone(new.at("300030", None)["calculation"]["amount"])
 
+    def test_lamp_components_are_costed_by_quantity_and_effective_price(self):
+        refs = [("cable", "Кабель", "m", "58.40", "1,25"),
+                ("socket", "Цоколь", "pcs", "46", "1"),
+                ("bulb", "Лампочка", "pcs", "125", "1"),
+                ("collet", "Цанга", "pcs", "17.50", "2")]
+        for ident, name, unit, price, _ in refs:
+            self.store.save_reference("component", ident, dict(name=name, unit=unit, price=price), "2026-10-01")
+        base = self.store.at("300030", "2026-09-30", redact_exact=False)["calculation"]
+        card = self.store.resolve("300030")
+        card["components"] = [dict(id=ident, quantity=quantity) for ident, _, _, _, quantity in refs]
+        self.store.save_product(card, "2026-10-01")
+
+        october = cost_catalog.read(self.store, "cost_card", {"article": "300030", "date": "2026-10-31"})["items"][0]["calculation"]
+        self.assertEqual(october["amount"], cost_catalog.display(Decimal(base["exact"]) + Decimal("279")))
+        self.assertEqual(october["components"]["components"]["amount"], "279.00")
+        self.assertEqual(october["components"]["defects"]["amount"], base["components"]["defects"]["amount"])
+        self.assertEqual(october["plastic_grams"], base["plastic_grams"])
+        self.assertEqual([(row["name"], row["unit"], row["quantity"], row["amount"]) for row in october["component_items"]],
+                         [("Кабель", "m", "1.25", "73.00"), ("Цоколь", "pcs", "1", "46.00"),
+                          ("Лампочка", "pcs", "1", "125.00"), ("Цанга", "pcs", "2", "35.00")])
+        self.store.save_reference("component", "cable", dict(name="Кабель", unit="m", price="70.40"), "2026-11-01")
+        november = self.store.at("300030", "2026-11-22")["calculation"]
+        self.assertEqual(november["components"]["components"]["amount"], "294.00")
+        self.assertEqual(self.store.at("300030", "2026-10-31")["calculation"], october)
+        self.assertEqual(self.store.at("300030", "2026-09-30", redact_exact=False)["calculation"], base)
+
+        card["components"][1]["quantity"] = "0.5"
+        with self.assertRaisesRegex(cost_catalog.CatalogError, "целым количеством"):
+            self.store.save_product(card, "2026-11-22")
+        self.assertEqual(self.store.at("300030", "2026-11-22")["calculation"], november)
+        copy = cost_catalog.Store(Path(self.folder.name) / "lamp-copy.sqlite")
+        copy.csv_import(self.store.csv_export(), "owner")
+        self.assertEqual(copy.at("300030", None)["calculation"]["component_items"], november["component_items"])
+
     def test_browser_owner_session_and_origin_are_required(self):
         login = LoginApp(str(Path(self.folder.name) / "login.sqlite3"), "s" * 40, "https://test.example")
         portal = Portal(login, Vault(self.vault_path, b"v" * 32), "f" * 64,
@@ -237,7 +271,7 @@ class CalculatorTests(unittest.TestCase):
             conn.close()
 
         def call(method="GET", cookie=None, origin=None, fields=None, query="tab=calculator&view=card&article=300030"):
-            raw = urlencode(fields or {}).encode()
+            raw = urlencode(fields or {}, doseq=True).encode()
             env = {"PATH_INFO": "/settings", "QUERY_STRING": query,
                    "REQUEST_METHOD": method, "HTTP_HOST": "test.example", "HTTP_COOKIE": cookie or "",
                    "HTTP_ORIGIN": origin, "CONTENT_TYPE": "application/x-www-form-urlencoded",
@@ -257,7 +291,16 @@ class CalculatorTests(unittest.TestCase):
         self.assertIn("Test black PLA", page)
         self.assertEqual(call("POST", "__Host-sid=" + sid, "https://another.example", {"csrf": csrf})[0], "403 Forbidden")
         self.assertEqual(call("POST", "__Host-sid=" + sid, "https://test.example", {"csrf": "wrong"})[0], "403 Forbidden")
+        self.assertIn("Добавить комплектующее в справочник", page)
+        reference = {"csrf": csrf, "action": "save_reference", "kind": "component", "ref_id": "cable",
+                     "ref_name": "Кабель", "active": "1", "unit": "m", "price": "55", "effective": "2026-11-01"}
+        self.assertEqual(call("POST", "__Host-sid=" + sid, "https://test.example", reference,
+                              query="tab=calculator&view=references&kind=component")[0], "303 See Other")
         fields = {"csrf": csrf, "action": "save_product", "article": "draft-1", "name": "Test draft",
-                  "status": "draft", "revision": "0", "effective": "2026-11-01"}
+                  "status": "draft", "revision": "0", "effective": "2026-11-01",
+                  "component_id": ["cable", ""], "component_quantity": ["1,25", ""]}
         self.assertEqual(call("POST", "__Host-sid=" + sid, "https://test.example", fields)[0], "303 See Other")
         self.assertEqual(self.store.resolve("draft-1")["status"], "draft")
+        self.assertEqual(self.store.resolve("draft-1")["components"], [{"id": "cable", "quantity": "1.25"}])
+        self.assertIn('value="cable" selected>Кабель · м', call(cookie="__Host-sid=" + sid,
+                      query="tab=calculator&view=card&article=draft-1")[1])

@@ -15,6 +15,7 @@ BASE = "/settings?tab=calculator"
 LABELS = {"draft": "Черновик", "active": "В работе", "archived": "Архив",
           "ozon": "Ozon", "wb": "Wildberries", "site": "Сайт",
           "material": "Материалы", "printer": "Принтеры", "packaging": "Расходники",
+          "component": "Комплектующие", "components": "Комплектующие",
           "box": "Коробки", "marking": "Маркировка", "settings": "Общие настройки",
           "materials": "Материалы", "printing": "Печать", "defects": "Брак", "labor": "Работа", "other": "Прочее"}
 FIELDS = {"price_per_kg": "Цена за кг, ₽", "purchase_price": "Цена покупки, ₽", "service_cost": "Обслуживание за весь ресурс, ₽",
@@ -22,7 +23,8 @@ FIELDS = {"price_per_kg": "Цена за кг, ₽", "purchase_price": "Цена
           "price": "Цена, ₽", "length_cm": "Длина, см", "width_cm": "Ширина, см", "height_cm": "Высота, см",
           "weight_g": "Вес с упаковкой, г", "units_per_box": "Товаров в коробке", "code_price": "Цена кода, ₽",
           "application_price": "Нанесение, ₽", "electricity_per_kwh": "Электроэнергия, ₽/кВт·ч",
-          "defect_percent": "Брак, %", "labor_per_hour": "Работа, ₽/ч"}
+          "defect_percent": "Брак, %", "labor_per_hour": "Работа, ₽/ч", "component_quantity": "Количество на изделие"}
+UNITS = {"pcs": "шт.", "m": "м", "g": "г"}
 
 
 def h(value):
@@ -142,6 +144,20 @@ def _links(card):
     return _rows("links", row({}), [row(item) for item in card.get("links", [])])
 
 
+def _components(card, refs):
+    choices = [("", "—")] + [(item["id"], f"{item['name']} · {UNITS[item['unit']]}" +
+                              (" · архив" if not item["active"] else ""))
+                             for item in refs if item["kind"] == "component"]
+
+    def row(item):
+        return ('<div class="calc-input-row">' + select("Комплектующее", "component_id", choices, item.get("id")) +
+                control(FIELDS["component_quantity"], "component_quantity", item.get("quantity")) + "</div>")
+
+    if len(choices) == 1:
+        return "<p>" + anchor("Добавить комплектующее в справочник", view="references", kind="component") + "</p>"
+    return _rows("components", row({}), [row(item) for item in card.get("components", [])])
+
+
 def _package(card, refs):
     data = card.get("package", {})
     def row(item):
@@ -158,13 +174,20 @@ def _breakdown(version):
         return '<p class="calc-muted">Для выбранной даты расчёта пока нет.</p>'
     calc = version["calculation"]
     if calc["status"] != "calculated":
-        return '<p class="calc-muted">Заполните детали, упаковку и настройки расчёта.</p>'
+        missing = [item.removeprefix("component/") for item in calc.get("missing", []) if item.startswith("component/")]
+        message = ("Нет цены на выбранную дату для комплектующих " + ", ".join(missing)) if missing else (
+            "Заполните детали, упаковку и настройки расчёта.")
+        return '<p class="calc-muted">' + h(message) + "</p>"
     items = tuple((h(LABELS.get(key, key)), currency(value["amount"]), h(value["percent"]) + "%")
                   for key, value in calc["components"].items())
+    components = [(h(item["name"]), h(item["quantity"]) + " " + h(UNITS[item["unit"]]),
+                   currency(item["unit_price"]), currency(item["amount"]))
+                  for item in calc.get("component_items", [])]
     return ('<div class="calc-totals"><div><small>Себестоимость</small><strong>' + currency(calc["amount"]) +
             '</strong></div><div><small>Пластик</small><strong>' + h(calc["plastic_grams"]) +
             ' г</strong></div><div><small>Печать</small><strong>' + h(calc["print_hours"]) +
             " ч</strong></div></div>" + table(("Статья", "Сумма", "Доля"), items) +
+            (table(("Комплектующее", "Количество", "Цена за единицу", "Сумма"), components) if components else "") +
             "<p>Материалы · " + h(", ".join(m["name"] for m in calc["materials"])) + "<br>Цвета · " +
             h(", ".join(calc["colors"]) or "—") + "<br>Принтеры · " + h(", ".join(calc["printers"])) + "</p>")
 
@@ -185,7 +208,7 @@ def _history(store, article, query):
             left, right = a["calculation"].get("components", {}), b["calculation"].get("components", {})
             html += table(("Статья", "№" + str(a["version"]), "№" + str(b["version"])),
                           [(h(LABELS[k]), currency(left.get(k, {}).get("amount")), currency(right.get(k, {}).get("amount")))
-                           for k in catalog.COST_FIELDS])
+                           for k in catalog.COST_FIELDS if k != "components" or k in left or k in right])
     return html
 
 
@@ -210,6 +233,7 @@ def _card(store, query, csrf):
     fields += textarea("Фото · один адрес HTTPS на строку", "photos", "\n".join(data.get("photos", [])))
     fields += '<h3>Привязки</h3>' + _links(data if not copying else {})
     fields += '<h3>Детали</h3><p class="calc-muted">Для нескольких материалов повторите название детали, количество и время печати.</p>' + _parts(data, refs)
+    fields += "<h3>Комплектующие</h3>" + _components(data, refs)
     fields += "<h3>Упаковка</h3>" + _package(data, refs)
     fields += '<h3>Дополнительные расходы</h3><div class="calc-grid">' + select(
         "Честный знак", "marking_required", [("0", "Не требуется"), ("1", "Требуется")], str(int(data.get("marking_required", False))))
@@ -238,14 +262,15 @@ def _reference_page(store, query, csrf):
     if kind != "settings":
         fields += control("Код позиции", "ref_id", data.get("id"), required=True) + control("Название", "ref_name", data.get("name"), required=True)
         fields += select("Статус", "active", [("1", "Активна"), ("0", "Архив")], str(int(data.get("active", True))))
-    fields += "".join(control(FIELDS[key], key, data.get(key, 1 if key == "units_per_box" else 0 if key in ("service_cost", "labor_per_hour") else ""))
+    fields += "".join(control("Цена за единицу, ₽" if kind == "component" and key == "price" else FIELDS[key],
+                              key, data.get(key, 1 if key == "units_per_box" else 0 if key in ("service_cost", "labor_per_hour") else ""))
                       for key in catalog.REFERENCES[kind])
     if kind == "material":
         fields += select("Тип пластика", "material_type", [(k, k if k != "other" else "Другое") for k in ("PLA", "PETG", "ABS", "TPU", "other")],
                          data.get("type", "other"))
         fields += control("Цвет", "color", data.get("color")) + control("Поставщик", "supplier", data.get("supplier"))
-    if kind == "packaging":
-        fields += select("Единица", "unit", [("pcs", "шт."), ("m", "м"), ("g", "г")], data.get("unit", "pcs"))
+    if kind in ("component", "packaging"):
+        fields += select("Единица", "unit", list(UNITS.items()), data.get("unit", "pcs"))
     fields += control("Дата начала действия", "effective", catalog.today(), "date", True)
     listing = [(anchor(r["name"], view="references", kind=kind, id=r["id"]), h(r["id"]),
                 "Активна" if r["active"] else "Архив") for r in rows]
@@ -341,11 +366,13 @@ def _form_product(values):
     links = [dict(marketplace=market, code=code, marketplace_id=ident) for market, code, ident in
              lines(("link_market", "link_code", "link_id")) if market or code or ident]
     consumables = [dict(id=ident, quantity=quantity) for ident, quantity in lines(("pack_id", "pack_quantity")) if ident or quantity]
+    components = [dict(id=ident, quantity=quantity)
+                  for ident, quantity in lines(("component_id", "component_quantity")) if ident or quantity]
     article, existing, revision = get("article"), get("existing"), int(get("revision", "0"))
     if existing and existing != article:
         raise catalog.CatalogError("Внутренний артикул существующего товара изменить нельзя.")
     card = dict(article=article, name=get("name"), status=get("status"), comment=get("comment"), links=links,
-                photos=[p.strip() for p in get("photos").splitlines() if p.strip()], parts=list(parts.values()),
+                photos=[p.strip() for p in get("photos").splitlines() if p.strip()], parts=list(parts.values()), components=components,
                 package=dict(configured=get("pack_ready") == "1", box=get("pack_box"), consumables=consumables,
                              **{k: get(k) for k in ("weight_g", "length_cm", "width_cm", "height_cm")}),
                 marking_required=get("marking_required") == "1", marking=get("marking"), defect_percent=get("defect_percent"),
