@@ -222,6 +222,30 @@ class CalculatorTests(unittest.TestCase):
         self.assertEqual(new.resolve("3000030")["article"], "300030")
         self.assertIsNotNone(new.at("300030", None)["calculation"]["amount"])
 
+    def test_reference_code_edit_keeps_links_and_effective_costs(self):
+        material = dict(name="Test black PLA", type="PLA", color="black", price_per_kg=1450)
+        previous = self.store.at("300030", "2026-09-30")
+        self.store.save_reference("material", "black", dict(material, code="NEW-01"), "2026-10-15")
+        saved = next(r for r in self.store.references() if r["kind"] == "material" and r["id"] == "black")
+        self.assertEqual((saved["code"], saved["effective_from"]), ("NEW-01", "2026-09-01"))
+        self.assertEqual(self.store.at("300030", "2026-10-31"), previous)
+        self.assertIsNotNone(self.store.uniform("300030", "2026-10-01", "2026-10-31"))
+
+        with self.assertRaisesRegex(cost_catalog.CatalogError, "код уже используется"):
+            self.store.save_reference("material", "NEW-01", material, "2026-10-20", create=True)
+        new_ident = self.store.save_reference("material", "black", material, "2026-10-20", create=True)
+        self.assertNotEqual(new_ident, "black")
+        self.assertEqual(next(r["code"] for r in self.store.references() if r["id"] == new_ident), "black")
+
+        self.store.save_reference("material", "black", dict(material, price_per_kg=1000), "2026-11-01")
+        updated = self.store.at("300030", "2026-11-22")
+        self.assertLess(Decimal(updated["calculation"]["amount"]), Decimal(previous["calculation"]["amount"]))
+        self.assertEqual(updated["product"]["parts"][0]["materials"][0]["id"], "black")
+        self.assertEqual(self.store.at("300030", "2026-10-31"), previous)
+        copy = cost_catalog.Store(Path(self.folder.name) / "codes-copy.sqlite")
+        copy.csv_import(self.store.csv_export(), "owner")
+        self.assertEqual(next(r["code"] for r in copy.references() if r["id"] == "black"), "NEW-01")
+
     def test_lamp_components_are_costed_by_quantity_and_effective_price(self):
         refs = [("cable", "Кабель", "m", "58.40", "1,25"),
                 ("socket", "Цоколь", "pcs", "46", "1"),
@@ -304,3 +328,16 @@ class CalculatorTests(unittest.TestCase):
         self.assertEqual(self.store.resolve("draft-1")["components"], [{"id": "cable", "quantity": "1.25"}])
         self.assertIn('value="cable" selected>Кабель · м', call(cookie="__Host-sid=" + sid,
                       query="tab=calculator&view=card&article=draft-1")[1])
+        edit_material = {"csrf": csrf, "action": "save_reference", "kind": "material", "fixed_id": "black",
+                         "ref_id": "PETG-NEW", "ref_name": "Тестовый PETG", "active": "1", "price_per_kg": "885",
+                         "material_type": "PETG", "color": "Оранжевый", "supplier": "Тестовый поставщик",
+                         "effective": "2026-11-01"}
+        query = "tab=calculator&view=references&kind=material&id=black"
+        self.assertEqual(call("POST", "__Host-sid=" + sid, "https://test.example", edit_material, query=query)[0], "303 See Other")
+        status, page, _ = call(cookie="__Host-sid=" + sid, query=query)
+        self.assertEqual(status, "200 OK")
+        listing = page.split("</table>", 1)[0]
+        for value in ("Цена за кг, ₽", "Тип пластика", "Цвет", "Поставщик", "Действует с", "Изменить",
+                      "PETG-NEW", "885", "Оранжевый", "Тестовый поставщик", "01.11.2026"):
+            self.assertIn(value, listing)
+        self.assertIn('name="ref_id" value="PETG-NEW"', page)

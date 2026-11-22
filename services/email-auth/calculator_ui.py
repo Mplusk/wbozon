@@ -25,6 +25,7 @@ FIELDS = {"price_per_kg": "Цена за кг, ₽", "purchase_price": "Цена
           "application_price": "Нанесение, ₽", "electricity_per_kwh": "Электроэнергия, ₽/кВт·ч",
           "defect_percent": "Брак, %", "labor_per_hour": "Работа, ₽/ч", "component_quantity": "Количество на изделие"}
 UNITS = {"pcs": "шт.", "m": "м", "g": "г"}
+MATERIAL_TYPES = {"PLA": "PLA", "PETG": "PETG", "ABS": "ABS", "TPU": "TPU", "other": "Другое"}
 
 
 def h(value):
@@ -251,41 +252,59 @@ def _card(store, query, csrf):
     return html
 
 
+def _reference_table(kind, rows, columns):
+    if not rows or kind == "settings":
+        return ""
+    if kind == "material":
+        columns = columns + [("type", "Тип пластика"), ("color", "Цвет"), ("supplier", "Поставщик")]
+    elif kind in ("component", "packaging"):
+        columns = columns + [("unit", "Единица")]
+    listing = []
+    for row in rows:
+        query = dict(view="references", kind=kind, id=row["id"])
+        values = dict(row, type=MATERIAL_TYPES.get(row.get("type")), unit=UNITS.get(row.get("unit")))
+        effective = date.fromisoformat(row["effective_from"]).strftime("%d.%m.%Y") if row["effective_from"] else "—"
+        listing.append((anchor(row["name"], **query), h(row["code"]),
+                        *(h(values.get(key) if values.get(key) not in ("", None) else "—") for key, _ in columns),
+                        "Активна" if row["active"] else "Архив", h(effective), anchor("Изменить", **query)))
+    return table(("Позиция", "Код", *(label for _, label in columns), "Статус", "Действует с", "Действия"), listing)
+
+
 def _reference_page(store, query, csrf):
     kind = query.get("kind", "material")
     if kind not in catalog.REFERENCES:
         raise ValueError()
     options = '<div class="calc-tabs">' + "".join(anchor(LABELS[k], view="references", kind=k) for k in catalog.REFERENCES) + "</div>"
-    rows = [r for r in store.references() if r["kind"] == kind]
+    refs = store.references()
+    rows = [r for r in refs if r["kind"] == kind]
     data = next((r for r in rows if r["id"] == query.get("id") or kind == "settings"), {})
     fields = hidden("kind", kind) + hidden("fixed_id", data.get("id", ""))
     if kind != "settings":
-        fields += control("Код позиции", "ref_id", data.get("id"), required=True) + control("Название", "ref_name", data.get("name"), required=True)
+        fields += control("Код позиции", "ref_id", data.get("code"), required=True) + control("Название", "ref_name", data.get("name"), required=True)
         fields += select("Статус", "active", [("1", "Активна"), ("0", "Архив")], str(int(data.get("active", True))))
-    fields += "".join(control("Цена за единицу, ₽" if kind == "component" and key == "price" else FIELDS[key],
-                              key, data.get(key, 1 if key == "units_per_box" else 0 if key in ("service_cost", "labor_per_hour") else ""))
-                      for key in catalog.REFERENCES[kind])
+    columns = [(key, "Цена за единицу, ₽" if kind == "component" and key == "price" else FIELDS[key])
+               for key in catalog.REFERENCES[kind]]
+    fields += "".join(control(label, key, data.get(key, 1 if key == "units_per_box" else 0 if key in ("service_cost", "labor_per_hour") else ""))
+                      for key, label in columns)
     if kind == "material":
-        fields += select("Тип пластика", "material_type", [(k, k if k != "other" else "Другое") for k in ("PLA", "PETG", "ABS", "TPU", "other")],
-                         data.get("type", "other"))
+        fields += select("Тип пластика", "material_type", list(MATERIAL_TYPES.items()), data.get("type", "other"))
         fields += control("Цвет", "color", data.get("color")) + control("Поставщик", "supplier", data.get("supplier"))
     if kind in ("component", "packaging"):
         fields += select("Единица", "unit", list(UNITS.items()), data.get("unit", "pcs"))
-    fields += control("Дата начала действия", "effective", catalog.today(), "date", True)
-    listing = [(anchor(r["name"], view="references", kind=kind, id=r["id"]), h(r["id"]),
-                "Активна" if r["active"] else "Архив") for r in rows]
+    fields += control("Изменения действуют с" if data else "Дата начала действия", "effective", catalog.today(), "date", True)
     if data and kind == "printer":
         rate = (Decimal(data["manual_rate"]) if data["manual_rate"] is not None else
                 (Decimal(data["purchase_price"]) + Decimal(data["service_cost"])) / Decimal(data["life_hours"]))
-        tariff = next((item.get("electricity_per_kwh") for item in store.references() if item["kind"] == "settings"), None)
+        tariff = next((item.get("electricity_per_kwh") for item in refs if item["kind"] == "settings"), None)
         energy = Decimal(tariff) * Decimal(data["power_w"]) / 1000 if tariff is not None else None
         fields += "<p>Амортизация · " + currency(catalog.display(rate)) + "/ч<br>Электроэнергия · " + (
             currency(catalog.display(energy)) + "/ч" if energy is not None else "укажите тариф") + "</p>"
     return options + "<h2>" + h(LABELS[kind]) + "</h2>" + (
-        table(("Позиция", "Код", "Статус"), listing) if listing and kind != "settings" else "") + (
+        _reference_table(kind, rows, columns)) + (
         "<p>" + anchor("Добавить позицию", view="references", kind=kind) + "</p>" if data and kind != "settings" else "") + (
         '<div class="calc-panel">' + form(csrf, "save_reference", '<div class="calc-grid">' + fields +
-                                         '</div><button>Сохранить</button>', view="references", kind=kind) + "</div>")
+                                         "</div><button>" + ("Сохранить изменения" if data else "Сохранить") + "</button>",
+                                         view="references", kind=kind) + "</div>")
 
 
 def _inbox(store, csrf):
@@ -404,13 +423,11 @@ def handle(portal, env, method, session, query, body, reply, start):
             store.save_product(card, day, actor, rev)
             target = dict(view="card", article=card["article"])
         elif action == "save_reference":
-            kind, ident = get("kind"), get("ref_id")
-            if get("fixed_id") and kind != "settings" and ident != get("fixed_id"):
-                raise catalog.CatalogError("Код существующей позиции изменить нельзя.")
+            kind, code, existing = get("kind"), get("ref_id"), get("fixed_id")
             data = dict(name=get("ref_name"), active=get("active") == "1", type=get("material_type"),
-                        color=get("color"), supplier=get("supplier"), unit=get("unit"))
+                        color=get("color"), supplier=get("supplier"), unit=get("unit"), code=code)
             data.update({key: get(key) for key in catalog.REFERENCES[kind]})
-            store.save_reference(kind, ident, data, get("effective"), actor)
+            ident = store.save_reference(kind, existing or code, data, get("effective"), actor, create=not existing)
             target = dict(view="references", kind=kind, id=ident)
         elif action == "inbox":
             ids = [int(value) for value in values.get("id", [])]

@@ -355,6 +355,9 @@ jobs:
           calculator_catalogue="$RUNNER_TEMP/marketplace-calculator-catalogue/service"
           mkdir -p "$calculator_catalogue"
           git archive ad46c43c5774ef67ef030345851f6a7804c900d9:services/email-auth | tar -x -C "$calculator_catalogue"
+          calculator_components="$RUNNER_TEMP/marketplace-calculator-components/service"
+          mkdir -p "$calculator_components"
+          git archive 6b3472ce11a2df31acd7f692bb5189713178bc8b:services/email-auth | tar -x -C "$calculator_components"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit b151124d70320946c17d22b08b1daa63964018de \
@@ -380,6 +383,7 @@ jobs:
             --successor bd89da546211a39066fc279c964c23478655e2e1 "$candidate_base" \
             --successor d091774eae685932afd71e781879f9cb931c593f "$deployed_calculator" \
             --successor ad46c43c5774ef67ef030345851f6a7804c900d9 "$calculator_catalogue" \
+            --successor 6b3472ce11a2df31acd7f692bb5189713178bc8b "$calculator_components" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -451,7 +455,11 @@ jobs:
           mkdir -p "$calculator_catalogue"
           git archive ad46c43c5774ef67ef030345851f6a7804c900d9:services/email-auth | tar -x -C "$calculator_catalogue"
           check_pair "$deployed_calculator" "$calculator_catalogue"
-          check_pair "$calculator_catalogue" "$packaged"
+          calculator_components="$RUNNER_TEMP/marketplace-calculator-components/service"
+          mkdir -p "$calculator_components"
+          git archive 6b3472ce11a2df31acd7f692bb5189713178bc8b:services/email-auth | tar -x -C "$calculator_components"
+          check_pair "$calculator_catalogue" "$calculator_components"
+          check_pair "$calculator_components" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

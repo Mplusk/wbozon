@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import sqlite3
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from market_specs import MOSCOW, money, result
 
@@ -387,11 +388,30 @@ class Store:
         data = reference(kind, value)
         previous = conn.execute("SELECT data FROM cost_references WHERE kind=? AND id=?", (kind, ident)).fetchone()
         old = json.loads(previous[0]) if previous else {}
+        stored = data
+        changed_code = False
+        if kind != "settings":
+            old_code = old.pop("code", ident)
+            code = text(value.get("code", old_code), required=True, maximum=128)
+            other_rows = conn.execute("SELECT id,data FROM cost_references WHERE kind=? AND id<>?", (kind, ident))
+            if any(json.loads(row["data"]).get("code", row["id"]) == code for row in other_rows):
+                raise CatalogError("Этот код уже используется в справочнике.")
+            if code != ident:
+                stored = dict(data, code=code)
+            changed_code = code != old_code
         encoded = _json(data)
-        conn.execute("INSERT INTO cost_reference_versions(kind,ref,effective,data) VALUES(?,?,?,?)", (kind, ident, day, encoded))
+        code_only = False
+        if changed_code and data == old:
+            existing = conn.execute("""SELECT data FROM cost_reference_versions WHERE kind=? AND ref=? AND effective<=?
+                ORDER BY effective DESC,id DESC LIMIT 1""", (kind, ident, day)).fetchone()
+            code_only = bool(existing and json.loads(existing["data"]) == data)
         conn.execute("""INSERT INTO cost_references VALUES(?,?,?) ON CONFLICT(kind,id)
-            DO UPDATE SET data=excluded.data""", (kind, ident, encoded))
-        self.audit(conn, actor, kind, ident, "saved", sorted(k for k in data if data[k] != old.get(k)))
+            DO UPDATE SET data=excluded.data""", (kind, ident, _json(stored)))
+        fields = [key for key in data if data[key] != old.get(key)]
+        self.audit(conn, actor, kind, ident, "saved", sorted(fields + (["code"] if changed_code else [])))
+        if code_only:
+            return
+        conn.execute("INSERT INTO cost_reference_versions(kind,ref,effective,data) VALUES(?,?,?,?)", (kind, ident, day, encoded))
         for row in conn.execute("SELECT article,data FROM cost_products").fetchall():
             card = json.loads(row["data"])
             earlier = conn.execute("""SELECT snapshot FROM cost_versions WHERE article=? AND effective<=?
@@ -408,15 +428,29 @@ class Store:
                 if (kind, ident) in dependencies(old_card):
                     self._version(conn, old_card, version["effective"], f"{kind}/{ident}")
 
-    def save_reference(self, kind, ident, value, day, actor="owner"):
+    def save_reference(self, kind, ident, value, day, actor="owner", *, create=False):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if create and kind != "settings":
+                ident = text(ident, required=True, maximum=128)
+                value = dict(value, code=ident)
+                occupied = conn.execute("SELECT 1 FROM cost_references WHERE kind=? AND id=?", (kind, ident)).fetchone()
+                if occupied:
+                    ident = uuid4().hex
             self._save_reference(conn, kind, ident, value, effective(day), actor)
+        return "default" if kind == "settings" else ident
 
     def references(self):
         with self.connect() as conn:
-            return [dict(json.loads(r["data"]), id=r["id"], kind=r["kind"])
-                    for r in conn.execute("SELECT * FROM cost_references ORDER BY kind,id")]
+            rows = conn.execute("""SELECT r.*, (SELECT v.effective FROM cost_reference_versions v
+                    WHERE v.kind=r.kind AND v.ref=r.id ORDER BY v.id DESC LIMIT 1) AS effective_from
+                FROM cost_references r ORDER BY r.kind,r.id""")
+            items = []
+            for row in rows:
+                value = json.loads(row["data"])
+                value.setdefault("code", row["id"])
+                items.append(dict(value, id=row["id"], kind=row["kind"], effective_from=row["effective_from"]))
+            return items
 
     def products(self):
         with self.connect() as conn:
@@ -492,6 +526,7 @@ class Store:
         sheet.writerow(("kind", "id", "data"))
         for row in self.references():
             kind, ident = row.pop("kind"), row.pop("id")
+            row.pop("effective_from")
             sheet.writerow((kind, "'" + ident if ident.startswith(("=", "+", "-", "@")) else ident, _json(row)))
         for row in self.products():
             row.pop("revision")
