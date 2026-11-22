@@ -758,11 +758,12 @@ class Portal:
             calculator_path = cost_catalog.database_path(self.vault.path) if isinstance(self.vault, Vault) else None
             if calculator_path and cost_catalog.Store.exists(calculator_path):
                 import cost_sync
-                runs = cost_sync.runs(cost_catalog.Store(calculator_path), 1)
-                report["calculator_sync"] = runs[0] if runs else {"status": "waiting_for_first_sync"}
+                report["calculator_sync"] = cost_sync.sync_summary(cost_catalog.Store(calculator_path))
                 for item in report["items"]:
                     if item["tool"] in cost_catalog.TOOLS:
                         item.update(status="available", source="cost_calculator")
+            elif calculator_path:
+                report["calculator_sync"] = {"status": "waiting_for_first_sync", "time_zone": "Europe/Moscow", "recent_runs": []}
             report["seller_capabilities"]=market_specs.seller_reports.capabilities(self.vault,self.finance_gate_dir,
                     args.get("refresh_capabilities",False),self.read_gateway)
             caps=report["seller_capabilities"]
@@ -793,6 +794,8 @@ class Portal:
                 calculator = cost_catalog.Store(calculator_path)
                 args, cost_card, resolved = cost_integration.prepare(calculator, operation, args)
                 if resolved is not None:
+                    if operation in cost_integration.COST_REPORTS:
+                        return cost_integration.enrich(calculator, operation, args, cost_card, resolved)
                     return resolved
         try:
             value=self._dispatch_read(operation,args,creds)
@@ -804,7 +807,7 @@ class Portal:
             self._observe(operation,creds,status)
             raise
         if isinstance(value,dict):
-            if cost_card:
+            if cost_card or operation in cost_integration.COST_REPORTS:
                 value = cost_integration.enrich(calculator, operation, args, cost_card, value)
             # A managed worker records its own admission and completion in order.
             # A foreground poll can finish just after the worker has recorded ready.

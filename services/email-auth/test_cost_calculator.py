@@ -3,7 +3,9 @@ import io
 from decimal import Decimal
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 import calculator_ui
@@ -118,6 +120,101 @@ class CalculatorTests(unittest.TestCase):
         cost_sync.apply(self.store, [new["id"]], "accept")
         self.assertEqual(self.store.resolve("absent")["status"], "draft")
         self.assertEqual(self.store.at("absent", None)["calculation"]["status"], "incomplete")
+
+    def test_cross_market_proposals_replace_pending_duplicates_and_preserve_owner_decisions(self):
+        store = cost_catalog.Store(Path(self.folder.name) / "incoming.sqlite")
+        ozon = {code: cost_sync._record("ozon", dict(offer_id=code, name=name, sku_candidates=[sku]))
+                for code, name, sku in (("300200", "Ёлка", "12"), ("300030", "Салфетница «Вершина»", "13"),
+                                        ("a1", "Чаша", "14"), ("a2", "Чаша", "15"), ("ignored", "Скрытая", "16"))}
+        wb = {code: cost_sync._record("wb", dict(vendorCode=code, title=name, nmID=nm))
+              for code, name, nm in (("300200", "Ёлочка", 22), ("3000030", 'салфетница "Вершина"', 23),
+                                     ("b1", "Чаша", 24))}
+        with store.connect() as conn:
+            for market, cards in (("ozon", ozon), ("wb", wb)):
+                for card in cards.values():
+                    cost_sync._offer(conn, market, "new", None, card, {}, "no_unique_match")
+                cost_sync.publish(store, conn, market, cards, reconcile=False)
+        ignored = next(p for p in store.inbox() if p["product"]["code"] == "ignored")
+        cost_sync.apply(store, [ignored["id"]], "ignore")
+        with store.connect() as conn:
+            self.assertEqual(sum(cost_sync._reconcile_new(conn).values()), 5)
+        offers = store.inbox()
+        groups = {p["suggested_article"]: p for p in offers if len(p["marketplaces"]) == 2}
+        self.assertEqual({article: p["basis"] for article, p in groups.items()},
+                         {"300030": "same_catalog_title", "300200": "same_marketplace_code"})
+        self.assertEqual(len(offers), 5)
+        self.assertEqual(store.products(), [])
+        self.assertEqual([p["id"] for p in store.inbox("ignore")], [ignored["id"]])
+        self.assertEqual(len(store.inbox("superseded")), 7)
+        with store.connect() as conn:
+            self.assertEqual(sum(cost_sync._reconcile_new(conn).values()), 0)
+        self.assertEqual({p["id"] for p in store.inbox()}, {p["id"] for p in offers})
+        cost_sync.apply(store, [groups["300030"]["id"]], "accept")
+        self.assertEqual(store.resolve("3000030", "wb")["article"], "300030")
+        self.assertEqual(store.resolve("300030")["status"], "draft")
+        self.assertEqual(len(store.products()), 1)
+        self.assertEqual({(link["marketplace"], link["code"]) for link in store.resolve("300030")["links"]},
+                         {("ozon", "300030"), ("wb", "3000030")})
+
+    def test_provider_package_units_comparison_and_sync_status(self):
+        ozon = {"offer_id": "300030", "name": "Test product", "sku_candidates": ["5215904379"]}
+        wb = {"vendorCode": "3000030", "title": "Test product", "nmID": 1294477629,
+              "dimensions": {"length": 19, "width": "5.00", "height": 7, "weightBrutto": ".1000"}}
+        def gateway(name, args, credentials):
+            if name == "market_api_read":
+                self.assertEqual(args["operation_id"], "ozon_product_attributes")
+                self.assertEqual(args["input"]["body"]["filter"]["offer_id"], ["300030"])
+                return {"http_status": 200, "data": {"result": [
+                    dict(offer_id="300030", depth=190, width=55, height=70, dimension_unit="mm",
+                         weight="85.00", weight_unit="g"), dict(offer_id="other", weight=125, weight_unit="g")]}}
+            if name == "ozon_wrong_volume":
+                return {"items": [], "status": "ready", "complete": True}
+            return {"items": [ozon if name == "ozon_products" else wb], "complete": True}
+
+        app = SimpleNamespace(vault=object(), read_gateway=gateway)
+        started = "2026-11-22T03:00:11+03:00"
+        payload = {"marketplaces": {market: dict(state="pending", pages=0, scanned=0, cursor=None, cursors=[], cards={})
+                                    for market in cost_sync.MARKETS}}
+        with self.store.connect() as conn:
+            ident = conn.execute("INSERT INTO cost_sync(day,at,trigger,status,data) VALUES(?,?,?,?,?)",
+                ("2026-11-22", started, "nightly", "pending", cost_catalog._json(payload))).lastrowid
+        with patch("expansion_gateway.credentials", return_value={"api_key": "test"}):
+            cost_sync._worker(app, self.store, ident, payload)
+        published = cost_catalog.read(self.store, "cost_inbox", {"limit": 20})
+        self.assertEqual(published["calculator_sync"]["started_at"], started)
+        self.assertIsNotNone(published["calculator_sync"]["finished_at"])
+        self.assertEqual(published["calculator_sync"]["status"], "ready")
+        self.assertEqual(published["calculator_sync"]["marketplaces"]["ozon"]["catalog_products_with_dimensions"], 1)
+        plans = {p["marketplace"]: p for p in published["items"]}
+        self.assertEqual(plans["ozon"]["product"]["dimensions"], {
+            "length_cm": "19", "width_cm": "5.5", "height_cm": "7", "weight_g": "85"})
+        self.assertEqual(plans["wb"]["fields"]["weight_g"], {"calculator": "120", "marketplace": "100"})
+        self.assertEqual(plans["ozon"]["fields"]["weight_g"]["marketplace"], "85")
+
+    def test_margin_and_supply_report_show_cost_availability_at_normal_entry_point(self):
+        login = LoginApp(str(Path(self.folder.name) / "login.sqlite3"), "s" * 40, "https://test.example")
+        def gateway(name, args, creds):
+            return {"items": [
+                {"marketplace": "ozon", "sold_units": 4, "currency": "RUB",
+                 "amounts": {"gross_sales": "1500"}, "net_after_expenses": {"amount": "1300", "complete": True},
+                 "marketplace_total": {"ship_by_destination_after_min_batch": 4}},
+                {"marketplace": "wb", "sold_units": 0, "currency": "RUB",
+                 "marketplace_total": {"ship_by_destination_after_min_batch": None}},
+            ]}
+        portal = Portal(login, Vault(self.vault_path, b"v" * 32), "f" * 64, gateway=gateway,
+                        finance_gate_dir=str(Path(self.folder.name) / "gate"))
+        report = portal.read_gateway("unit_economics", {"article": "unknown-1", "month": "2026-10"}, {})
+        self.assertEqual(report["production_cost_status"], "cost_card_not_found")
+        self.assertEqual(report["items"][0]["margin_status"], "cost_card_not_found")
+        self.assertIsNone(report["items"][0]["margin_per_unit"])
+        plan = portal.read_gateway("supply_plan", {"article": "unknown-1", "horizon_days": 15}, {})
+        self.assertEqual(plan["items"][0]["production_requirements"]["status"], "cost_card_not_found")
+        self.assertIsNone(plan["items"][0]["production_requirements"]["plastic_kg"])
+        request = {"article": "300030", "horizon_days": 15}
+        plan = portal.read_gateway("supply_plan", request, {})
+        self.assertEqual(plan["items"][0]["production_requirements"]["plastic_kg"], "0.46")
+        self.assertEqual(plan["items"][1]["production_requirements"]["status"], "recommended_quantity_unavailable")
+        self.assertEqual(plan["items"][1]["production_requirements"]["plastic_g_per_unit"], "115")
 
     def test_csv_migrates_references_and_card_together(self):
         new = cost_catalog.Store(str(Path(self.folder.name) / "copy.sqlite3"))

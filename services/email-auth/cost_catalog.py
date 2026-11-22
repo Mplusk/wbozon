@@ -507,8 +507,12 @@ class Store:
 
 def read(store, name, args):
     market = args.get("marketplace")
+    meta = {}
     if name == "cost_inbox":
+        from cost_sync import sync_summary
+
         items = store.inbox()
+        meta["calculator_sync"] = sync_summary(store)
     elif name == "cost_list":
         items = []
         for row in store.products():
@@ -538,4 +542,4 @@ def read(store, name, args):
     offset, limit = args.get("offset", 0), args.get("limit", 50)
     end = offset + limit
     return result(items[offset:end], end if end < len(items) else None,
-                  total_items=len(items), read_only=True, untrusted_data=True)
+                  total_items=len(items), read_only=True, untrusted_data=True, **meta)

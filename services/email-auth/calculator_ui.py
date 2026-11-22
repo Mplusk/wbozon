@@ -270,17 +270,28 @@ def _inbox(store, csrf):
         categories = {"new": "Новый товар", "changed": "Изменение карточки", "missing": "Пропал из каталога", "dimensions": "Габариты"}
         basis = {"exact_article": "Совпал код", "similar_article": "Похожий артикул", "similar_title": "Похожее название",
                  "no_unique_match": "Создать новый артикул", "catalog_change": "Сверка каталогов",
+                 "create_article": "Создать новый артикул", "same_marketplace_code": "Совпали коды на обеих площадках",
+                 "same_catalog_title": "Совпали уникальные названия", "conflicting_articles": "Нужно выбрать внутренний артикул",
                  "absent_from_complete_scan": "Полная загрузка каталога", "package_comparison": "Сверка упаковки",
                  "provider_wrong_volume": "Ozon отметил габариты. Единицы измерения не переданы"}
         number = h(item["id"])
         detail = ", ".join(FIELDS.get(k, k) for k in item["fields"])
+        markets = ", ".join(LABELS[key] for key in item.get("marketplaces", [item["marketplace"]]))
+        origins = []
+        for key, remote in item.get("marketplace_products", {}).items():
+            dimensions = remote["dimensions"]
+            sides = [dimensions.get(field) for field in ("length_cm", "width_cm", "height_cm")]
+            size = (" · " + " × ".join(sides) + " см") if all(sides) else ""
+            weight = (" · " + dimensions["weight_g"] + " г") if "weight_g" in dimensions else ""
+            origins.append(f"{LABELS[key]} {remote['code']}{size}{weight}")
+        target = "Укажите артикул" if item["basis"] == "conflicting_articles" else item["suggested_article"] or product["code"]
         lines.append((f'<input type="checkbox" name="id" value="{number}" aria-label="Выбрать предложение {number}">',
-                      h(LABELS[item["marketplace"]]), h(categories[item["kind"]]), h(product["name"]) + "<small>" +
-                      h(product["code"]) + "</small>", h(item["suggested_article"] or product["code"]),
+                      h(markets), h(categories[item["kind"]]), h(product["name"]) + "<small>" +
+                      ("<br>".join(h(source) for source in origins) or h(product["code"])) + "</small>", h(target),
                       h(basis.get(item["basis"], item["basis"])) + (" · " + h(detail) if detail else "")))
     if not lines:
         return '<h2>Входящие</h2><p class="calc-muted">Предложений на подтверждение нет.</p>'
-    options = table(("Выбор", "Площадка", "Предложение", "Карточка", "Внутренний артикул", "Основание"), lines)
+    options = table(("Выбор", "Площадки", "Предложение", "Карточка", "Внутренний артикул", "Основание"), lines)
     options += control("Другой внутренний артикул для выбранного предложения", "target")
     options += '<div class="calc-actions"><button name="decision" value="accept">Подтвердить</button><button class="calc-secondary" name="decision" value="reject">Отклонить</button><button class="calc-secondary" name="decision" value="ignore">Игнорировать</button></div>'
     return "<h2>Входящие</h2>" + form(csrf, "inbox", options, view="inbox")
@@ -291,12 +302,14 @@ def _journal(store, csrf):
     for run in cost_sync.runs(store):
         for market, row in run["marketplaces"].items():
             counts = row.get("counts", {})
-            sync.append((h(run["started_at"]), h(LABELS[market]), h(row.get("state")), h(row.get("scanned")),
-                        h(sum(counts.values()) if counts else 0), h(row.get("error") or "—")))
+            trigger = "Ночная" if run["trigger"] == "nightly" else "Ручная"
+            error = row.get("error") or row.get("catalog_dimensions_error") or "—"
+            sync.append((h(run["started_at"]), h(run["finished_at"] or "—"), h(trigger), h(LABELS[market]),
+                         h(row.get("state")), h(row.get("scanned")), h(sum(counts.values())), h(error)))
     audit = [(h(r["at"]), h(r["actor"]), h(r["entity"]), h(r["reference"]), h(r["action"]), h(", ".join(r["fields"])))
              for r in store.journal()]
     return ("<h2>Синхронизации</h2>" + form(csrf, "sync", "<button>Синхронизировать сейчас</button>", view="journal") +
-            table(("Время", "Площадка", "Статус", "Проверено", "Предложения", "Ошибка"), sync) +
+            table(("Начало (МСК)", "Окончание (МСК)", "Запуск", "Площадка", "Статус", "Проверено", "Предложения", "Ошибка"), sync) +
             "<h2>Изменения калькулятора</h2>" + table(("Время", "Кто", "Раздел", "Код", "Действие", "Поля"), audit))
 
 

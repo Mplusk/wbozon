@@ -98,7 +98,8 @@ TOOLS = {
                   "product_status has_cost marketplace query limit offset", ""),
     "cost_history": ("Версии расчёта себестоимости товара за период.",
                      "article marketplace date_from date_to limit offset", "article"),
-    "cost_inbox": ("Предложения синхронизации каталога, ожидающие подтверждения владельца.", "limit offset", ""),
+    "cost_inbox": ("Предложения по товарам с привязками Ozon и WB, габаритами и журналом последних синхронизаций.",
+                   "limit offset", ""),
     "wb_supplies": (
         "Поставки FBW за период по дате создания. Склады, даты, статус и коэффициент из деталей.",
         "date_from date_to status_ids warehouse_id limit offset article",
@@ -212,7 +213,7 @@ TOOLS = {
         "article horizon_days",
     ),
     "article_map": ("Точные артикулы и все найденные SKU Ozon и nmID WB по артикулу, названию или настроенной паре. Неоднозначные совпадения показаны отдельно.", "article mapping", "article"),
-    "unit_economics": ("Расчёт по артикулу за месяц. net_after_expenses показывает сумму после расходов до себестоимости и сумму на проданную единицу. Поле unreconciled перечисляет неподтверждённые расходы. Себестоимость вводится с валютой.", "article month cost_per_unit currency mapping", "article month"),
+    "unit_economics": ("Расчёт по артикулу за месяц. net_after_expenses — сумма после расходов площадки. Если маржа отсутствует, production_cost_status и margin_status объясняют причину. Ручная себестоимость вводится с валютой.", "article month cost_per_unit currency mapping", "article month"),
     "sales_drop_check": ("Сопоставить заказы, воронку, наличие, рекламу и отзывы товара за два периода. Различает наблюдения, пробелы и возможные объяснения.", "article date_from date_to previous_from previous_to mapping", "article date_from date_to previous_from previous_to"),
     "mcp_health": ("Проверки с текущими токенами, разрешения Ozon и подписка WB Джем. Для обновления прав передайте refresh_capabilities. Для проверки метода передайте tool_name и probe_arguments.", "tool_name probe_arguments refresh_capabilities", ""),
     "ozon_stocks_analytics": ("Остатки FBO, транзит, среднесуточные продажи и запас в днях по кластерам и складам. С датами показывает историю снимков.", "sku skus cluster_id warehouse_id article date_from date_to offset limit", ""),
