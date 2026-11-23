@@ -75,6 +75,7 @@ SELLER_READS = frozenset(
         "/v2/cluster/list",
         "/v2/review/list",
         "/v2/review/count",
+        "/v1/review/comment/list",
         "/v1/rating/summary",
         "/v1/seller/info",
     )

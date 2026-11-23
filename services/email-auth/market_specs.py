@@ -51,6 +51,7 @@ FIELDS = {
     "report_scope": choices("unanswered", "answered", "archive"),
     "review_status": choices("ALL","NEW","VIEWED","PROCESSED"),
     "include_count": {"type":"boolean"},
+    "include_seller_reply": {"type":"boolean"},
     "task_id": TEXT,
     "download_id": DOWNLOAD_ID,
     "wb_stock_history_id": DOWNLOAD_ID,
@@ -202,8 +203,9 @@ TOOLS = {
         "date_from date_to",
     ),
     "ozon_reviews": (
-        "Отзывы и оценки Ozon по периоду и SKU. Требуется доступ к управлению отзывами.",
-        "date_from date_to sku article limit cursor review_status include_count",
+        "Отзывы и оценки Ozon по периоду и SKU. include_seller_reply проверяет ответы продавца у первых трёх "
+        "отзывов страницы. null означает, что признак не подтверждён. Требуется доступ к управлению отзывами.",
+        "date_from date_to sku article limit cursor review_status include_count include_seller_reply",
         "date_from date_to",
     ),
     "ozon_rating": ("Текущие группы рейтингов продавца Ozon и индекс локализации по датам.", "", ""),

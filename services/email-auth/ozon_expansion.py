@@ -10,6 +10,7 @@ import market_cooldown
 import finance_gate
 import ozon_fbo
 import ozon_details
+import ozon_review_reply
 from market_specs import iso, matches, money, result, rows, select, validate
 
 BASE = "https://api-seller.ozon.ru"
@@ -998,9 +999,13 @@ def read(name, args, request):
                 raise ValueError("Missing review date")
             day = datetime.fromisoformat(stamp).astimezone(timezone.utc).date().isoformat()
             if args["date_from"] <= day <= args["date_to"]:
+                sku = r.get("sku")
                 data.append(
                     dict(
                         select(r, "id sku rating text status published_at"),
+                        review_id=r["id"] if ozon_review_reply.valid_id(r.get("id")) else None,
+                        sku_exact=str(sku) if type(sku) in (str,int) else None,
+                        seller_reply_present=None,
                         article=args.get("article"),
                         nm_id=None,
                     )
@@ -1010,6 +1015,10 @@ def read(name, args, request):
         if len(reviews)>requested:
             cursor,done=reviews[requested-1]["id"],False
         counts=request("POST",BASE+"/v2/review/count",ttl=300) if args.get("include_count") else None
+        if args.get("include_seller_reply"):
+            for review in data[:3]:
+                if review["review_id"] is not None:
+                    review["seller_reply_present"] = ozon_review_reply.seller_reply_present(request, review["review_id"])
         return result(
             data,
             cursor,

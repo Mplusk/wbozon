@@ -17,6 +17,7 @@ import market_cooldown
 import market_health
 import market_history
 import market_transport
+import ozon_review_reply
 
 
 PUBLIC_TOOLS = {
@@ -32,8 +33,15 @@ PUBLIC_TOOLS = {
          'request_id':{'type':'string','pattern':'^[A-Za-z0-9_-]{16,80}$'}}, ['operation_id','input','request_id']),
     'market_api_status': ('Статус ранее предложенной операции по её идентификатору.',
         {'proposal_id':{'type':'string','pattern':'^[0-9a-f]{32}$'}}, ['proposal_id']),
+    ozon_review_reply.TOOL: (
+        'После явной команды на отправку создаёт заявку с точным review_id и текстом ответа Ozon. '
+        'Покажите черновик в чате до вызова. Передайте владельцу approval_url для подтверждения в кабинете. '
+        'После подтверждения получите результат по proposal_id через market_api_status.',
+        {'review_id':{'type':'string','minLength':1,'maxLength':ozon_review_reply.MAX_ID},
+         'text':{'type':'string','minLength':1,'maxLength':ozon_review_reply.MAX_TEXT}}, ['review_id','text']),
 }
 READ_TOOLS = frozenset(('market_api_search','market_api_describe','market_api_read'))
+PROPOSAL_TOOLS = frozenset(('market_api_propose',ozon_review_reply.TOOL))
 MAX_BYTES = 360 * 1024
 ROUTES = Path(__file__).with_name('market_routes.jsonl')
 DIGITAL_HOST = 'devapi-digital.wildberries.ru'
@@ -216,6 +224,11 @@ def validate_inputs(row, inputs):
         raise ValueError('Invalid file metadata')
     if 'body' in inputs:
         _check(inputs['body'],spec['media'][media],spec['definitions'])
+    if ozon_review_reply.is_reply_route(row):
+        body = inputs['body']
+        if body.keys() - {'review_id','text','mark_review_as_processed'} or body.get('mark_review_as_processed',False) is not False:
+            raise ValueError('Only a direct reply without a review status change is supported')
+        ozon_review_reply.validate(body['review_id'],body['text'])
 
 
 def normalized(row, inputs):
@@ -230,6 +243,8 @@ def normalized(row, inputs):
 def validate(tool, arguments):
     _,fields,required = PUBLIC_TOOLS[tool]
     _check(arguments,{'type':'object','properties':fields,'required':required,'additionalProperties':False},{})
+    if tool == ozon_review_reply.TOOL:
+        ozon_review_reply.validate(arguments['review_id'],arguments['text'])
     for name in ('proposal_id','request_id'):
         if name in arguments and not re.fullmatch(fields[name]['pattern'],arguments[name]):
             raise ValueError('Invalid reference')
@@ -410,8 +425,29 @@ def build_request(row, inputs, credentials):
 def transfer(tool, arguments, creds, directory, deadline, *, csv_download=False):
     validate(tool,arguments)
     row = find_route(arguments['operation_id'])
+    inputs = arguments['input']
     if csv_download and (tool != 'market_api_read' or row['operation_id'] != 'wb_get_api_nm_report_downloads_file_downloadid'):
         raise ValueError('Unexpected report download')
+    if tool == 'market_api_propose' and ozon_review_reply.is_reply_route(row):
+        wire = market_transport.Wire('ozon',creds,directory,deadline)
+        body = dict(inputs['body'],mark_review_as_processed=False)
+
+        def comments(method,url,**params):
+            data = wire(method,url,**params)
+            if creds['api_key'] in json.dumps(data,ensure_ascii=False,default=str):
+                raise finance_gate.ProviderResponseInvalid('Unsafe marketplace response')
+            return data
+
+        def submit():
+            # Leave time for a fresh comment read even when the create socket times out.
+            create_deadline = min(deadline - 5,time.monotonic() + 4)
+            return _transfer(tool,row,dict(inputs,body=body),creds,directory,create_deadline)
+
+        return ozon_review_reply.publish(comments,submit,body['review_id'],body['text'])
+    return _transfer(tool,row,inputs,creds,directory,deadline,csv_download=csv_download)
+
+
+def _transfer(tool, row, inputs, creds, directory, deadline, *, csv_download=False):
     restricted_read = tool == 'market_api_read' and row['operation_id'] in WB_READ_REQUIREMENTS
 
     def access_denied(issue):
@@ -420,7 +456,7 @@ def transfer(tool, arguments, creds, directory, deadline, *, csv_download=False)
 
     if restricted_read and (issue := wb_read_access_issue(row, creds)):
         return access_denied(issue)
-    request = build_request(row,arguments['input'],creds)
+    request = build_request(row,inputs,creds)
     wire = market_transport.Wire(row['market'],creds,directory,deadline)
     if csv_download:
         cache_key = wire._key('GET', request.full_url, None, None)
@@ -436,8 +472,8 @@ def transfer(tool, arguments, creds, directory, deadline, *, csv_download=False)
     wb_report = row['host'] == market_transport.WB_FEED_HOST and row['path'] in (*saved_jobs, market_transport.WB_FEED_PATH)
     if ozon_act or wb_report:
         job=row['path'] in saved_jobs
-        query={k:_scalar(v) for k,v in arguments['input'].get('query',{}).items()}
-        value=wire(row['method'],'https://'+row['host']+row['path'],body=arguments['input'].get('body'),
+        query={k:_scalar(v) for k,v in inputs.get('query',{}).items()}
+        value=wire(row['method'],'https://'+row['host']+row['path'],body=inputs.get('body'),
                    query=query or None,interval=interval.get('personal',0.1 if ozon_act else 60),
                    basic_interval=interval.get('basic',10800),
                    ttl=1800 if job else 0,job=job)

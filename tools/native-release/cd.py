@@ -25,7 +25,10 @@ CONFIG = '/etc/wbozon-cd.json'
 SCOPED_BACKUP_SECONDS = 5
 # Table columns, constraints and unique indexes created by the reviewed KeyStore.
 SCOPED_KEYS_SCHEMA = '01adb0bd15e847f9d1fadccb4b45169c0271bb00a15f7667d69d796787278723'
-ACTION_SCHEMA = '990bf1ca3f3cd956f47988c1b16ad9bfe6d60ca16c2fc8fb5eed8f6933bf7ac1'
+ACTION_SCHEMAS = (
+    '990bf1ca3f3cd956f47988c1b16ad9bfe6d60ca16c2fc8fb5eed8f6933bf7ac1',
+    '77095318a0bc7ac1136afb4be823e28a6c5b98c0bde07296708183e5cde1f0fd',
+)
 CALCULATOR_SCHEMA = 'c4971f834854e57c45466f15ae4c32a69c7e01de08b2eb16906519d45ce9cdca'
 
 MARKET_BASE = 'b543e1568394095a20f14213feb3a194a456716c70d43b95c06b33c98cd32aed'
@@ -61,6 +64,7 @@ MARKET_REPORT_SUCCESSORS = (
     'd37e12e3fa63a77521a80216ada5c877b725160640eebf3182828c097abdbf81',
     '0dc1c4452cf083f5bb322dc674258f58233b25f850e69289e5adbfc4b3bddc80',
     '01152bf116bbe3efc1846a58f60f3ea87083bdb9b9dfe6e4793989fca75ceebf',
+    '1da1ba82fa91392e6d259a7c8e25a00ff1195f33a95a7959702adf1e80265b46',
 )
 
 
@@ -74,12 +78,12 @@ def present(path):
 
 def backup_scoped_keys(host, txn):
     """Snapshot portal companion databases while both workers are drained."""
-    for suffix,schema in (('.avito-keys',SCOPED_KEYS_SCHEMA),('.catalog-keys',SCOPED_KEYS_SCHEMA),
-                          ('.market-actions',ACTION_SCHEMA),('.cost-calculator',CALCULATOR_SCHEMA)):
-        backup_sidecar(host,txn,suffix,schema)
+    for suffix,schemas in (('.avito-keys',(SCOPED_KEYS_SCHEMA,)),('.catalog-keys',(SCOPED_KEYS_SCHEMA,)),
+                           ('.market-actions',ACTION_SCHEMAS),('.cost-calculator',(CALCULATOR_SCHEMA,))):
+        backup_sidecar(host,txn,suffix,schemas)
 
 
-def backup_sidecar(host, txn, suffix, expected_schema):
+def backup_sidecar(host, txn, suffix, expected_schemas):
     source = Path(host.cfg['databases'][1] + suffix)
     if not present(source):
         return
@@ -105,7 +109,7 @@ def backup_sidecar(host, txn, suffix, expected_schema):
                 src.backup(dest, pages=128, progress=progress, sleep=0.05)
                 dest.execute('PRAGMA trusted_schema=OFF')
                 dest.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
-                if Host.schema(dest) != expected_schema or dest.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+                if Host.schema(dest) not in expected_schemas or dest.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
                     raise ReleaseError('portal companion snapshot verification failed')
         with partial.open('rb') as stream:
             os.fsync(stream.fileno())

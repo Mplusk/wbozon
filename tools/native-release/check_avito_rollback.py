@@ -89,6 +89,9 @@ def admission(service, work, phase, state):
             if state.get('catalog'):
                 import market_catalog
                 expected=set(market_catalog.available(access))
+                if 'ozon_reply_to_review' in market_catalog.PUBLIC_TOOLS:
+                    expected.add('ozon_reviews')
+                    assert ('ozon_reply_to_review' in expected) == (access == 'catalog_operations')
             else:
                 import avito_mcp
                 expected = set(getattr(avito_mcp,'PUBLIC_CONTRACTS',avito_mcp.CONTRACTS)) | (marketplaces if access == 'all' else set())

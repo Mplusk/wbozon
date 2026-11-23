@@ -21,7 +21,7 @@ if not _worker_cli:
     from ui import document, CSP
     from app import LoginApp, smtp_mailer
     import ozon_mcp, ozon_details, ozon_article_summary, wb_mcp, avito_mcp
-    import external_keys, external_mcp, oauth_mcp, market_actions, market_catalog
+    import external_keys, external_mcp, oauth_mcp, market_actions, market_catalog, ozon_review_reply
     import expansion_gateway, market_health, market_history, market_archive, posting_discovery
     import cost_catalog, cost_integration
 
@@ -923,7 +923,7 @@ class Portal:
             def execute(key_id,operation,args):
                 creds={}
                 try:
-                    if operation=='market_api_propose' and not self.login.permit('external-mcp:'+key_id,30,60):
+                    if operation in market_catalog.PROPOSAL_TOOLS and not self.login.permit('external-mcp:'+key_id,30,60):
                         raise external_mcp.MCPToolError('rate_limited')
                     if operation=='market_api_search':
                         return market_catalog.search(args)
@@ -931,6 +931,8 @@ class Portal:
                         return market_catalog.describe(args['operation_id'])
                     if operation=='market_api_propose':
                         return market_actions.Store(self).propose(key_id,args)
+                    if operation==ozon_review_reply.TOOL:
+                        return market_actions.Store(self).propose_review_reply(key_id,args)
                     if operation=='market_api_status':
                         return market_actions.Store(self).status(key_id,args['proposal_id'])
                     if operation=="mcp_health" and current_access=="all":

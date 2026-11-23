@@ -153,6 +153,11 @@ TOOLS.extend(_tool(name, contract[0], *market_specs.schema(name)) for name, cont
              if name not in market_specs.seller_reports.GROUPS)
 TOOL_NAMES = frozenset(tool['name'] for tool in TOOLS)
 
+
+def _builtin_tool_allowed(access, name):
+    return (access in ('marketplaces','all') and name in TOOL_NAMES or
+            access in ('catalog_read','catalog_operations') and name == 'ozon_reviews')
+
 _ERRORS = {
     'not_configured':'Ключ маркетплейса не сохранён в кабинете.',
     'provider_access_denied':'Маркетплейс отклонил доступ. Проверьте права и срок действия ключа, а также доступность метода в вашей подписке.',
@@ -184,7 +189,7 @@ class MCPToolError(Exception):
 
 def _tool_error(name, code, retry_after_seconds=None, reason=None, diagnostic=None, http_status=None):
     details={'error':code, 'message':_ERRORS[code]}
-    if name != 'market_api_propose':
+    if name not in market_catalog.PROPOSAL_TOOLS:
         details.update(status=code, read_only=True, untrusted_data=True, items=[], complete=False,
                        next_cursor=None, data_as_of=None, observed_at=datetime.now(timezone.utc).isoformat(),
                        http_status=http_status)
@@ -318,14 +323,14 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
     elif method == 'tools/list':
         if params.get('cursor') not in (None,''):
             return rpc_error(-32602,'Invalid cursor',ident)
-        catalog = list(TOOLS) if access in ('marketplaces','all') else []
+        catalog = [item for item in TOOLS if _builtin_tool_allowed(access,item['name'])]
         for name,(description,fields,required) in market_catalog.PUBLIC_TOOLS.items():
             if name not in market_catalog.available(access):
                 continue
             item = _tool(name,description,fields,required)
-            if name=='market_api_propose':
+            if name in market_catalog.PROPOSAL_TOOLS:
                 item['annotations'].update(readOnlyHint=False,openWorldHint=False)
-            if name in ('market_api_propose','market_api_status'):
+            if name in market_catalog.PROPOSAL_TOOLS or name=='market_api_status':
                 item['securitySchemes'][0]['scopes']=['mcp:read','mcp:propose']
                 item['_meta']['securitySchemes']=item['securitySchemes']
             catalog.append(item)
@@ -338,7 +343,7 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
     elif method == 'tools/call':
         name, args = params.get('name'), params.get('arguments',{})
         if not isinstance(name,str) or not (
-                (access in ('marketplaces','all') and name in TOOL_NAMES) or
+                _builtin_tool_allowed(access,name) or
                 name in market_catalog.available(access) or
                 (access in ('avito','all') and name in avito_mcp.PUBLIC_CONTRACTS)):
             return rpc_error(-32602,'Unknown tool',ident)
@@ -356,7 +361,7 @@ def handle(environ, start_response, authenticate, execute, expected_origin):
             try:
                 data = execute(key_id,name,args)
                 if not isinstance(data,dict): raise ValueError()
-                if name != 'market_api_propose':
+                if name not in market_catalog.PROPOSAL_TOOLS:
                     data = dict(data, read_only=True, untrusted_data=True)
                 text = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(',',':'))
                 result = (_tool_error(name,'response_too_large') if len(text.encode('utf-8')) > MAX_OUTPUT

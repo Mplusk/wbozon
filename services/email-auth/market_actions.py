@@ -15,6 +15,7 @@ from urllib.parse import parse_qs
 import finance_gate
 import market_catalog
 import market_health
+import ozon_review_reply
 from ui import document
 
 
@@ -27,7 +28,10 @@ SCHEMA = (
         UNIQUE(key_id,request_id))''',
     '''CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY, proposal TEXT, at INTEGER NOT NULL, event TEXT NOT NULL)''',
+    '''CREATE TABLE IF NOT EXISTS ozon_review_replies (
+        review_digest TEXT PRIMARY KEY, proposal TEXT NOT NULL)''',
 )
+REPLY_RESERVED = "('pending','unknown','accepted','reconciled_applied')"
 STATUS = {'pending':'Ожидает подтверждения','expired':'Срок подтверждения истёк','rejected':'Отклонено владельцем',
           'unknown':'Требуется сверка результата на площадке','accepted':'Площадка подтвердила приём',
           'denied':'Площадка отклонила запрос','held':'Отправка остановлена до обращения к площадке',
@@ -45,6 +49,13 @@ def _json(obj):
 
 def _version(row):
     return hashlib.sha256(_json(row).encode()).hexdigest()
+
+
+def _contract_version(row):
+    if ozon_review_reply.is_reply_route(row):
+        # A release without the mandatory precheck must reject this approval.
+        return _version([row,'ozon_review_comment_precheck'])
+    return _version(row)
 
 
 def fingerprint(operation, inputs):
@@ -136,12 +147,35 @@ class Store:
         db.execute("UPDATE proposals SET body=NULL,result=NULL WHERE created<? AND status NOT IN ('unknown','pending')",
                    (self.now()-30*86400,))
 
+    def reply_reservation(self,db,review_id,exclude=''):
+        row=db.execute(
+            'SELECT p.* FROM ozon_review_replies r JOIN proposals p ON p.id=r.proposal '
+            'WHERE r.review_digest=? AND p.id<>? AND p.status IN '+REPLY_RESERVED,
+            (_version(review_id),exclude)).fetchone()
+        if row:
+            return row
+        # Preserve outstanding generic requests created before the review fence.
+        for row in db.execute(
+            'SELECT * FROM proposals WHERE operation=? AND id<>? AND body IS NOT NULL '
+            'AND id NOT IN (SELECT proposal FROM ozon_review_replies) AND status IN '+REPLY_RESERVED,
+            (ozon_review_reply.OPERATION,exclude)):
+            if self.decrypt(row['id'],'input',row['body'])['body'].get('review_id')==review_id:
+                return row
+        return None
+
+    def propose_review_reply(self,key,args):
+        market_catalog.validate(ozon_review_reply.TOOL,args)
+        return self.propose(key,{'operation_id':ozon_review_reply.OPERATION,
+                                 'input':{'body':dict(args,mark_review_as_processed=False)},
+                                 'request_id':secrets.token_urlsafe(20)})
+
     def propose(self,key,args):
         market_catalog.validate('market_api_propose',args)
         if not key.startswith('cp_') or not self.portal.external_keys.active(key):
             raise ActionError('Для регистрации запроса нужен ключ с правом предложений.')
         row=market_catalog.routes()[args['operation_id']]
         identity=fingerprint(row['operation_id'],args['input'])
+        review_id=args['input']['body']['review_id'] if ozon_review_reply.is_reply_route(row) else None
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             self.cleanup(db)
@@ -152,6 +186,10 @@ class Store:
                 return self.receipt(old)
             if db.execute('SELECT paused FROM control WHERE id=1').fetchone()[0]:
                 raise ActionError('Владелец остановил запись.')
+            if review_id is not None and (previous:=self.reply_reservation(db,review_id)):
+                if previous['key_id']==key and previous['fingerprint']==identity:
+                    return self.receipt(previous)
+                raise ActionError('По этому отзыву уже есть заявка, ответ или результат, требующий сверки.')
             if db.execute("SELECT 1 FROM proposals WHERE fingerprint=? AND status IN ('pending','unknown')",(identity,)).fetchone():
                 raise ActionError('Такое действие уже ожидает подтверждения или сверки.')
             if db.execute('SELECT COUNT(*) FROM proposals WHERE created>?',(self.now()-3600,)).fetchone()[0]>=30:
@@ -163,16 +201,23 @@ class Store:
                 raise ActionError('Хранилище ожидающих операций заполнено.')
             pid=secrets.token_hex(16)
             db.execute('INSERT INTO proposals VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL)',
-                       (pid,key,args['request_id'],row['operation_id'],identity,_version(row),slot,version,
+                       (pid,key,args['request_id'],row['operation_id'],identity,_contract_version(row),slot,version,
                         self.now(),self.now()+900,'pending',self.encrypt(pid,'input',args['input'])))
+            if review_id is not None:
+                db.execute('INSERT OR REPLACE INTO ozon_review_replies VALUES(?,?)',(_version(review_id),pid))
             self.event(db,pid,'proposed')
             return self.receipt(db.execute('SELECT * FROM proposals WHERE id=?',(pid,)).fetchone())
 
     def receipt(self,row):
         result=dict(proposal_id=row['id'],operation_id=row['operation'],status=row['status'],
                     created_at=row['created'],expires_at=row['expires'])
+        if row['operation']==ozon_review_reply.OPERATION and row['status']=='pending':
+            result['approval_url']=self.portal.login.origin+'/settings/catalog#proposal-'+row['id']
         if row['result']:
             result['outcome']=self.decrypt(row['id'],'result',row['result'])
+            if row['operation']==ozon_review_reply.OPERATION:
+                result.update({field:result['outcome'][field] for field in ('comment_id','publication_confirmed')
+                               if field in result['outcome']})
         return result
 
     def status(self,key,pid):
@@ -222,7 +267,7 @@ class Store:
                     self.event(db,pid,'rejected')
                     return
                 row=market_catalog.routes().get(p['operation'])
-                if (action!='approve' or row is None or row['category']!='write' or not hmac.compare_digest(_version(row),p['contract'])
+                if (action!='approve' or row is None or row['category']!='write' or not hmac.compare_digest(_contract_version(row),p['contract'])
                         or not hmac.compare_digest(fields.get('fingerprint',''),p['fingerprint']) or fields.get('confirm')!='yes'):
                     raise ActionError('Проверьте актуальные параметры и подтвердите отправку.')
                 if publication(row) and fields.get('rights')!='yes':
@@ -238,6 +283,11 @@ class Store:
                 if fingerprint(row['operation_id'],inputs)!=p['fingerprint']:
                     raise ActionError('Параметры запроса изменились.')
                 market_catalog.build_request(row,inputs,creds)
+                if ozon_review_reply.is_reply_route(row):
+                    review_id=inputs['body']['review_id']
+                    if self.reply_reservation(db,review_id,exclude=pid):
+                        raise ActionError('По этому отзыву уже есть заявка, ответ или результат, требующий сверки.')
+                    db.execute('INSERT OR REPLACE INTO ozon_review_replies VALUES(?,?)',(_version(review_id),pid))
                 db.execute("UPDATE proposals SET status='unknown' WHERE id=?",(pid,))
                 self.event(db,pid,'owner_approved')
             args={'operation_id':row['operation_id'],'input':inputs,'request_id':p['request_id']}
@@ -248,7 +298,7 @@ class Store:
                 else:
                     result=self.portal.gateway('market_api_propose',args,creds)
                 status=result.get('operation_status','unknown')
-                if status not in ('accepted','denied','unknown'):
+                if status not in ('accepted','denied','held','unknown'):
                     status='unknown'
             except urllib.error.HTTPError as error:
                 status='denied' if error.code in (400,401,403,404,405,413,415,422,429) else 'unknown'
@@ -320,7 +370,7 @@ def owner_page(store,csrf,fresh):
     for p in rows:
         row=market_catalog.routes().get(p['operation'])
         title=row['title'] if row else p['operation']
-        content+='<section class="market-card"><h2>'+esc(title)+'</h2><p>'+esc(STATUS[p['status']])+'</p><p><code>'+esc(p['operation'])+'</code> · '+esc(p['id'])+'</p>'
+        content+='<section class="market-card" id="proposal-'+esc(p['id'])+'"><h2>'+esc(title)+'</h2><p>'+esc(STATUS[p['status']])+'</p><p><code>'+esc(p['operation'])+'</code> · '+esc(p['id'])+'</p>'
         content+='<p>Приложение '+esc(clients.get(p['key_id'],'(ключ отозван)'))+' · Ключ кабинета '+esc(p['slot'])+' · версия '+esc(p['version'][:12])+'</p>'
         if p['status']=='pending' and row:
             try:
