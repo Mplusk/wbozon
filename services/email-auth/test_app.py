@@ -99,6 +99,8 @@ class SMTPMailerTests(unittest.TestCase):
   second.login.assert_called_once_with(self.sender,'synthetic-password');second.send_message.assert_called_once();second.close.assert_called_once()
   message=second.send_message.call_args.args[0]
   self.assertEqual(message['From'],self.sender);self.assertEqual(message['To'],self.recipient)
+  self.assertIsNotNone(message['Date'].datetime)
+  self.assertRegex(str(message['Message-ID']),r'^<[^<>@]+@3dprinta\.shop>$')
   self.assertIn(self.link,message.get_content())
  def test_authentication_failure_is_not_retried(self):
   smtp=Mock();smtp.login.side_effect=smtplib.SMTPAuthenticationError(535,b'synthetic-secret')

@@ -2,6 +2,7 @@
 from ui import document, CSP
 import hashlib, hmac, html, logging, os, re, secrets, smtplib, sqlite3, ssl, time
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 from urllib.parse import parse_qs, urlsplit
 from http.cookies import SimpleCookie
 
@@ -32,6 +33,7 @@ def _close_smtp(smtp):
 def send_login_email(recipient, link, sender, password):
     """Retry only before message submission; preserve links on uncertain outcomes."""
     msg=EmailMessage(); msg['From']=sender; msg['To']=recipient; msg['Subject']='Вход в SIDZEN'
+    msg['Date']=formatdate(usegmt=True); msg['Message-ID']=make_msgid(domain='3dprinta.shop')
     msg.set_content('Для входа откройте ссылку и нажмите «Продолжить». Ссылка действует 15 минут и работает один раз.\n\n'+link+'\n\nЕсли вы не запрашивали вход, проигнорируйте письмо.')
     smtp = None
     for attempt in range(2):
