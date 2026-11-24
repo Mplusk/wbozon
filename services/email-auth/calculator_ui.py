@@ -143,8 +143,8 @@ def _product_list(store, query):
             (table(("Товар", "Статус", "₽ за штуку", "Привязки", "Ozon · " + month, "WB · " + month), rows) if rows else empty))
 
 
-def _rows(prefix, template, rendered):
-    return (f'<div data-cost-rows="{prefix}">' + "".join(rendered) + template + "</div>"
+def _rows(prefix, template, rendered, *, trailing_row=True):
+    return (f'<div data-cost-rows="{prefix}">' + "".join(rendered) + (template if trailing_row else "") + "</div>"
             f'<template id="cost-{prefix}">{template}</template>'
             f'<button class="calc-secondary" type="button" data-cost-add="{prefix}">Добавить строку</button>')
 
@@ -162,8 +162,10 @@ def _parts(card, refs, colors):
                 control("Печать, ч", "part_hours", data.get("hours")) +
                 select("Пластик", "part_material", _box(refs, "material"), material.get("id")) +
                 control("Вес, г", "part_weight", material.get("grams")) +
-                _color_select("part_color", colors, data.get("color"), "Из материала") + "</div>")
-    return _rows("parts", row({}, {}), [row(d, m) for d in card.get("parts", []) for m in d["materials"]])
+                _color_select("part_color", colors, data.get("color"), "Из материала") +
+                '<button class="calc-secondary" type="button" data-cost-remove>Удалить строку</button></div>')
+    rendered = [row(part, material) for part in card.get("parts", []) for material in part["materials"]]
+    return _rows("parts", row({}, {}), rendered, trailing_row=False)
 
 
 def _links(card):
@@ -200,15 +202,34 @@ def _package(card, refs):
             "</div>" + _rows("package", row({}), [row(i) for i in data.get("consumables", [])]))
 
 
-def _breakdown(version):
+def _missing_inputs(missing, refs):
+    instructions = {
+        "parts": "Добавьте хотя бы одну деталь.",
+        "package": "Выберите «Готова» в разделе «Упаковка».",
+        "electricity_per_kwh": "Укажите тариф электроэнергии в общих настройках.",
+        "defect_percent": "Укажите процент брака в карточке или в общих настройках.",
+    }
+    names = {(ref["kind"], ref["id"]): ref["name"] for ref in refs}
+    items = []
+    for gap in missing:
+        message = instructions.get(gap)
+        if message is None:
+            kind, _, ident = gap.partition("/")
+            name = names.get((kind, ident), ident)
+            message = f'Добавьте действующую на выбранную дату запись «{name}» в справочник «{LABELS.get(kind, kind)}».'
+        items.append(f"<li>{h(message)}</li>")
+    settings = ("<p>" + anchor("Открыть общие настройки", view="references", kind="settings") + "</p>"
+                if any(gap in catalog.DEFAULTS for gap in missing) else "")
+    return "<ul>" + "".join(items) + "</ul>" + settings
+
+
+def _breakdown(version, refs):
     if not version:
         return '<p class="calc-muted">Для выбранной даты расчёта пока нет.</p>'
     calc = version["calculation"]
     if calc["status"] != "calculated":
-        missing = [item.removeprefix("component/") for item in calc.get("missing", []) if item.startswith("component/")]
-        message = ("Нет цены на выбранную дату для комплектующих " + ", ".join(missing)) if missing else (
-            "Заполните детали, упаковку и настройки расчёта.")
-        return '<p class="calc-muted">' + h(message) + "</p>"
+        return ('<p class="calc-muted">Для расчёта себестоимости заполните следующие данные.</p>' +
+                _missing_inputs(calc.get("missing", []), refs))
     items = tuple((h(LABELS.get(key, key)), currency(value["amount"]), h(value["percent"]) + "%")
                   for key, value in calc["components"].items())
     components = [(h(item["name"]), h(item["quantity"]) + " " + h(UNITS[item["unit"]]),
@@ -243,23 +264,24 @@ def _history(store, article, query):
     return html
 
 
-def _card(store, query, csrf):
+def _card(store, query, csrf, *, submitted=None, error=None):
     original = store.resolve(query["article"]) if query.get("article") else None
     copying = query.get("copy") == "1"
-    data = original or {}
+    data = submitted if submitted is not None else original or {}
     refs = store.references()
     editing = bool(original) and not copying
+    keep_identity = editing or submitted is not None
     title = original["name"] if editing else "Новый товар"
     heading = '<div class="calc-section-title"><h2>' + h(title) + "</h2>"
     if editing:
         heading += anchor("Создать похожий", view="card", article=original["article"], copy="1")
     heading += "</div>"
-    legal = hidden("revision", original["revision"] if editing else 0)
+    legal = hidden("revision", data.get("revision", 0) if keep_identity else 0)
     legal += hidden("existing", original["article"] if editing else "")
-    fields = '<div class="calc-grid">' + control("Внутренний артикул", "article", data.get("article") if editing else "", required=True)
+    fields = '<div class="calc-grid">' + control("Внутренний артикул", "article", data.get("article") if keep_identity else "", required=True)
     fields += control("Название", "name", data.get("name"), required=True)
-    fields += select("Статус", "status", [(s, LABELS[s]) for s in catalog.STATUSES], data.get("status") if editing else "draft")
-    fields += control("Дата начала действия", "effective", catalog.today(), "date", True) + "</div>"
+    fields += select("Статус", "status", [(s, LABELS[s]) for s in catalog.STATUSES], data["status"] if keep_identity else "draft")
+    fields += control("Дата начала действия", "effective", data.get("effective", catalog.today()), "date", True) + "</div>"
     fields += control("Комментарий", "comment", data.get("comment"))
     fields += textarea("Фото · один адрес HTTPS на строку", "photos", "\n".join(data.get("photos", [])))
     fields += '<h3>Привязки</h3>' + _links(data if not copying else {})
@@ -275,8 +297,11 @@ def _card(store, query, csrf):
     fields += control("Прочие затраты, ₽", "other", data.get("other", 0))
     fields += control("Комментарий к прочим затратам", "other_comment", data.get("other_comment")) + "</div>"
     fields += "<button>Сохранить карточку</button>"
-    if editing:
-        heading += _breakdown(store.at(original["article"], None))
+    if error:
+        heading += ('<div class="notice" role="alert"><p>' + h(error) + '</p>' +
+                    _missing_inputs(error.missing, refs) + '</div>')
+    elif editing:
+        heading += _breakdown(store.at(original["article"], None), refs)
     html = heading + '<div class="calc-panel">' + form(csrf, "save_product", legal + fields, view="card") + "</div>"
     if editing:
         html += "<h2>История себестоимости</h2>" + _history(store, original["article"], query)
@@ -456,7 +481,12 @@ def handle(portal, env, method, session, query, body, reply, start):
         actor = "owner"
         if action == "save_product":
             card, day, rev = _form_product(values)
-            store.save_product(card, day, actor, rev)
+            try:
+                store.save_product(card, day, actor, rev)
+            except catalog.ProductNotReady as exc:
+                page = _card(store, {"article": get("existing")}, csrf,
+                             submitted=dict(card, revision=rev, effective=day), error=exc)
+                return reply(_page("card", page), "400 Bad Request", csp=CALCULATOR_CSP)
             target = dict(view="card", article=card["article"])
         elif action == "save_reference":
             kind, code, existing = get("kind"), get("ref_id"), get("fixed_id")
@@ -501,10 +531,14 @@ def handle(portal, env, method, session, query, body, reply, start):
                         textarea("Содержимое CSV · kind,id,data", "csv") + "<button>Импортировать</button>", view="import")
     else:
         content = _product_list(store, query)
+    return reply(_page(view, content, saved=query.get("saved") == "1"), csp=CALCULATOR_CSP)
+
+
+def _page(view, content, *, saved=False):
     nav = [(initial, label) for initial, label in (("products", "Товары"), ("references", "Справочники"),
                                                   ("inbox", "Входящие"), ("journal", "Журнал"), ("import", "Импорт и экспорт"))]
     tabs = "".join('<a href="' + h(url(view=key)) + '"' + (' aria-current="page"' if key == view else "") + ">" + h(label) + "</a>"
                    for key, label in nav)
-    notice = '<p class="notice" role="status">Изменения приняты.</p>' if query.get("saved") == "1" else ""
-    return reply(document("Калькулятор", '<main id="content" class="calculator"><h1>Калькулятор</h1><nav class="calc-tabs" aria-label="Калькулятор">' +
-                          tabs + "</nav>" + notice + content + "</main>", calculator=True), csp=CALCULATOR_CSP)
+    notice = '<p class="notice" role="status">Изменения приняты.</p>' if saved else ""
+    return document("Калькулятор", '<main id="content" class="calculator"><h1>Калькулятор</h1><nav class="calc-tabs" aria-label="Калькулятор">' +
+                    tabs + "</nav>" + notice + content + "</main>", calculator=True)

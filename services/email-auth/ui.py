@@ -11,6 +11,7 @@ CSS += """
 .calc-section-title{display:flex;align-items:center;justify-content:space-between;gap:12px}.calc-section-title h2{margin:0}
 .calc-filters,.calc-grid,.calc-input-row{display:grid;gap:12px;align-items:end;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin:14px 0}
 .calc-input-row{gap:8px;padding:10px;background:#f3f6ef;border:1px solid var(--line);border-radius:8px}
+.calc-input-row [data-cost-remove]{min-height:39px;justify-self:start}
 .calculator input:not([type=checkbox]),.calculator select,.calculator textarea{display:block;width:100%;min-height:39px;margin:5px 0 0;border:1px solid #cbd6ce;border-radius:7px;background:#fafcf9;padding:8px 10px;color:var(--ink);font:inherit}
 .calculator textarea{min-height:74px;resize:vertical}.calculator label{margin:0}.calc-panel{padding:20px;background:#fff;border:1px solid var(--line);border-radius:12px;margin:12px 0 24px}
 .calc-panel>form>button,.calc-panel>button{margin-top:14px}.calc-table{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:#fff;margin:16px 0}
@@ -55,6 +56,16 @@ window.addEventListener('pageshow', function () {
 SCRIPT_HASH=base64.b64encode(hashlib.sha256(SCRIPT.encode()).digest()).decode()
 CALCULATOR_SCRIPT="""
 document.addEventListener('click', function (event) {
+  const remove = event.target.closest('[data-cost-remove]');
+  if (remove) {
+    const row = remove.closest('.calc-input-row');
+    const neighbor = row.nextElementSibling || row.previousElementSibling;
+    const group = row.parentElement.dataset.costRows;
+    row.remove();
+    const focus = neighbor?.querySelector('[data-cost-remove]') || document.querySelector('[data-cost-add="'+group+'"]');
+    focus?.focus();
+    return;
+  }
   const add = event.target.closest('[data-cost-add]');
   if (!add) return;
   const group = add.dataset.costAdd;

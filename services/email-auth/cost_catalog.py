@@ -41,6 +41,12 @@ class CatalogError(ValueError):
     pass
 
 
+class ProductNotReady(CatalogError):
+    def __init__(self, missing):
+        super().__init__("Заполните обязательные данные карточки для статуса «В работе».")
+        self.missing = missing
+
+
 def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
@@ -210,6 +216,17 @@ def display(value):
     return format(Decimal(value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), "f")
 
 
+def _validate_purchase_quantities(card, refs):
+    for kind, items, label in (
+        ("component", card.get("components", []), "комплектующие"),
+        ("packaging", card["package"]["consumables"], "расходники"),
+    ):
+        for item in items:
+            quantity = Decimal(item["quantity"])
+            if refs[kind, item["id"]]["unit"] == "pcs" and quantity != quantity.to_integral_value():
+                raise CatalogError(f"Штучные {label} указываются целым количеством.")
+
+
 def calculate(card, refs):
     settings = refs.get(("settings", "default"), DEFAULTS)
     defect = card["defect_percent"] if card["defect_percent"] is not None else settings["defect_percent"]
@@ -225,6 +242,7 @@ def calculate(card, refs):
         gaps.append("defect_percent")
     if gaps:
         return {"status": "incomplete", "missing": gaps, "currency": "RUB"}
+    _validate_purchase_quantities(card, refs)
     with localcontext() as ctx:
         ctx.prec = 52
         costs = dict.fromkeys(COST_FIELDS, Decimal(0))
@@ -254,8 +272,6 @@ def calculate(card, refs):
         for item in card.get("components", []):
             ref = refs["component", item["id"]]
             quantity = Decimal(item["quantity"])
-            if ref["unit"] == "pcs" and quantity != quantity.to_integral_value():
-                raise CatalogError("Штучные комплектующие указываются целым количеством.")
             amount = quantity * Decimal(ref["price"])
             costs["components"] += amount
             component_items.append(dict(id=item["id"], name=ref["name"], quantity=item["quantity"], unit=ref["unit"],
@@ -264,10 +280,7 @@ def calculate(card, refs):
             costs.pop("components")
         for item in card["package"]["consumables"]:
             ref = refs["packaging", item["id"]]
-            quantity = Decimal(item["quantity"])
-            if ref["unit"] == "pcs" and quantity != quantity.to_integral_value():
-                raise CatalogError("Штучные расходники указываются целым количеством.")
-            costs["packaging"] += quantity * Decimal(ref["price"])
+            costs["packaging"] += Decimal(item["quantity"]) * Decimal(ref["price"])
         box_id = card["package"]["box"]
         if box_id:
             box = refs["box", box_id]
@@ -348,9 +361,16 @@ class Store:
                 refs[kind, ident] = json.loads(row["data"])
         return refs
 
-    def _version(self, conn, card, day, reason):
+    def _version(self, conn, card, day, reason, *, require_ready=False):
         refs = self._refs_at(conn, card, day)
-        snapshot = {"product": card, "calculation": calculate(card, refs),
+        calculation = calculate(card, refs)
+        if require_ready and calculation["status"] == "incomplete":
+            # Shared calculation settings can be filled in after production starts.
+            blockers = [gap for gap in calculation["missing"] if gap not in DEFAULTS]
+            if blockers:
+                raise ProductNotReady(blockers)
+            _validate_purchase_quantities(card, refs)
+        snapshot = {"product": card, "calculation": calculation,
                     "references": [dict(kind=kind, id=ident, values=value)
                                    for (kind, ident), value in sorted(refs.items())]}
         return conn.execute("INSERT INTO cost_versions(article,effective,at,reason,snapshot) VALUES(?,?,?,?,?)",
@@ -369,12 +389,9 @@ class Store:
             for link in json.loads(row["data"])["links"]:
                 if any((link["marketplace"], f, link[f]) in entries for f in ("code", "marketplace_id")):
                     raise CatalogError("Код площадки уже привязан к другому внутреннему артикулу.")
-        if card["status"] == "active":
-            if calculate(card, self._refs_at(conn, card, day))["status"] != "calculated":
-                raise CatalogError("Заполните детали, упаковку и цены перед переводом товара в работу.")
+        version = self._version(conn, card, day, "product_saved", require_ready=card["status"] == "active")
         conn.execute("""INSERT INTO cost_products VALUES(?,?,?) ON CONFLICT(article)
             DO UPDATE SET data=excluded.data,revision=excluded.revision""", (card["article"], _json(card), revision + 1))
-        version = self._version(conn, card, day, "product_saved")
         self.audit(conn, actor, "product", card["article"], "saved", sorted(k for k in card if card[k] != old.get(k)))
         return version
 

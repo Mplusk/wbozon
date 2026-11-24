@@ -280,13 +280,11 @@ class CalculatorTests(unittest.TestCase):
         copy.csv_import(self.store.csv_export(), "owner")
         self.assertEqual(copy.at("300030", None)["calculation"]["component_items"], november["component_items"])
 
-    def test_browser_owner_session_and_origin_are_required(self):
+    def _owner_portal(self):
         login = LoginApp(str(Path(self.folder.name) / "login.sqlite3"), "s" * 40, "https://test.example")
         portal = Portal(login, Vault(self.vault_path, b"v" * 32), "f" * 64,
                         finance_gate_dir=str(Path(self.folder.name) / "gate"))
         sid, csrf = "d" * 43, "a" * 32
-        with cost_catalog.Store(self.path).connect() as conn:
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM cost_products").fetchone()[0], 1)
         conn = login.connect()
         try:
             with conn:
@@ -305,6 +303,12 @@ class CalculatorTests(unittest.TestCase):
             status, headers = captured[0]
             return status, b"".join(output).decode(), dict(headers)
 
+        return call, sid, csrf
+
+    def test_browser_owner_session_and_origin_are_required(self):
+        call, sid, csrf = self._owner_portal()
+        with self.store.connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM cost_products").fetchone()[0], 1)
         self.assertEqual(call()[0], "401 Unauthorized")
         self.assertEqual(call()[2]["Content-Security-Policy"], CSP)
         status, page, headers = call(cookie="__Host-sid=" + sid)
@@ -365,3 +369,58 @@ class CalculatorTests(unittest.TestCase):
         self.assertEqual(call("POST", "__Host-sid=" + sid, "https://test.example", new_material, query=query)[0], "303 See Other")
         self.assertEqual(next(r["color"] for r in self.store.references() if r["id"] == "new-material"), "Бордовый")
         self.assertIn('value="saved:Бордовый">Бордовый', call(cookie="__Host-sid=" + sid, query=query)[1])
+
+    def test_card_activation_with_details_and_packaging_but_missing_shared_settings(self):
+        call, sid, csrf = self._owner_portal()
+        cookie, origin = "__Host-sid=" + sid, "https://test.example"
+        day = "2026-11-24"
+        self.store.save_reference("settings", "default", {}, day)
+        fields = {"csrf": csrf, "action": "save_product", "article": "coral-test", "name": "Чаша корал",
+                  "status": "draft", "revision": "0", "effective": day, "pack_ready": "1", "pack_box": "box",
+                  "part_name": ["Чаша корал", ""], "part_count": ["1", "1"], "part_printer": ["f1", ""],
+                  "part_hours": ["5.45", ""], "part_material": ["black", ""], "part_weight": ["119", ""],
+                  "part_color": ["saved:black", ""], "part_color_new": ["", ""]}
+        query = "tab=calculator&view=card&article=coral-test"
+        self.assertEqual(call("POST", cookie, origin, fields, query)[0], "303 See Other")
+
+        with patch("cost_catalog.today", return_value=day):
+            _, page, _ = call(cookie=cookie, query=query)
+            details = page.split('data-cost-rows="parts">', 1)[1].split('<template id="cost-parts">', 1)[0]
+            self.assertEqual(details.count('name="part_name"'), 1)
+            self.assertIn('type="button" data-cost-remove', details)
+            self.assertIn('data-cost-add="parts"', page)
+
+            fields.update(status="active", existing="coral-test", revision="1", comment="Проверить упаковку")
+            removed_parts = {key: value for key, value in fields.items() if not key.startswith("part_")}
+            status, page, headers = call("POST", cookie, origin, removed_parts, query)
+            self.assertEqual(status, "400 Bad Request")
+            self.assertEqual(headers["Content-Security-Policy"], CALCULATOR_CSP)
+            self.assertIn('role="alert"', page)
+            self.assertIn("Добавьте хотя бы одну деталь.", page)
+            self.assertIn('value="active" selected>В работе', page)
+            self.assertIn('name="comment" value="Проверить упаковку"', page)
+            self.assertIn('value="box" selected', page)
+            self.assertEqual(self.store.resolve("coral-test")["status"], "draft")
+            self.assertEqual(len(self.store.history("coral-test")), 1)
+
+            invalid_quantity = dict(fields, pack_id=["bag"], pack_quantity=["0.5"])
+            status, page, _ = call("POST", cookie, origin, invalid_quantity, query)
+            self.assertEqual(status, "400 Bad Request")
+            self.assertIn("Штучные расходники указываются целым количеством.", page)
+
+            self.assertEqual(call("POST", cookie, origin, fields, query)[0], "303 See Other")
+            _, page, _ = call(cookie=cookie, query=query)
+            self.assertIn('value="active" selected>В работе', page)
+            self.assertIn("тариф электроэнергии", page)
+            self.assertIn("процент брака", page)
+            self.assertIn('kind=settings">Открыть общие настройки', page)
+        current = self.store.at("coral-test", day)
+        self.assertEqual(current["product"]["status"], "active")
+        self.assertEqual(current["calculation"]["missing"], ["electricity_per_kwh", "defect_percent"])
+        self.assertEqual(current["calculation"]["status"], "incomplete")
+        self.assertIsNone(self.store.uniform("coral-test", day, day))
+
+        next_day = "2026-11-25"
+        self.store.save_reference("settings", "default", {"electricity_per_kwh": "6.5", "defect_percent": "0"}, next_day)
+        self.assertEqual(self.store.uniform("coral-test", next_day, next_day)["calculation"]["status"], "calculated")
+        self.assertEqual(self.store.at("coral-test", day), current)

@@ -361,6 +361,9 @@ jobs:
           calculator_references="$RUNNER_TEMP/marketplace-calculator-references/service"
           mkdir -p "$calculator_references"
           git archive 2a1df45e8d8f8944e610d445886196242149387e:services/email-auth | tar -x -C "$calculator_references"
+          review_replies="$RUNNER_TEMP/marketplace-review-replies/service"
+          mkdir -p "$review_replies"
+          git archive d71db7c23826914abff3450c794ec71d3b3e69f0:services/email-auth | tar -x -C "$review_replies"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit b151124d70320946c17d22b08b1daa63964018de \
@@ -388,6 +391,7 @@ jobs:
             --successor ad46c43c5774ef67ef030345851f6a7804c900d9 "$calculator_catalogue" \
             --successor 6b3472ce11a2df31acd7f692bb5189713178bc8b "$calculator_components" \
             --successor 2a1df45e8d8f8944e610d445886196242149387e "$calculator_references" \
+            --successor d71db7c23826914abff3450c794ec71d3b3e69f0 "$review_replies" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -467,7 +471,11 @@ jobs:
           mkdir -p "$calculator_references"
           git archive 2a1df45e8d8f8944e610d445886196242149387e:services/email-auth | tar -x -C "$calculator_references"
           check_pair "$calculator_components" "$calculator_references"
-          check_pair "$calculator_references" "$packaged"
+          review_replies="$RUNNER_TEMP/marketplace-review-replies/service"
+          mkdir -p "$review_replies"
+          git archive d71db7c23826914abff3450c794ec71d3b3e69f0:services/email-auth | tar -x -C "$review_replies"
+          check_pair "$calculator_references" "$review_replies"
+          check_pair "$review_replies" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash
