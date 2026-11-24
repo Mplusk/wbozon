@@ -1,0 +1,29 @@
+[Unit]
+Description=Encrypted WBOzon database backup to Yandex Disk
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/wbozon-yandex-backup.json
+ConditionPathExists=/etc/wbozon-yandex-backup/token
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/wbozon-yandex-backup/backup.py
+StateDirectory=wbozon-yandex-backup
+StateDirectoryMode=0700
+RuntimeDirectory=wbozon-yandex-backup
+RuntimeDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/private/3dprinta-portal /var/lib/3dprinta-native-deployer
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+TimeoutStartSec=600

@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily encrypted WBOzon backup to Yandex Disk
+
+[Timer]
+OnCalendar=*-*-* 04:30:00 Europe/Moscow
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

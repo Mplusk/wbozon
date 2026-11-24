@@ -124,6 +124,12 @@ jobs:
         run: |
           python3 -m py_compile native_release.py test_native_release.py
           python3 -m unittest -v
+      - name: Test encrypted database backups
+        working-directory: tools/yandex-backup
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends age
+          sudo python3 -B -m unittest -v
 
   marketplace-egress:
     name: Marketplace egress proxy tests
