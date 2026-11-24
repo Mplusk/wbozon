@@ -151,24 +151,37 @@ def render_section(store, csrf, origin):
     """Return the owner settings fragment; no credential is recovered here."""
     request_id = secrets.token_urlsafe(16)
     endpoint = _escape(origin.rstrip('/') + '/mcp')
-    content = '<section class="mcp-card" aria-labelledby="external-mcp-title"><div><h2 id="external-mcp-title">Подключение других ИИ</h2>'
-    content += '<p>Адрес MCP: <strong>' + endpoint + '</strong>. Тип подключения: Streamable HTTP. Права задаются отдельно при создании ключа.</p>'
-    content += '<p>Создайте отдельный ключ для каждого приложения. Передайте его приложению как заголовок <code>Authorization: Bearer КЛЮЧ</code>. Поддержка заголовка зависит от приложения; ссылка без ключа не даёт доступ.</p>'
-    content += '<p>Для Claude, Grok и ChatGPT используйте адрес MCP при добавлении коннектора. Если откроется страница подключения SIDZEN, введите на ней созданный ключ и разрешите чтение. Клиенты с ручной настройкой заголовков могут передать ключ через Bearer.</p>'
-    content += '<form method="post" action="/settings/mcp/create"><input type="hidden" name="csrf" value="'+_escape(csrf)+'"><input type="hidden" name="request_id" value="'+_escape(request_id)+'"><label for="external-mcp-name">Название приложения</label><input id="external-mcp-name" type="text" name="name" maxlength="60" required><label for="mcp-account-access">Площадки для этого ключа</label><select id="mcp-account-access" name="access"><option value="marketplaces">Ozon и Wildberries</option><option value="avito">Авито</option><option value="all">Ozon, Wildberries и Авито</option></select><button>Создать ключ</button></form>'
     options = ''.join('<option value="'+k+'">'+_escape(v)+'</option>' for k,v in ACCESS_LABELS.items() if k.startswith('catalog_'))
-    content = content.replace('</select>',options+'</select>')
-    content += '<p>Полный каталог может содержать данные заказов, документы и сведения о покупателях. Запросы на изменение подтверждаются в разделе <a href="/settings/catalog">Операции маркетплейсов</a>.</p>'
+    content = ('<section class="mcp-card settings-block" aria-labelledby="external-mcp-title">'
+        '<header class="settings-heading"><div><h2 id="external-mcp-title">Подключение других ИИ</h2>'
+        '<p>Подключайте Claude, Grok и ChatGPT с отдельным ключом для каждого приложения.</p></div></header>'
+        '<div class="settings-grid"><div class="settings-summary">'
+        '<div><span class="settings-caption">Адрес MCP</span><strong class="settings-address">'+endpoint+'</strong>'
+        '<p class="settings-help">Тип подключения: Streamable HTTP. Ссылка без ключа не даёт доступ.</p></div>'
+        '<p>Добавьте адрес при настройке коннектора. Если откроется страница SIDZEN, введите созданный ключ и разрешите доступ.</p>'
+        '<details class="settings-details"><summary>Подключение через заголовок</summary>'
+        '<p>Если приложение поддерживает ручную настройку заголовков, передайте <code>Authorization: Bearer КЛЮЧ</code>.</p></details></div>'
+        '<form class="settings-form" method="post" action="/settings/mcp/create">'
+        '<input type="hidden" name="csrf" value="'+_escape(csrf)+'"><input type="hidden" name="request_id" value="'+_escape(request_id)+'">'
+        '<div class="settings-field"><label for="external-mcp-name">Название приложения</label>'
+        '<input id="external-mcp-name" type="text" name="name" maxlength="60" placeholder="Например, Claude" required></div>'
+        '<div class="settings-field"><label for="mcp-account-access">Площадки для этого ключа</label>'
+        '<select id="mcp-account-access" name="access"><option value="marketplaces">Ozon и Wildberries</option>'
+        '<option value="avito">Авито</option><option value="all">Ozon, Wildberries и Авито</option>'+options+'</select></div>'
+        '<p class="settings-help">Полный каталог может содержать данные заказов, документы и сведения о покупателях. '
+        'Запросы на изменение подтверждаются в разделе <a href="/settings/catalog">Операции маркетплейсов</a>.</p>'
+        '<button type="submit">Создать ключ</button></form></div>')
     rows = store.list_active()
     if not rows:
-        content += '<p>Ключей для других ИИ пока нет.</p>'
+        content += '<p class="settings-empty">Ключей для других ИИ пока нет.</p>'
     else:
-        content += '<h3>Активные ключи</h3>'
+        content += '<div class="settings-key-list"><h3>Активные ключи</h3>'
         for key_id, name, created_at, last_used_at in rows:
-            content += '<div><p><strong>'+_escape(name)+'</strong> · '+ACCESS_LABELS[access_for_key(key_id)]+' — создан '+_escape(_stamp(created_at))
-            content += '; последнее обращение: '+(_escape(_stamp(last_used_at)) if last_used_at is not None else 'пока не было')+'.</p>'
-            content += '<form class="secondary" method="post" action="/settings/mcp/revoke"><input type="hidden" name="csrf" value="'+_escape(csrf)+'"><input type="hidden" name="key_id" value="'+_escape(key_id)+'"><button>Отозвать ключ</button></form></div>'
-    return content + '</div></section>'
+            content += '<div class="settings-key-row"><div><strong>'+_escape(name)+'</strong><p>'+ACCESS_LABELS[access_for_key(key_id)]+' · создан '+_escape(_stamp(created_at))
+            content += ' · последнее обращение: '+(_escape(_stamp(last_used_at)) if last_used_at is not None else 'пока не было')+'.</p></div>'
+            content += '<form method="post" action="/settings/mcp/revoke"><input type="hidden" name="csrf" value="'+_escape(csrf)+'"><input type="hidden" name="key_id" value="'+_escape(key_id)+'"><button class="settings-secondary" type="submit">Отозвать ключ</button></form></div>'
+        content += '</div>'
+    return content + '</section>'
 
 
 def render_created(name, token, origin, access="marketplaces"):

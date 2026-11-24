@@ -379,6 +379,9 @@ jobs:
           mail_delivery="$RUNNER_TEMP/marketplace-mail-delivery/service"
           mkdir -p "$mail_delivery"
           git archive 6cdbfa8031415abaf9b049cc88ee631b92d02630:services/email-auth | tar -x -C "$mail_delivery"
+          mail_headers="$RUNNER_TEMP/marketplace-mail-headers/service"
+          mkdir -p "$mail_headers"
+          git archive 72415697eb784b695ff4896cdf4a5f45ddf02296:services/email-auth | tar -x -C "$mail_headers"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit b151124d70320946c17d22b08b1daa63964018de \
@@ -410,6 +413,7 @@ jobs:
             --successor 0ba8cce48796554428f46549e9569320b014337e "$calculator_editor" \
             --successor 61f98910be81bad48f15d94461832c9345344d7f "$backup_admin" \
             --successor 6cdbfa8031415abaf9b049cc88ee631b92d02630 "$mail_delivery" \
+            --successor 72415697eb784b695ff4896cdf4a5f45ddf02296 "$mail_headers" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -505,7 +509,11 @@ jobs:
           mkdir -p "$mail_delivery"
           git archive 6cdbfa8031415abaf9b049cc88ee631b92d02630:services/email-auth | tar -x -C "$mail_delivery"
           check_pair "$backup_admin" "$mail_delivery"
-          check_pair "$mail_delivery" "$packaged"
+          mail_headers="$RUNNER_TEMP/marketplace-mail-headers/service"
+          mkdir -p "$mail_headers"
+          git archive 72415697eb784b695ff4896cdf4a5f45ddf02296:services/email-auth | tar -x -C "$mail_headers"
+          check_pair "$mail_delivery" "$mail_headers"
+          check_pair "$mail_headers" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

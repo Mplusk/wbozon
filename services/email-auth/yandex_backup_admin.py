@@ -1,6 +1,7 @@
 """Owner-only configuration for encrypted Yandex Disk backups."""
 
 import contextlib
+from datetime import datetime, timezone
 import hashlib
 import hmac
 import html
@@ -12,6 +13,7 @@ import secrets
 import sqlite3
 import stat
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from cryptography.exceptions import InvalidTag
 
@@ -136,43 +138,74 @@ def status(path=None):
     return obj
 
 
+def _display_timestamp(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9T:./+Z-]{10,40}", value):
+        return None
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if moment.tzinfo is None:
+            return None
+        try:
+            moment, zone = moment.astimezone(ZoneInfo("Europe/Moscow")), "МСК"
+        except ZoneInfoNotFoundError:
+            moment, zone = moment.astimezone(timezone.utc), "UTC"
+    except (ValueError, OverflowError):
+        return None
+    return '<time datetime="' + html.escape(value, quote=True) + '">' + moment.strftime("%d.%m.%Y, %H:%M") + ' ' + zone + '</time>'
+
+
 def render(vault, csrf, fresh):
     current, configured, unknown = _display_state(vault)
     enabled = current.get("enabled") is True
-    text = '<section class="mcp-card" aria-labelledby="backup-title"><h2 id="backup-title">Резервные копии на Яндекс Диск</h2>'
     label = "Состояние не определено" if unknown else ("Включены" if configured and enabled else "Выключены")
-    text += '<p><strong>' + label + '</strong>. '
-    text += 'Зашифрованная копия создаётся каждый день после 04:30 по Москве. Старые копии автоматически не удаляются.</p>'
-    text += '<p>Ссылка на папку нужна для проверки её адреса и должна оставаться доступной. В папку загружаются только зашифрованные копии.</p>'
+    state_class = "settings-state--unknown" if unknown else ("settings-state--enabled" if configured and enabled else "")
+    text = ('<section class="mcp-card settings-block" aria-labelledby="backup-title">'
+            '<header class="settings-heading"><div><h2 id="backup-title">Резервные копии на Яндекс Диск</h2>'
+            '<p>Защитите данные кабинета с помощью зашифрованных копий.</p></div>'
+            '<span class="settings-state ' + state_class + '">' + label + '</span></header>'
+            '<div class="settings-grid"><div class="settings-summary">')
+    text += ('<p>Зашифрованная копия создаётся каждый день после 04:30 по Москве. Старые копии автоматически не удаляются.</p>'
+             if enabled else '<p>При включении зашифрованная копия будет создаваться каждый день после 04:30 по Москве. Старые копии автоматически не удаляются.</p>')
+    text += '<p>Публичная ссылка нужна для проверки папки и должна оставаться доступной. На Диск загружаются только зашифрованные копии.</p>'
     report = status()
-    if report:
-        stamp = report.get("last_success")
-        if isinstance(stamp, str) and re.fullmatch(r"[0-9T:./+Z-]{10,40}", stamp):
-            text += '<p>Последняя подтверждённая копия: ' + html.escape(stamp) + '.</p>'
-        if report.get("state") == "failed":
-            text += '<p role="status">Последняя попытка завершилась ошибкой. Проверьте доступ к Диску, папку и свободное место.</p>'
+    stamp = _display_timestamp(report.get("last_success")) if report else None
+    if stamp:
+        text += '<div class="settings-meta"><span>Последняя подтверждённая копия</span><strong>' + stamp + '</strong></div>'
     elif configured:
-        text += '<p>Подтверждённых копий пока нет.</p>'
+        text += '<p class="settings-help">Подтверждённых копий пока нет.</p>'
+    if report:
+        if report.get("state") == "failed":
+            text += '<p class="settings-warning" role="status">Последняя попытка завершилась ошибкой. Проверьте доступ к Диску, папку и свободное место.</p>'
     csrf = html.escape(csrf, quote=True)
     if configured and (enabled or unknown):
         text += ('<form method="post" action="/settings/yandex-backup"><input type="hidden" name="csrf" value="' + csrf +
-                 '"><input type="hidden" name="action" value="disable"><button>Отключить резервные копии</button></form>')
+                 '"><input type="hidden" name="action" value="disable"><button class="settings-secondary" type="submit">Отключить резервные копии</button></form>')
+    text += '</div>'
     if fresh:
         public_url = html.escape(str(current.get("public_url", "")), quote=True)
         folder = html.escape(str(current.get("disk_folder", "")), quote=True)
-        text += ('<form method="post" action="/settings/yandex-backup"><input type="hidden" name="csrf" value="' + csrf +
+        token_help = ('Токен хранится зашифрованным и больше не отображается. Оставьте поле пустым, чтобы сохранить прежний.'
+                      if configured else 'Вставьте OAuth-токен приложения Яндекса. Он будет храниться зашифрованным и больше не отобразится.')
+        token_required = '' if configured else ' required'
+        text += ('<form class="settings-form" method="post" action="/settings/yandex-backup"><input type="hidden" name="csrf" value="' + csrf +
                  '"><input type="hidden" name="action" value="save">'
+                 '<div class="settings-field">'
                  '<label for="yandex-backup-link">Ссылка на папку Яндекс Диска</label>'
-                 '<input id="yandex-backup-link" type="url" name="public_url" value="' + public_url + '" required>'
+                 '<input id="yandex-backup-link" type="url" name="public_url" value="' + public_url + '" placeholder="https://disk.yandex.ru/d/…" aria-describedby="yandex-backup-link-help" required>'
+                 '<p class="settings-help" id="yandex-backup-link-help">Публичная ссылка, которой можно поделиться из Яндекс Диска.</p></div>'
+                 '<div class="settings-field">'
                  '<label for="yandex-backup-folder">Путь к папке на Диске</label>'
-                 '<input id="yandex-backup-folder" name="disk_folder" value="' + folder + '" placeholder="disk:/Моя папка" required>'
+                 '<input id="yandex-backup-folder" type="text" name="disk_folder" value="' + folder + '" placeholder="disk:/Папка/Резервные копии" aria-describedby="yandex-backup-folder-help" required>'
+                 '<p class="settings-help" id="yandex-backup-folder-help">Путь начинается с disk:/. Укажите расположение папки, а не ссылку или токен.</p></div>'
+                 '<div class="settings-field">'
                  '<label for="yandex-backup-token">OAuth-токен Яндекс Диска</label>'
-                 '<input id="yandex-backup-token" type="password" name="token" autocomplete="off" maxlength="2048">'
-                 '<p>Токен хранится зашифрованным и после сохранения не показывается. Оставьте поле пустым, чтобы сохранить прежний токен.</p>'
+                 '<input id="yandex-backup-token" type="password" name="token" autocomplete="off" maxlength="2048" aria-describedby="yandex-backup-token-help"' + token_required + '>'
+                 '<p class="settings-help" id="yandex-backup-token-help">' + token_help + '</p></div>'
+                 '<div class="settings-field">'
                  '<label for="yandex-backup-enabled">Автоматические копии</label>'
                  '<select id="yandex-backup-enabled" name="enabled"><option value="yes"' + (" selected" if enabled else "") + '>Включены</option>'
-                 '<option value="no"' + (" selected" if not enabled else "") + '>Выключены</option></select>'
-                 '<button>Сохранить настройки резервирования</button></form>')
+                 '<option value="no"' + (" selected" if not enabled else "") + '>Выключены</option></select></div>'
+                 '<button type="submit">Сохранить настройки</button></form>')
     else:
-        text += '<p>Чтобы изменить данные Диска или включить копии, войдите заново по ссылке из письма.</p>'
-    return text + '</section>'
+        text += '<p class="settings-help">Чтобы изменить данные Диска или включить копии, войдите заново по ссылке из письма.</p>'
+    return text + '</div></section>'

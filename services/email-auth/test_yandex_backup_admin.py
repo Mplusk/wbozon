@@ -63,6 +63,9 @@ class YandexBackupAdminTests(unittest.TestCase):
 
     def test_blank_token_preserves_existing_secret_and_settings_are_editable(self):
         self.save()
+        page = self.request()['body']
+        self.assertIn('Оставьте поле пустым, чтобы сохранить прежний', page)
+        self.assertIn('id="yandex-backup-token" type="password"', page)
         self.assertTrue(self.save(token='', disk_folder='disk:/New folder', enabled='no')['status'].startswith('303'))
         result = self.vault.read('yandex_backup')
         self.assertEqual(result['token'], 'synthetic-yandex-token-12345')
@@ -103,6 +106,10 @@ class YandexBackupAdminTests(unittest.TestCase):
 
     def test_stale_session_can_disable_but_cannot_edit_or_enable(self):
         self.save(); self.now += 301
+        page = self.request()['body']
+        self.assertIn('Чтобы изменить данные Диска или включить копии', page)
+        self.assertIn('Отключить резервные копии', page)
+        self.assertNotIn('id="yandex-backup-token"', page)
         self.assertTrue(self.save()['status'].startswith('403'))
         self.assertTrue(self.request('/settings/yandex-backup', 'POST', {'csrf': self.csrf, 'action': 'disable'})['status'].startswith('303'))
         self.assertFalse(self.vault.read('yandex_backup')['enabled'])
@@ -131,6 +138,7 @@ class YandexBackupAdminTests(unittest.TestCase):
         with patch.dict(os.environ, {'YANDEX_BACKUP_STATUS_FILE': str(status)}):
             page = self.request()['body']
         self.assertIn('2026-11-24T10:00:00+00:00', page)
+        self.assertIn('24.11.2026, 13:00 МСК', page)
         self.assertIn('Последняя попытка завершилась ошибкой', page)
 
 

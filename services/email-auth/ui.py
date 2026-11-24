@@ -23,6 +23,36 @@ CSS += """
 .calc-totals div{background:#e6f0e7;padding:13px;border-radius:9px}.calc-totals strong,.calc-totals small{display:block}
 .calc-totals strong{font-size:21px}.calc-secondary{color:var(--ink);background:#e7eee5;border:1px solid #ccd9cd;min-height:36px}
 """
+CSS += """
+.settings-block.mcp-card{display:block;margin:20px 0;padding:28px;background:#fff}
+.settings-block .settings-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+.settings-block .settings-heading h2{min-width:0;margin:0;font-size:20px;line-height:1.3}
+.settings-block .settings-heading p{max-width:68ch;margin:6px 0 0;color:#4f6255;font-size:14px;line-height:1.55}
+.settings-block .settings-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:clamp(24px,3vw,44px);align-items:start;margin-top:24px}
+.settings-block .settings-summary,.settings-block .settings-form{display:grid;gap:16px;min-width:0}
+.settings-block .settings-summary p,.settings-block .settings-form p{margin:0;color:#465b4e;font-size:14px;line-height:1.55}
+.settings-block .settings-caption,.settings-block .settings-meta span{display:block;margin-bottom:4px;color:#52675a;font-size:12px;font-weight:650}
+.settings-block .settings-address{display:block;overflow-wrap:anywhere;color:var(--ink);font-size:15px;line-height:1.45}
+.settings-block .settings-help{color:#52675a!important;font-size:13px!important;line-height:1.5!important}
+.settings-block .settings-field{min-width:0}.settings-block .settings-field label{margin:0 0 6px;font-size:13px}
+.settings-block input:is([type=text],[type=url],[type=password]),.settings-block select{display:block;width:100%;min-width:0;min-height:46px;border:1px solid #bdcec0;border-radius:8px;background:#fff;padding:10px 12px;color:var(--ink);font:inherit;font-size:14px}
+.settings-block input::placeholder{color:#64766a;opacity:1}.settings-block .settings-field .settings-help{margin-top:6px}
+.settings-block input:focus-visible,.settings-block select:focus-visible,.settings-block button:focus-visible,.settings-block summary:focus-visible{outline:3px solid #cc8a28;outline-offset:3px}
+.settings-block .settings-form>button,.settings-block .settings-summary form button{justify-self:start;width:auto;max-width:100%}
+.settings-block .settings-secondary{background:#fff;color:#245c3f;border:1px solid #b9ccbc}
+.settings-block .settings-secondary:hover{background:#edf4ed;color:#194b32}
+.settings-block .settings-state{display:inline-flex;align-items:center;min-height:30px;padding:4px 10px;border-radius:6px;background:#edf1eb;color:#405747;font-size:12px;font-weight:700}
+.settings-block .settings-state--enabled{background:#e5f2e8;color:#1d633e}.settings-block .settings-state--unknown{background:#fff3dc;color:#76510d}
+.settings-block .settings-meta strong{display:block;font-size:14px;font-weight:650}.settings-block .settings-warning{color:#87520d!important}
+.settings-block .settings-details{font-size:13px}.settings-block .settings-details summary{margin:0;color:#236b49}.settings-block .settings-details p{margin-top:8px}
+.settings-block .settings-empty,.settings-block .settings-key-list{margin-top:24px;padding-top:18px;border-top:1px solid var(--line)}
+.settings-block .settings-empty{color:#52675a;font-size:13px}.settings-block .settings-key-list h3{margin:0 0 12px;font-size:15px}
+.settings-block .settings-key-row{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;padding:12px 0;border-top:1px solid #e8eee8}
+.settings-block .settings-key-row>div{min-width:0}.settings-block .settings-key-row p{margin:3px 0 0;color:#52675a;font-size:13px}
+.settings-block ::selection{background:#cfe6d5;color:#172821}
+@media(max-width:1050px){.settings-block .settings-grid{grid-template-columns:minmax(0,1fr);gap:24px}}
+@media(max-width:650px){.settings-block.mcp-card{padding:20px}.settings-block .settings-heading h2{font-size:18px}.settings-block input:is([type=text],[type=url],[type=password]),.settings-block select{font-size:16px}.settings-block .settings-form>button{width:100%}.settings-block .settings-key-row{align-items:flex-start}}
+"""
 STYLE_HASH=base64.b64encode(hashlib.sha256(CSS.encode()).digest()).decode()
 SCRIPT = '''
 document.addEventListener('submit', function (event) {

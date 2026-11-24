@@ -1,6 +1,34 @@
 """Offline UX assertions, no live credentials or network."""
 import unittest
+from html.parser import HTMLParser
 import test_portal
+
+
+class FormFields(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.fields = {}
+        self.labels = set()
+        self.ids = set()
+        self.open_form = False
+        self.nested_forms = False
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if attrs.get('id'):
+            self.ids.add(attrs['id'])
+        if tag == 'label' and attrs.get('for'):
+            self.labels.add(attrs['for'])
+        if tag in ('input', 'select') and attrs.get('id'):
+            self.fields[attrs['id']] = attrs
+        if tag == 'form':
+            self.nested_forms |= self.open_form
+            self.open_form = True
+
+    def handle_endtag(self, tag):
+        if tag == 'form':
+            self.open_form = False
+
 
 class SettingsUXTests(unittest.TestCase):
     setUp = test_portal.Tests.setUp
@@ -35,6 +63,20 @@ class SettingsUXTests(unittest.TestCase):
         self.assertIn('for="category-token"', page)
         for field in ('client_id','client_secret'):
             self.assertIn('for="performance-'+field+'"',page)
+
+    def test_backup_inputs_are_distinct_and_accessible(self):
+        page = self.request()['body']
+        parsed = FormFields()
+        parsed.feed(page)
+        for field in ('yandex-backup-link', 'yandex-backup-folder', 'yandex-backup-token'):
+            self.assertIn(field, parsed.labels)
+            self.assertIn(field, parsed.fields)
+            self.assertIn(parsed.fields[field]['aria-describedby'], parsed.ids)
+        self.assertEqual(parsed.fields['yandex-backup-link']['type'], 'url')
+        self.assertEqual(parsed.fields['yandex-backup-folder']['type'], 'text')
+        self.assertEqual(parsed.fields['yandex-backup-token']['type'], 'password')
+        self.assertIn('required', parsed.fields['yandex-backup-token'])
+        self.assertFalse(parsed.nested_forms)
 
     def test_recent_and_stale_help(self):
         self.assertIn('первых 5 минут',self.request()['body'])
