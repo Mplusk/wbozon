@@ -373,6 +373,9 @@ jobs:
           calculator_editor="$RUNNER_TEMP/marketplace-calculator-editor/service"
           mkdir -p "$calculator_editor"
           git archive 0ba8cce48796554428f46549e9569320b014337e:services/email-auth | tar -x -C "$calculator_editor"
+          backup_admin="$RUNNER_TEMP/marketplace-backup-admin/service"
+          mkdir -p "$backup_admin"
+          git archive 61f98910be81bad48f15d94461832c9345344d7f:services/email-auth | tar -x -C "$backup_admin"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit b151124d70320946c17d22b08b1daa63964018de \
@@ -402,6 +405,7 @@ jobs:
             --successor 2a1df45e8d8f8944e610d445886196242149387e "$calculator_references" \
             --successor d71db7c23826914abff3450c794ec71d3b3e69f0 "$review_replies" \
             --successor 0ba8cce48796554428f46549e9569320b014337e "$calculator_editor" \
+            --successor 61f98910be81bad48f15d94461832c9345344d7f "$backup_admin" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -489,7 +493,11 @@ jobs:
           mkdir -p "$calculator_editor"
           git archive 0ba8cce48796554428f46549e9569320b014337e:services/email-auth | tar -x -C "$calculator_editor"
           check_pair "$review_replies" "$calculator_editor"
-          check_pair "$calculator_editor" "$packaged"
+          backup_admin="$RUNNER_TEMP/marketplace-backup-admin/service"
+          mkdir -p "$backup_admin"
+          git archive 61f98910be81bad48f15d94461832c9345344d7f:services/email-auth | tar -x -C "$backup_admin"
+          check_pair "$calculator_editor" "$backup_admin"
+          check_pair "$backup_admin" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

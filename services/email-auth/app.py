@@ -1,9 +1,67 @@
 """Isolated email-login prototype. No marketplace data or credentials included."""
 from ui import document, CSP
-import hashlib, hmac, html, os, re, secrets, smtplib, sqlite3, ssl, time
+import hashlib, hmac, html, logging, os, re, secrets, smtplib, sqlite3, ssl, time
 from email.message import EmailMessage
 from urllib.parse import parse_qs, urlsplit
 from http.cookies import SimpleCookie
+
+log = logging.getLogger(__name__)
+
+
+class MailDeliveryUncertain(Exception):
+    """The message may have been accepted; do not repeat it blindly."""
+
+
+def _mail_failure_reason(error):
+    # SMTP exception messages can contain credentials, addresses or message data.
+    if isinstance(error, smtplib.SMTPAuthenticationError): return 'authentication_rejected'
+    if isinstance(error, ssl.SSLCertVerificationError): return 'certificate_rejected'
+    if isinstance(error, smtplib.SMTPRecipientsRefused): return 'recipient_rejected'
+    if isinstance(error, smtplib.SMTPResponseException): return 'smtp_rejected'
+    if isinstance(error, TimeoutError): return 'timeout'
+    if isinstance(error, OSError): return 'connection_error'
+    return 'internal_error'
+
+
+def _close_smtp(smtp):
+    if smtp is not None:
+        try: smtp.close()
+        except Exception: pass
+
+
+def send_login_email(recipient, link, sender, password):
+    """Retry only before message submission; preserve links on uncertain outcomes."""
+    msg=EmailMessage(); msg['From']=sender; msg['To']=recipient; msg['Subject']='Вход в SIDZEN'
+    msg.set_content('Для входа откройте ссылку и нажмите «Продолжить». Ссылка действует 15 минут и работает один раз.\n\n'+link+'\n\nЕсли вы не запрашивали вход, проигнорируйте письмо.')
+    smtp = None
+    for attempt in range(2):
+        try:
+            smtp=smtplib.SMTP_SSL('smtp.spaceweb.ru',465,timeout=15,context=ssl.create_default_context())
+            smtp.login(sender,password)
+            break
+        except (smtplib.SMTPResponseException, ssl.SSLCertVerificationError):
+            _close_smtp(smtp)
+            raise
+        except OSError:
+            _close_smtp(smtp)
+            smtp = None
+            if attempt: raise
+            time.sleep(0.5)
+        except Exception:
+            _close_smtp(smtp)
+            raise
+    try:
+        refused=smtp.send_message(msg)
+        if refused: raise smtplib.SMTPRecipientsRefused(refused)
+    except (smtplib.SMTPResponseException, smtplib.SMTPRecipientsRefused):
+        raise
+    except Exception:
+        # DATA may have been accepted before a disconnect or timeout. Retrying
+        # could duplicate the email; deleting the link could invalidate it.
+        raise MailDeliveryUncertain() from None
+    finally:
+        _close_smtp(smtp)
+
 
 class LoginApp:
     def __init__(self, db, secret, base_url, recipient='maksim@kuchermg.ru', mailer=None, clock=time.time):
@@ -71,9 +129,11 @@ class LoginApp:
             try:
                 if self.mailer is None:raise RuntimeError('Mailer unavailable')
                 self.mailer(self.recipient,self.origin+'/auth/link?token='+token)
-            except Exception:
+            except MailDeliveryUncertain:
+                log.warning('Login email delivery outcome is uncertain')
+            except Exception as error:
                 with self.connect() as c:c.execute('DELETE FROM tokens WHERE hash=?',(digest,))
-                # Never log exceptions: SMTP errors can contain authentication details.
+                log.warning('Login email was not sent: %s', _mail_failure_reason(error))
             return reply(generic)
         if path=='/auth/link' and method=='GET':
             if len(e.get('QUERY_STRING',''))>512:return recovery('Не удалось открыть ссылку','Ссылка повреждена или неполная. Откройте её целиком из письма либо запросите новую.','400 Bad Request')
@@ -109,10 +169,7 @@ class LoginApp:
 def smtp_mailer(recipient,link):
     sender=os.environ['SMTP_USER']; password=os.environ['SMTP_PASSWORD']
     if sender!='no-reply@3dprinta.shop':raise ValueError('Unexpected sender')
-    msg=EmailMessage(); msg['From']=sender; msg['To']=recipient; msg['Subject']='Вход в SIDZEN'
-    msg.set_content('Для входа откройте ссылку и нажмите «Продолжить». Ссылка действует 15 минут и работает один раз.\n\n'+link+'\n\nЕсли вы не запрашивали вход, проигнорируйте письмо.')
-    with smtplib.SMTP_SSL('smtp.spaceweb.ru',465,timeout=15,context=ssl.create_default_context()) as smtp:
-        smtp.login(sender,password); smtp.send_message(msg)
+    send_login_email(recipient,link,sender,password)
 
 def create_app():
     return LoginApp(os.environ['DATABASE_PATH'],os.environ['SESSION_SECRET'],os.environ.get('BASE_URL','https://3dprinta.shop'),mailer=smtp_mailer)

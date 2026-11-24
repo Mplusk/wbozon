@@ -14,12 +14,11 @@ import market_diagnostics
 # deadline. Load their marketplace implementation only when dispatching it.
 _worker_cli = __name__ == '__main__' and sys.argv[1:2] == ['--provider-worker']
 if not _worker_cli:
-    import hmac, html, secrets, sqlite3, ssl, subprocess, smtplib
-    from email.message import EmailMessage
+    import hmac, html, secrets, sqlite3, ssl, subprocess
     from urllib.parse import parse_qs, urlsplit
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from ui import document, CSP
-    from app import LoginApp, smtp_mailer
+    from app import LoginApp, smtp_mailer, send_login_email
     import ozon_mcp, ozon_details, ozon_article_summary, wb_mcp, avito_mcp
     import external_keys, external_mcp, oauth_mcp, market_actions, market_catalog, ozon_review_reply
     import expansion_gateway, market_health, market_history, market_archive, posting_discovery
@@ -1422,11 +1421,7 @@ def secret_file(name, binary=False):
     return raw if binary else raw.decode().strip()
 
 def file_smtp_mailer(recipient, link):
-    sender='no-reply@3dprinta.shop'
-    msg=EmailMessage(); msg['From']=sender;msg['To']=recipient;msg['Subject']='Вход в SIDZEN'
-    msg.set_content('Ссылка для входа действует 15 минут. Откройте её и подтвердите вход.\n\n'+link)
-    with smtplib.SMTP_SSL('smtp.spaceweb.ru',465,timeout=15,context=ssl.create_default_context()) as smtp:
-        smtp.login(sender,secret_file('SMTP_PASSWORD_FILE'));smtp.send_message(msg)
+    send_login_email(recipient,link,'no-reply@3dprinta.shop',secret_file('SMTP_PASSWORD_FILE'))
 
 def create_portal():
     # Production file mounts are configured by the operator, never by request input.

@@ -1,7 +1,8 @@
-import io, os, re, tempfile, unittest
+import io, os, re, smtplib, ssl, tempfile, unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 from urllib.parse import urlencode, urlsplit
-from app import LoginApp
+from app import LoginApp, MailDeliveryUncertain, send_login_email
 
 class AuthTests(unittest.TestCase):
  def setUp(self):
@@ -66,8 +67,16 @@ class AuthTests(unittest.TestCase):
   data,cookie=self.landing();r=self.call('/auth/confirm','POST',data,cookie);sid=next(v.split(';')[0] for k,v in r['headers'] if k=='Set-Cookie' and v.startswith('__Host-sid='));self.now+=43201;self.assertNotIn('Вход выполнен',self.call(cookies=sid)['body'])
  def test_mail_failure_removes_token(self):
   def fail(*args):raise RuntimeError('secret')
-  self.app.mailer=fail;r=self.call('/auth/request','POST',{'email':'maksim@kuchermg.ru'});self.assertNotIn('secret',r['body'])
+  self.app.mailer=fail
+  with self.assertLogs('app',level='WARNING') as logs:r=self.call('/auth/request','POST',{'email':'maksim@kuchermg.ru'})
+  self.assertNotIn('secret',r['body']);self.assertNotIn('secret',' '.join(logs.output))
   with self.app.connect() as c:self.assertEqual(c.execute('select count(*) from tokens').fetchone()[0],0)
+ def test_uncertain_delivery_preserves_link_without_logging_secrets(self):
+  def uncertain(*args):raise MailDeliveryUncertain('secret')
+  self.app.mailer=uncertain
+  with self.assertLogs('app',level='WARNING') as logs:r=self.call('/auth/request','POST',{'email':'maksim@kuchermg.ru'})
+  self.assertNotIn('secret',r['body']);self.assertNotIn('secret',' '.join(logs.output))
+  with self.app.connect() as c:self.assertEqual(c.execute('select count(*) from tokens').fetchone()[0],1)
  def test_invalid_config(self):
   with self.assertRaises(ValueError):LoginApp(self.tmp.name+'/other','x'*40,'http://example.com')
  def test_oversize_and_many_fields(self):
@@ -75,5 +84,43 @@ class AuthTests(unittest.TestCase):
   self.assertTrue(self.call('/auth/request','POST',{str(i):'x' for i in range(9)})['status'].startswith('400'))
  def test_invalid_token_and_unknown_path(self):
   self.assertTrue(self.call('/auth/link?token=%3Cscript%3E')['status'].startswith('400'));self.assertTrue(self.call('/unknown')['status'].startswith('404'))
+
+class SMTPMailerTests(unittest.TestCase):
+ def setUp(self):
+  self.sender='no-reply@example.test';self.recipient='owner@example.test';self.link='https://example.test/synthetic'
+ def send(self):send_login_email(self.recipient,self.link,self.sender,'synthetic-password')
+ def test_retry_transient_login_before_sending_only_once(self):
+  first=Mock();first.login.side_effect=TimeoutError('synthetic-secret')
+  second=Mock();second.send_message.return_value={}
+  with patch('app.smtplib.SMTP_SSL',side_effect=[first,second]) as factory, patch('app.time.sleep') as delay:
+   self.send()
+  self.assertEqual(factory.call_count,2);delay.assert_called_once_with(0.5)
+  first.send_message.assert_not_called();first.close.assert_called_once()
+  second.login.assert_called_once_with(self.sender,'synthetic-password');second.send_message.assert_called_once();second.close.assert_called_once()
+  message=second.send_message.call_args.args[0]
+  self.assertEqual(message['From'],self.sender);self.assertEqual(message['To'],self.recipient)
+  self.assertIn(self.link,message.get_content())
+ def test_authentication_failure_is_not_retried(self):
+  smtp=Mock();smtp.login.side_effect=smtplib.SMTPAuthenticationError(535,b'synthetic-secret')
+  with patch('app.smtplib.SMTP_SSL',return_value=smtp) as factory, self.assertRaises(smtplib.SMTPAuthenticationError):self.send()
+  self.assertEqual(factory.call_count,1);smtp.send_message.assert_not_called();smtp.close.assert_called_once()
+ def test_invalid_certificate_is_not_retried(self):
+  with patch('app.smtplib.SMTP_SSL',side_effect=ssl.SSLCertVerificationError('synthetic')) as factory, self.assertRaises(ssl.SSLCertVerificationError):self.send()
+  self.assertEqual(factory.call_count,1)
+ def test_retry_is_bounded(self):
+  with patch('app.smtplib.SMTP_SSL',side_effect=TimeoutError('synthetic-secret')) as factory, patch('app.time.sleep') as delay, self.assertRaises(TimeoutError):self.send()
+  self.assertEqual(factory.call_count,2);delay.assert_called_once()
+ def test_uncertain_submission_is_not_retried(self):
+  smtp=Mock();smtp.send_message.side_effect=TimeoutError('synthetic-secret')
+  with patch('app.smtplib.SMTP_SSL',return_value=smtp) as factory, self.assertRaises(MailDeliveryUncertain):self.send()
+  self.assertEqual(factory.call_count,1);smtp.send_message.assert_called_once();smtp.close.assert_called_once()
+ def test_explicit_rejection_is_not_uncertain(self):
+  smtp=Mock();smtp.send_message.side_effect=smtplib.SMTPDataError(550,b'synthetic-secret')
+  with patch('app.smtplib.SMTP_SSL',return_value=smtp), self.assertRaises(smtplib.SMTPDataError):self.send()
+  smtp.send_message.assert_called_once();smtp.close.assert_called_once()
+ def test_close_failure_does_not_undo_an_accepted_email(self):
+  smtp=Mock();smtp.send_message.return_value={};smtp.close.side_effect=RuntimeError('synthetic-secret')
+  with patch('app.smtplib.SMTP_SSL',return_value=smtp):self.send()
+  smtp.send_message.assert_called_once()
 
 if __name__=='__main__':unittest.main()
