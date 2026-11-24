@@ -128,7 +128,7 @@ jobs:
         working-directory: tools/yandex-backup
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends age
+          sudo apt-get install -y -qq --no-install-recommends age python3-cryptography
           sudo python3 -B -m unittest -v
 
   marketplace-egress:
@@ -370,6 +370,9 @@ jobs:
           review_replies="$RUNNER_TEMP/marketplace-review-replies/service"
           mkdir -p "$review_replies"
           git archive d71db7c23826914abff3450c794ec71d3b3e69f0:services/email-auth | tar -x -C "$review_replies"
+          calculator_editor="$RUNNER_TEMP/marketplace-calculator-editor/service"
+          mkdir -p "$calculator_editor"
+          git archive 0ba8cce48796554428f46549e9569320b014337e:services/email-auth | tar -x -C "$calculator_editor"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit b151124d70320946c17d22b08b1daa63964018de \
@@ -398,6 +401,7 @@ jobs:
             --successor 6b3472ce11a2df31acd7f692bb5189713178bc8b "$calculator_components" \
             --successor 2a1df45e8d8f8944e610d445886196242149387e "$calculator_references" \
             --successor d71db7c23826914abff3450c794ec71d3b3e69f0 "$review_replies" \
+            --successor 0ba8cce48796554428f46549e9569320b014337e "$calculator_editor" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -481,7 +485,11 @@ jobs:
           mkdir -p "$review_replies"
           git archive d71db7c23826914abff3450c794ec71d3b3e69f0:services/email-auth | tar -x -C "$review_replies"
           check_pair "$calculator_references" "$review_replies"
-          check_pair "$review_replies" "$packaged"
+          calculator_editor="$RUNNER_TEMP/marketplace-calculator-editor/service"
+          mkdir -p "$calculator_editor"
+          git archive 0ba8cce48796554428f46549e9569320b014337e:services/email-auth | tar -x -C "$calculator_editor"
+          check_pair "$review_replies" "$calculator_editor"
+          check_pair "$calculator_editor" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

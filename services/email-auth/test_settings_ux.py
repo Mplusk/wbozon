@@ -29,7 +29,8 @@ class SettingsUXTests(unittest.TestCase):
         page=self.request()['body']
         for text in ('lang="ru"','name="viewport"','Client ID','API-ключ Ozon','API-токен Wildberries','for="ozon-client_id"','id="ozon-client_id"'):
             self.assertIn(text,page)
-        self.assertEqual(page.count('type="password"'),7)
+        self.assertEqual(page.count('type="password"'),8)
+        self.assertIn('for="yandex-backup-token"',page)
         self.assertIn('for="avito-secret"',page)
         self.assertIn('for="category-token"', page)
         for field in ('client_id','client_secret'):

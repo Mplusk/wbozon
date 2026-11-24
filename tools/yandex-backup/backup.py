@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 try:
     import fcntl
@@ -68,24 +69,31 @@ def regular_file(path, *, secret=False):
     return info
 
 
-def read_token(path):
-    regular_file(path, secret=True)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags)
+def load_settings(data_root, credentials):
+    """Read the same AES-GCM-protected settings saved by the portal."""
+    database = Path(data_root) / "vault.sqlite"
+    keyfile = Path(credentials) / "vault-key"
+    regular_file(database)
+    regular_file(keyfile, secret=True)
+    key = keyfile.read_bytes()
+    if len(key) != 32:
+        raise BackupError("invalid_vault_key")
     try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077 or info.st_size > 4096:
-            raise BackupError("unsafe_token_file")
-        raw = os.read(fd, 4097)
-    finally:
-        os.close(fd)
-    try:
-        token = raw.decode("ascii").strip()
-    except UnicodeError:
-        raise BackupError("invalid_oauth_token") from None
-    if not re.fullmatch(r"[A-Za-z0-9._~+/-]{16,4096}", token):
-        raise BackupError("invalid_oauth_token")
-    return token
+        with contextlib.closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+            row = db.execute("SELECT blob FROM vault WHERE provider=?", ("yandex_backup",)).fetchone()
+        if row is None:
+            return None
+        blob = bytes(row[0])
+        settings = json.loads(AESGCM(key).decrypt(blob[:12], blob[12:], b"yandex_backup"))
+    except Exception:
+        raise BackupError("backup_settings_unavailable") from None
+    if (not isinstance(settings, dict) or set(settings) != {"token", "public_url", "disk_folder", "enabled"} or
+            type(settings["enabled"]) is not bool or
+            not isinstance(settings["token"], str) or
+            not re.fullmatch(r"[A-Za-z0-9._~+/-]{16,2048}", settings["token"]) or
+            not isinstance(settings["public_url"], str) or not isinstance(settings["disk_folder"], str)):
+        raise BackupError("invalid_backup_settings")
+    return settings
 
 
 def json_request(path, params, token=None):
@@ -139,6 +147,25 @@ def verify_folder(token, folder, expected_resource_id):
     target = json_request("/resources", {"path": folder, "limit": 0}, token)
     if target.get("type") != "dir" or target.get("resource_id") != expected_resource_id:
         raise BackupError("folder_identity_mismatch")
+
+
+def resolve_folder_identity(public_url):
+    if not isinstance(public_url, str) or len(public_url) > 512:
+        raise BackupError("invalid_public_folder_link")
+    public = urlsplit(public_url)
+    try:
+        valid_port = public.port is None
+    except ValueError:
+        valid_port = False
+    if (public.scheme != "https" or public.hostname not in ("disk.yandex.ru", "yadi.sk") or
+            public.username or public.password or not valid_port or public.query or public.fragment or
+            not re.fullmatch(r"/d/[A-Za-z0-9_-]{1,128}/?", public.path)):
+        raise BackupError("invalid_public_folder_link")
+    shared = json_request("/public/resources", {"public_key": public_url, "limit": 0})
+    identity = shared.get("resource_id")
+    if shared.get("type") != "dir" or not isinstance(identity, str):
+        raise BackupError("invalid_public_folder_link")
+    return identity
 
 
 def file_digest(path, algorithm="sha256"):
@@ -283,35 +310,87 @@ def upload(token, folder, encrypted):
     raise BackupError("upload_not_confirmed")
 
 
+def write_status(state_dir, state, reason=None):
+    directory = Path(state_dir)
+    directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+    target = directory / "status.json"
+    try:
+        previous = json.loads(target.read_text())
+        if not isinstance(previous, dict): previous = {}
+    except (OSError, ValueError):
+        previous = {}
+    stamp = datetime.now(timezone.utc).isoformat()
+    status = {"state": state, "last_attempt": stamp}
+    if state == "uploaded_and_verified":
+        status["last_success"] = stamp
+    elif isinstance(previous.get("last_success"), str):
+        status["last_success"] = previous["last_success"]
+    if reason and re.fullmatch(r"[a-z0-9_]{1,80}", reason):
+        status["reason"] = reason
+    fd, name = tempfile.mkstemp(prefix=".status-", dir=directory)
+    try:
+        os.fchmod(fd, 0o644)
+        with os.fdopen(fd, "w") as stream:
+            json.dump(status, stream, sort_keys=True)
+            stream.flush(); os.fsync(stream.fileno())
+        os.replace(name, target)
+    finally:
+        with contextlib.suppress(FileNotFoundError): os.unlink(name)
+
+
 def main(config_path="/etc/wbozon-yandex-backup.json"):
     if fcntl is None:
         raise BackupError("linux_required")
     config_path = Path(config_path)
     regular_file(config_path, secret=True)
     config = json.loads(config_path.read_text())
-    required = {"disk_folder", "folder_resource_id", "token_file", "recipient_file", "data_root", "credentials", "state_dir", "runtime_dir", "deploy_lock"}
+    required = {"recipient_file", "data_root", "credentials", "state_dir", "runtime_dir", "deploy_lock"}
     if not isinstance(config, dict) or set(config) != required or not all(isinstance(v, str) for v in config.values()):
         raise BackupError("invalid_config")
-    token = read_token(config["token_file"])
-    verify_folder(token, config["disk_folder"], config["folder_resource_id"])
     state, runtime = Path(config["state_dir"]), Path(config["runtime_dir"])
-    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state.mkdir(mode=0o755, parents=True, exist_ok=True)
     runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
-    name = "wbozon-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + os.urandom(6).hex() + ".tar.gz.age"
-    encrypted = state / name
-    fd = os.open(config["deploy_lock"], os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    settings_lock = Path(config["data_root"]) / ".yandex-backup.lock"
+    if not settings_lock.exists() and not settings_lock.is_symlink():
+        print('backup_disabled_or_not_configured')
+        return
+    fd = os.open(settings_lock, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                info.st_uid != Path(config["data_root"]).stat().st_uid or info.st_mode & 0o077):
+            raise BackupError("unsafe_settings_lock")
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with tempfile.TemporaryDirectory(prefix="snapshot-", dir=runtime) as temp:
-            snapshot_files = snapshots(config["data_root"], temp)
-            history_key = Path(config["data_root"]) / ".market-reports" / "history-v2.key"
-            encrypt_archive(encrypted, config["recipient_file"], snapshot_files, config["credentials"], history_key)
+        try:
+            settings = load_settings(config["data_root"], config["credentials"])
+            if settings is None or not settings["enabled"]:
+                print('backup_disabled_or_not_configured')
+                return
+            token = settings["token"]
+            folder = settings["disk_folder"]
+            verify_folder(token, folder, resolve_folder_identity(settings["public_url"]))
+            name = "wbozon-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + os.urandom(6).hex() + ".tar.gz.age"
+            encrypted = state / name
+            deploy_fd = os.open(config["deploy_lock"], os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            try:
+                fcntl.flock(deploy_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with tempfile.TemporaryDirectory(prefix="snapshot-", dir=runtime) as temp:
+                    snapshot_files = snapshots(config["data_root"], temp)
+                    history_key = Path(config["data_root"]) / ".market-reports" / "history-v2.key"
+                    encrypt_archive(encrypted, config["recipient_file"], snapshot_files, config["credentials"], history_key)
+            finally:
+                os.close(deploy_fd)
+            upload(token, folder, encrypted)
+            digest = file_digest(encrypted)
+            encrypted.unlink()
+            write_status(state, "uploaded_and_verified")
+            print(json.dumps({"result": "uploaded_and_verified", "file": name, "sha256": digest}, sort_keys=True))
+        except Exception as error:
+            with contextlib.suppress(OSError, ValueError):
+                write_status(state, "failed", str(error) if isinstance(error, BackupError) else type(error).__name__.lower())
+            raise
     finally:
         os.close(fd)
-    upload(token, config["disk_folder"], encrypted)
-    digest = file_digest(encrypted)
-    encrypted.unlink()
-    print(json.dumps({"result": "uploaded_and_verified", "file": name, "sha256": digest}, sort_keys=True))
 
 
 if __name__ == "__main__":

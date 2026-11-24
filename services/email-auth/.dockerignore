@@ -4,6 +4,7 @@
 !requirements.txt
 !Dockerfile
 !portal.py
+!yandex_backup_admin.py
 !ozon_mcp.py
 !ozon_details.py
 !ozon_article_summary.py

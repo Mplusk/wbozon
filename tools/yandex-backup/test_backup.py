@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import backup
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 class BackupTests(unittest.TestCase):
@@ -129,6 +130,108 @@ class BackupTests(unittest.TestCase):
                     backup.upload("oauth-test-token", "disk:/requested", encrypted)
             self.assertEqual(calls, ["PUT"])
             self.assertEqual(encrypted.read_bytes(), b"encrypted")
+
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "root vault fixture required")
+    def test_unreadable_settings_records_a_failed_attempt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); data = root / 'data'; data.mkdir()
+            (data / '.yandex-backup.lock').touch(mode=0o600)
+            config = {'recipient_file': str(root/'recipients'), 'data_root': str(data),
+                      'credentials': str(root/'credentials'), 'state_dir': str(root/'state'),
+                      'runtime_dir': str(root/'runtime'), 'deploy_lock': str(root/'deploy.lock')}
+            config_file = root/'config.json'; config_file.write_text(json.dumps(config)); config_file.chmod(0o600)
+            with patch.object(backup, 'load_settings', side_effect=backup.BackupError('backup_settings_unavailable')):
+                with self.assertRaisesRegex(backup.BackupError, 'backup_settings_unavailable'):
+                    backup.main(str(config_file))
+            status = json.loads((root/'state'/'status.json').read_text())
+            self.assertEqual(status['state'], 'failed')
+            self.assertEqual(status['reason'], 'backup_settings_unavailable')
+
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "root vault fixture required")
+    def test_disabled_vault_setting_never_calls_yandex(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); data = root / 'data'; data.mkdir()
+            credentials = root / 'credentials'; credentials.mkdir()
+            key = os.urandom(32); (credentials / 'vault-key').write_bytes(key)
+            (credentials / 'vault-key').chmod(0o600)
+            settings = {'token': 'synthetic-token-123456789', 'public_url': 'https://disk.yandex.ru/d/example',
+                        'disk_folder': 'disk:/Backups', 'enabled': False}
+            nonce = os.urandom(12)
+            blob = nonce + AESGCM(key).encrypt(nonce, json.dumps(settings).encode(), b'yandex_backup')
+            with sqlite3.connect(data / 'vault.sqlite') as db:
+                db.execute('CREATE TABLE vault(provider TEXT PRIMARY KEY,blob BLOB NOT NULL)')
+                db.execute('INSERT INTO vault VALUES (?,?)', ('yandex_backup', blob))
+            lock = data / '.yandex-backup.lock'; lock.touch(mode=0o600)
+            config = {'recipient_file': str(root/'recipients'), 'data_root': str(data), 'credentials': str(credentials),
+                      'state_dir': str(root/'state'), 'runtime_dir': str(root/'runtime'), 'deploy_lock': str(root/'deploy.lock')}
+            config_file = root / 'config.json'; config_file.write_text(json.dumps(config)); config_file.chmod(0o600)
+            with patch.object(backup, 'json_request', side_effect=AssertionError('network must not be used')):
+                backup.main(str(config_file))
+            self.assertFalse((root/'deploy.lock').exists())
+
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "root vault fixture required")
+    def test_encrypted_settings_use_vault_key_and_associated_provider(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); data = root/'data'; data.mkdir(); credentials = root/'credentials'; credentials.mkdir()
+            key = os.urandom(32); (credentials/'vault-key').write_bytes(key); (credentials/'vault-key').chmod(0o600)
+            settings = {'token': 'synthetic-token-123456789', 'public_url': 'https://disk.yandex.ru/d/example',
+                        'disk_folder': 'disk:/Backups', 'enabled': True}
+            nonce = os.urandom(12); blob = nonce + AESGCM(key).encrypt(nonce, json.dumps(settings).encode(), b'yandex_backup')
+            with sqlite3.connect(data/'vault.sqlite') as db:
+                db.execute('CREATE TABLE vault(provider TEXT PRIMARY KEY,blob BLOB NOT NULL)')
+                db.execute('INSERT INTO vault VALUES (?,?)', ('yandex_backup', blob))
+            self.assertEqual(backup.load_settings(data, credentials), settings)
+            (credentials/'vault-key').write_bytes(os.urandom(32))
+            with self.assertRaisesRegex(backup.BackupError, 'backup_settings_unavailable'):
+                backup.load_settings(data, credentials)
+
+    @unittest.skipUnless(Path("/usr/bin/age").is_file() and os.geteuid() == 0, "age and root test fixtures required")
+    def test_enabled_job_encrypts_and_confirms_then_disabled_job_does_not_upload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); data = root/'data'; data.mkdir(); credentials = root/'credentials'; credentials.mkdir()
+            key = os.urandom(32)
+            for name, content in [('vault-key', key), ('session', b'synthetic-session')]:
+                (credentials/name).write_bytes(content); (credentials/name).chmod(0o600)
+            settings = {'token': 'synthetic-token-123456789', 'public_url': 'https://disk.yandex.ru/d/example',
+                        'disk_folder': 'disk:/Backups', 'enabled': True}
+            with sqlite3.connect(data/'auth.sqlite') as db:
+                db.execute('CREATE TABLE sessions(value TEXT)')
+                db.execute('INSERT INTO sessions VALUES (?)', ('test-record',))
+            def store_settings():
+                nonce = os.urandom(12)
+                blob = nonce + AESGCM(key).encrypt(nonce, json.dumps(settings).encode(), b'yandex_backup')
+                with sqlite3.connect(data/'vault.sqlite') as db:
+                    db.execute('CREATE TABLE IF NOT EXISTS vault(provider TEXT PRIMARY KEY,blob BLOB NOT NULL)')
+                    db.execute('INSERT OR REPLACE INTO vault VALUES (?,?)', ('yandex_backup', blob))
+            store_settings()
+            (data/'.yandex-backup.lock').touch(mode=0o600)
+            identity = root/'identity'
+            subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(identity)], check=True)
+            recipient = root/'recipients'; recipient.write_bytes(identity.with_suffix('.pub').read_bytes())
+            config = {'recipient_file': str(recipient), 'data_root': str(data), 'credentials': str(credentials),
+                      'state_dir': str(root/'state'), 'runtime_dir': str(root/'runtime'), 'deploy_lock': str(root/'deploy.lock')}
+            config_file = root/'config.json'; config_file.write_text(json.dumps(config)); config_file.chmod(0o600)
+            uploads = []
+            def confirm_upload(token, folder, encrypted):
+                self.assertEqual(folder, 'disk:/Backups')
+                self.assertTrue(encrypted.read_bytes().startswith(b'age-encryption.org/v1'))
+                plaintext = subprocess.check_output(['/usr/bin/age', '-d', '-i', str(identity), str(encrypted)])
+                import io
+                with tarfile.open(fileobj=io.BytesIO(plaintext), mode='r:gz') as archive:
+                    self.assertIn('databases/auth.sqlite', archive.getnames())
+                    self.assertIn('databases/vault.sqlite', archive.getnames())
+                    self.assertEqual(archive.extractfile('secrets/vault-key').read(), key)
+                uploads.append('confirmed')
+            with patch.object(backup, 'resolve_folder_identity', return_value='owner:resource'), \
+                    patch.object(backup, 'verify_folder'), patch.object(backup, 'upload', side_effect=confirm_upload):
+                backup.main(str(config_file))
+                status = json.loads((root/'state'/'status.json').read_text())
+                self.assertEqual(status['state'], 'uploaded_and_verified')
+                self.assertIn('last_success', status)
+                self.assertEqual(list((root/'state').glob('*.age')), [])
+                settings['enabled'] = False; store_settings()
+                backup.main(str(config_file))
+            self.assertEqual(uploads, ['confirmed'])
 
     @unittest.skipUnless(Path("/usr/bin/age").is_file() and os.geteuid() == 0, "age and root test fixtures required")
     def test_encrypted_archive_decrypts_with_independent_identity(self):

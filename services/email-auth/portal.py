@@ -901,7 +901,7 @@ class Portal:
                     present=c.execute('SELECT 1 FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),self.login.clock())).fetchone()
                 if present:
                     start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
-        if path not in OAUTH_PATHS and path not in ('/settings','/settings/catalog','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/mcp','/api/read','/healthz'):
+        if path not in OAUTH_PATHS and path not in ('/settings','/settings/catalog','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/settings/yandex-backup','/mcp','/api/read','/healthz'):
             return self.login(e,start)
         def reply(text,code='200 OK',json_response=False,extra_headers=(),*,csp=CSP):
             if not json_response and not text.lstrip().lower().startswith('<!doctype'): text=document('Кабинет', '<main id="content" class="error-card"><h1>Кабинет</h1><p>'+text+'</p></main>')
@@ -1131,6 +1131,29 @@ class Portal:
         except sqlite3.Error:
             return reply('Сервис временно недоступен. Повторите позже. <a href="/settings">Настройки</a>','503 Service Unavailable')
         if not session: return reply('Войдите заново на главной странице.','401 Unauthorized')
+        if path=='/settings/yandex-backup':
+            if method!='POST': return reply('Method not allowed','405 Method Not Allowed')
+            if e.get('HTTP_ORIGIN')!=self.login.origin: return reply('Forbidden','403 Forbidden')
+            import yandex_backup_admin
+            try:
+                form=parse_qs(body('application/x-www-form-urlencoded',maximum=8192),max_num_fields=6,keep_blank_values=True,strict_parsing=True)
+                if any(len(v)!=1 for v in form.values()): raise ValueError()
+                form={k:v[0] for k,v in form.items()}
+                csrf=form.get('csrf','')
+                if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
+                if form.get('action')=='disable' and set(form)=={'csrf','action'}:
+                    yandex_backup_admin.disable(self.vault)
+                elif form.get('action')=='save' and set(form)=={'csrf','action','public_url','disk_folder','token','enabled'}:
+                    if session[0]-43200 < now-300: return reply('Для изменения данных Яндекс Диска войдите заново по письму.','403 Forbidden')
+                    yandex_backup_admin.save(self.vault,public_url=form['public_url'],disk_folder=form['disk_folder'],token=form['token'],enabled=form['enabled'])
+                else: raise ValueError()
+            except BlockingIOError:
+                return reply('Идёт резервное копирование. Повторите изменение после его завершения. <a href="/settings">Настройки</a>','409 Conflict')
+            except (ValueError,TypeError,UnicodeError):
+                return reply('Проверьте ссылку, путь к папке и токен Яндекс Диска. <a href="/settings">Настройки</a>','400 Bad Request')
+            except (sqlite3.Error,OSError):
+                return reply('Не удалось сохранить настройки резервирования. <a href="/settings">Настройки</a>','503 Service Unavailable')
+            start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
         if path == '/settings' and 'tab=calculator' in e.get('QUERY_STRING', ''):
             import calculator_ui
             try:
@@ -1384,6 +1407,11 @@ class Portal:
             content+=external_keys.render_section(self.external_keys,session[1],self.login.origin)
         except (sqlite3.Error,ValueError,TypeError,OverflowError,OSError):
             content+='<p>Не удалось загрузить ключи для других ИИ. Повторите позже.</p>'
+        try:
+            import yandex_backup_admin
+            content+=yandex_backup_admin.render(self.vault,session[1],session[0]-43200 >= now-300)
+        except (sqlite3.Error,ValueError,TypeError,OverflowError,OSError):
+            content+='<p>Не удалось загрузить настройки резервирования Яндекс Диска.</p>'
         content+='</main>'
         return reply(document('Подключение кабинетов',content,progress=True))
 
