@@ -5,8 +5,11 @@ the portal, encrypts them with `age`, uploads to a specific Yandex Disk folder,
 and checks the stored file's length and MD5 through the official API. It does
 not delete old backups or perform an automatic restore. Snapshots cover the
 auth and vault databases, scoped MCP keys, calculator and action databases,
-and marketplace history when present. The encrypted archive also contains the
-vault and session keys, and the history key if present. No standalone SMTP or
+marketplace reports, and marketplace history when present. The encrypted archive also contains the
+vault and session keys, and the history key if present. Filesystem-based
+marketplace request gates are not captured; any future restore must preserve
+their safety state separately and must not blindly resume provider requests.
+No standalone SMTP or
 Yandex OAuth credential files are included. The vault snapshot can contain the
 encrypted Yandex OAuth token, which is recoverable with the archived vault key;
 the entire archive is protected by the independent `age` recipient.

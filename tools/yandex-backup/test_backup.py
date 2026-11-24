@@ -38,9 +38,10 @@ class BackupTests(unittest.TestCase):
             root = Path(temp) / "data"
             work = Path(temp) / "work"
             root.mkdir(); work.mkdir()
+            (root / '.market-reports').mkdir()
             connections = []
             try:
-                for name in ("auth.sqlite", "vault.sqlite", "vault.sqlite.cost-calculator"):
+                for name in ("auth.sqlite", "vault.sqlite", "vault.sqlite.cost-calculator", ".market-reports/reports.db"):
                     db = sqlite3.connect(root / name)
                     db.execute("PRAGMA journal_mode=WAL")
                     db.execute("CREATE TABLE important(value TEXT)")
@@ -48,7 +49,7 @@ class BackupTests(unittest.TestCase):
                     db.commit()
                     connections.append(db)
                 result = dict(backup.snapshots(root, work))
-                self.assertEqual(set(result), {"auth.sqlite", "vault.sqlite", "vault.sqlite.cost-calculator"})
+                self.assertEqual(set(result), {"auth.sqlite", "vault.sqlite", "vault.sqlite.cost-calculator", ".market-reports/reports.db"})
                 for name, path in result.items():
                     with contextlib.closing(sqlite3.connect(path)) as db:
                         self.assertEqual(db.execute("SELECT value FROM important").fetchone(), (name,))

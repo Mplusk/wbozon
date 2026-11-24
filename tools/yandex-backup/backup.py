@@ -40,6 +40,7 @@ DATABASES = (
     ("vault.sqlite.catalog-keys", False),
     ("vault.sqlite.market-actions", False),
     ("vault.sqlite.cost-calculator", False),
+    (".market-reports/reports.db", False),
     (".market-reports/history-v2.db", False),
 )
 SECRET_FILES = (
