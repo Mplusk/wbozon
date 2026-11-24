@@ -345,8 +345,9 @@ The two connection targets come from `WBOZON_STAGE_SSH_TARGET` and
 `WBOZON_DEPLOY_SSH_TARGET` in GitHub Actions Secrets. Set each as `user@host`
 for its pinned host key and forced command.
 The transfer retries a network interruption up to twice with the same build
-attempt, archive and digest. Each upload has a 150-second deadline. The receiver
-checks an existing file under the same identity before acknowledging delivery.
+attempt, archive and digest. The runner allows up to 300 seconds per attempt,
+including SSH setup and the receiver's 180-second deadline. The receiver checks
+an existing file under the same identity before acknowledging delivery.
 Host-key, authentication and receiver validation errors end the job immediately.
 Staging is bounded to 40 artifacts or 300 MB. After a new upload is durable, it
 keeps the twelve newest versioned cache entries and preserves legacy names.

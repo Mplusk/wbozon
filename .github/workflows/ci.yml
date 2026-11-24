@@ -529,7 +529,7 @@ jobs:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/ozon-finance-partial-20261117')
     needs: [native-candidate]
     runs-on: ubuntu-24.04
-    timeout-minutes: 9
+    timeout-minutes: 20
     concurrency:
       group: wbozon-native-staging
       cancel-in-progress: false
@@ -590,10 +590,11 @@ jobs:
           printf '%s\n' "$STAGE_KNOWN_HOSTS" > "$private_dir/known_hosts"
           # Retrying the same identity lets the receiver verify an existing copy or recover a partial file.
           for attempt in 1 2 3; do
-            if LC_ALL=C timeout --kill-after=5s 150s ssh -T -i "$private_dir/key" -o IdentitiesOnly=yes -o BatchMode=yes \
+            # Leave time for SSH setup as well as the receiver's 180-second deadline.
+            if LC_ALL=C timeout --kill-after=5s 300s ssh -T -i "$private_dir/key" -o IdentitiesOnly=yes -o BatchMode=yes \
               -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$private_dir/known_hosts" \
               -o GlobalKnownHostsFile=/dev/null -o ClearAllForwardings=yes \
-              -o ConnectTimeout=60 -o ServerAliveInterval=15 -o ServerAliveCountMax=6 \
+              -o ConnectTimeout=90 -o ServerAliveInterval=15 -o ServerAliveCountMax=6 \
               -- "$STAGE_SSH_TARGET" "stage $GITHUB_SHA $GITHUB_RUN_ID $BUILD_ATTEMPT $digest $bytes" \
               < "$artifact" 2>"$private_dir/ssh-error"; then
               exit 0
