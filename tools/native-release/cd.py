@@ -30,6 +30,8 @@ ACTION_SCHEMAS = (
     '77095318a0bc7ac1136afb4be823e28a6c5b98c0bde07296708183e5cde1f0fd',
 )
 CALCULATOR_SCHEMA = 'c4971f834854e57c45466f15ae4c32a69c7e01de08b2eb16906519d45ce9cdca'
+# The additive draft table is readable by the previous calculator release.
+CALCULATOR_DRAFT_SCHEMA = '7732a71be6816db4486213c8fb437d0b04dcfd77f9e17da2dea8cb7c00c5fbbd'
 
 MARKET_BASE = 'b543e1568394095a20f14213feb3a194a456716c70d43b95c06b33c98cd32aed'
 MARKET_BRIDGE = '4fbd8858010f37f39b7676c4b34fede5526aa56623569bbc231e77524edce0cf'
@@ -85,7 +87,8 @@ def present(path):
 def backup_scoped_keys(host, txn):
     """Snapshot portal companion databases while both workers are drained."""
     for suffix,schemas in (('.avito-keys',(SCOPED_KEYS_SCHEMA,)),('.catalog-keys',(SCOPED_KEYS_SCHEMA,)),
-                           ('.market-actions',ACTION_SCHEMAS),('.cost-calculator',(CALCULATOR_SCHEMA,))):
+                           ('.market-actions',ACTION_SCHEMAS),
+                           ('.cost-calculator',(CALCULATOR_SCHEMA,CALCULATOR_DRAFT_SCHEMA))):
         backup_sidecar(host,txn,suffix,schemas)
 
 
