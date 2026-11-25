@@ -91,6 +91,24 @@ def number(value, *, optional=False, positive=False, integer=False):
     return int(parsed) if integer else format(parsed, "f")
 
 
+def field(label, function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except CatalogError as exc:
+        raise CatalogError(label + ": " + str(exc)) from None
+
+
+FIELD_LABELS = {
+    "price_per_kg": "Цена за кг", "purchase_price": "Цена покупки", "service_cost": "Обслуживание",
+    "life_hours": "Ресурс", "power_w": "Мощность", "manual_rate": "Ручная амортизация",
+    "price": "Цена", "length_cm": "Длина", "width_cm": "Ширина", "height_cm": "Высота",
+    "weight_g": "Вес с упаковкой", "units_per_box": "Товаров в коробке", "code_price": "Цена кода",
+    "application_price": "Нанесение", "electricity_per_kwh": "Электроэнергия",
+    "defect_percent": "Брак", "labor_per_hour": "Работа", "manual_minutes": "Ручная работа",
+    "other": "Прочие затраты",
+}
+
+
 def _entries(value, maximum):
     if not isinstance(value, list) or len(value) > maximum or any(not isinstance(x, dict) for x in value):
         raise CatalogError("Проверьте состав списка.")
@@ -130,44 +148,49 @@ def product(data):
     if not isinstance(photos, list) or len(photos) > 10:
         raise CatalogError("В карточку помещается до десяти фотографий.")
     parts = []
-    for row in _entries(data.get("parts", []), 50):
-        materials = [{"id": text(m.get("id", ""), required=True),
-                      "grams": number(m.get("grams"), positive=True)}
+    for index, row in enumerate(_entries(data.get("parts", []), 50), 1):
+        label = "Деталь «" + str(row.get("name") or index)[:80] + "»"
+        materials = [{"id": field(label + ", пластик", text, m.get("id", ""), required=True),
+                      "grams": field(label + ", вес пластика", number, m.get("grams"), positive=True)}
                      for m in _entries(row.get("materials", []), 25)]
         if not materials:
             raise CatalogError("Укажите хотя бы один материал детали.")
-        parts.append({"name": text(row.get("name", ""), required=True),
-                      "quantity": number(row.get("quantity", 1), positive=True, integer=True),
-                      "printer": text(row.get("printer", ""), required=True), "materials": materials,
-                      "color": text(row.get("color", "")), "hours": number(row.get("hours"), positive=True)})
-    links = [_link(row) for row in _entries(data.get("links", []), 50)]
+        parts.append({"name": field(label + ", название", text, row.get("name", ""), required=True),
+                      "quantity": field(label + ", количество", number, row.get("quantity", 1), positive=True, integer=True),
+                      "printer": field(label + ", принтер", text, row.get("printer", ""), required=True), "materials": materials,
+                      "color": field(label + ", цвет", text, row.get("color", "")),
+                      "hours": field(label + ", печать, ч", number, row.get("hours"), positive=True)})
+    links = [field("Привязка №" + str(index), _link, row)
+             for index, row in enumerate(_entries(data.get("links", []), 50), 1)]
     if len({_json(link) for link in links}) != len(links):
         raise CatalogError("Удалите повторяющиеся привязки.")
     package = data.get("package", {})
     if not isinstance(package, dict):
         raise CatalogError("Проверьте упаковку.")
-    dimensions = {k: number(package.get(k), optional=True, positive=True)
+    dimensions = {k: field("Упаковка, " + FIELD_LABELS[k].lower(), number, package.get(k), optional=True, positive=True)
                   for k in ("length_cm", "width_cm", "height_cm", "weight_g")}
-    consumables = [{"id": text(r.get("id", ""), required=True), "quantity": number(r.get("quantity"), positive=True)}
-                   for r in _entries(package.get("consumables", []), 50)]
-    components = [{"id": text(row.get("id", ""), required=True), "quantity": number(row.get("quantity"), positive=True)}
-                  for row in _entries(data.get("components", []), 50)]
-    defect = number(data.get("defect_percent"), optional=True)
+    consumables = [{"id": field("Расходник №" + str(i), text, r.get("id", ""), required=True),
+                    "quantity": field("Количество расходника №" + str(i), number, r.get("quantity"), positive=True)}
+                   for i, r in enumerate(_entries(package.get("consumables", []), 50), 1)]
+    components = [{"id": field("Комплектующее №" + str(i), text, row.get("id", ""), required=True),
+                   "quantity": field("Количество комплектующего №" + str(i), number, row.get("quantity"), positive=True)}
+                  for i, row in enumerate(_entries(data.get("components", []), 50), 1)]
+    defect = field("Брак, %", number, data.get("defect_percent"), optional=True)
     if defect is not None and Decimal(defect) >= 100:
         raise CatalogError("Брак должен быть меньше 100%.")
     marking_required = data.get("marking_required") is True
     marking = text(data.get("marking", ""))
     if marking_required and not marking:
         raise CatalogError("Выберите позицию справочника маркировки.")
-    return dict(article=text(data.get("article", ""), required=True, maximum=128),
-                name=text(data.get("name", ""), required=True), status=state, links=links,
-                photos=list(dict.fromkeys(_photo(p) for p in photos)),
-                comment=text(data.get("comment", ""), maximum=1000), parts=parts, components=components,
+    return dict(article=field("Внутренний артикул", text, data.get("article", ""), required=True, maximum=128),
+                name=field("Название", text, data.get("name", ""), required=True), status=state, links=links,
+                photos=list(dict.fromkeys(field("Фото №" + str(i), _photo, p) for i, p in enumerate(photos, 1))),
+                comment=field("Комментарий", text, data.get("comment", ""), maximum=1000), parts=parts, components=components,
                 package=dict(dimensions, consumables=consumables, box=text(package.get("box", "")),
                              configured=package.get("configured") is True),
                 marking_required=marking_required, marking=marking if marking_required else "",
-                defect_percent=defect, manual_minutes=number(data.get("manual_minutes", 0)),
-                other=number(data.get("other", 0)), other_comment=text(data.get("other_comment", ""), maximum=500))
+                defect_percent=defect, manual_minutes=field("Ручная работа, минут", number, data.get("manual_minutes", 0)),
+                other=field("Прочие затраты", number, data.get("other", 0)), other_comment=text(data.get("other_comment", ""), maximum=500))
 
 
 def reference(kind, value):
@@ -175,16 +198,16 @@ def reference(kind, value):
         raise CatalogError("Неизвестный справочник.")
     if kind == "settings":
         data = dict(DEFAULTS, **{k: value[k] for k in REFERENCES[kind] if k in value})
-        data = {k: number(v, optional=k != "labor_per_hour") for k, v in data.items()}
+        data = {k: field(FIELD_LABELS[k], number, v, optional=k != "labor_per_hour") for k, v in data.items()}
         if data["defect_percent"] is not None and Decimal(data["defect_percent"]) >= 100:
             raise CatalogError("Брак должен быть меньше 100%.")
         return dict(data, name="Общие настройки", currency="RUB", active=True)
     data = dict(name=text(value.get("name", ""), required=True), active=value.get("active", True) is True)
     for key in REFERENCES[kind]:
         default = 1 if key == "units_per_box" else 0 if key == "service_cost" else None
-        data[key] = number(value.get(key, default), optional=key == "manual_rate",
-                           positive=key in ("life_hours", "length_cm", "width_cm", "height_cm", "units_per_box"),
-                           integer=key == "units_per_box")
+        data[key] = field(FIELD_LABELS[key], number, value.get(key, default), optional=key == "manual_rate",
+                          positive=key in ("life_hours", "length_cm", "width_cm", "height_cm", "units_per_box"),
+                          integer=key == "units_per_box")
     if kind == "material":
         material_type = value.get("type", "other")
         if material_type not in ("PLA", "PETG", "ABS", "TPU", "other"):
@@ -334,6 +357,9 @@ class Store:
                     PRIMARY KEY(market,code));
                 CREATE TABLE IF NOT EXISTS cost_margins(article TEXT NOT NULL, market TEXT NOT NULL, month TEXT NOT NULL,
                     saved_at TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(article,market,month));
+                CREATE TABLE IF NOT EXISTS cost_form_drafts(id TEXT PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL,
+                    updated_at TEXT NOT NULL, data TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS cost_form_drafts_target ON cost_form_drafts(kind,target,updated_at);
             """)
 
     @contextmanager
@@ -395,10 +421,13 @@ class Store:
         self.audit(conn, actor, "product", card["article"], "saved", sorted(k for k in card if card[k] != old.get(k)))
         return version
 
-    def save_product(self, data, day, actor="owner", expected=None):
+    def save_product(self, data, day, actor="owner", expected=None, *, draft_id=None, draft_target=""):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            return self._save_product(conn, data, effective(day), actor, expected)
+            version = self._save_product(conn, data, effective(day), actor, expected)
+            if draft_id:
+                conn.execute("DELETE FROM cost_form_drafts WHERE id=? AND kind='product' AND target=?", (draft_id, draft_target))
+            return version
 
     def _save_reference(self, conn, kind, ident, value, day, actor):
         ident = "default" if kind == "settings" else text(ident, required=True, maximum=128)
@@ -445,7 +474,7 @@ class Store:
                 if (kind, ident) in dependencies(old_card):
                     self._version(conn, old_card, version["effective"], f"{kind}/{ident}")
 
-    def save_reference(self, kind, ident, value, day, actor="owner", *, create=False):
+    def save_reference(self, kind, ident, value, day, actor="owner", *, create=False, draft_id=None, draft_target=""):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if create and kind != "settings":
@@ -455,7 +484,33 @@ class Store:
                 if occupied:
                     ident = uuid4().hex
             self._save_reference(conn, kind, ident, value, effective(day), actor)
+            if draft_id:
+                conn.execute("DELETE FROM cost_form_drafts WHERE id=? AND kind='reference' AND target=?", (draft_id, draft_target))
         return "default" if kind == "settings" else ident
+
+    def save_form_draft(self, ident, kind, target, values, message, missing=()):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{24}", ident) or kind not in ("product", "reference"):
+            raise ValueError("invalid draft identity")
+        payload = _json({"values": values, "message": message, "missing": list(missing)})
+        if len(payload.encode("utf-8")) > 524288:
+            raise ValueError("draft too large")
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute("SELECT kind,target FROM cost_form_drafts WHERE id=?", (ident,)).fetchone()
+            if existing and (existing["kind"], existing["target"]) != (kind, target):
+                raise ValueError("draft identity belongs to another form")
+            conn.execute("""INSERT INTO cost_form_drafts(id,kind,target,updated_at,data) VALUES(?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at,data=excluded.data""",
+                (ident, kind, target, datetime.now(timezone.utc).isoformat(), payload))
+
+    def form_draft(self, ident=None, *, kind=None, target=None):
+        with self.connect() as conn:
+            if ident:
+                row = conn.execute("SELECT * FROM cost_form_drafts WHERE id=?", (ident,)).fetchone()
+            else:
+                row = conn.execute("""SELECT * FROM cost_form_drafts WHERE kind=? AND target=?
+                    ORDER BY updated_at DESC, rowid DESC LIMIT 1""", (kind, target)).fetchone()
+        return dict(id=row["id"], kind=row["kind"], target=row["target"], **json.loads(row["data"])) if row else None
 
     def references(self):
         with self.connect() as conn:

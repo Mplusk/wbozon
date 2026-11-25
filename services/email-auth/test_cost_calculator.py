@@ -2,11 +2,12 @@ import gc
 import io
 from decimal import Decimal
 from pathlib import Path
+import sqlite3
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import calculator_ui
 import cost_catalog
@@ -353,8 +354,15 @@ class CalculatorTests(unittest.TestCase):
                           part_hours=["1", "1", "1", ""], part_material=["black", "white", "white", ""],
                           part_weight=["40", "20", "15", ""], part_color=["saved:Оранжевый", "new", "", ""],
                           part_color_new=["", "  Бордовый  ", "", ""])
-        self.assertEqual(call("POST", "__Host-sid=" + sid, "https://test.example",
-                              dict(color_card, part_color_new=["", "", "", ""]))[0], "400 Bad Request")
+        status, _, headers = call("POST", "__Host-sid=" + sid, "https://test.example",
+                                  dict(color_card, part_color_new=["", "", "", ""]))
+        self.assertEqual(status, "303 See Other")
+        draft_query = urlsplit(headers["Location"]).query
+        status, draft_page, _ = call(cookie="__Host-sid=" + sid, query=draft_query)
+        self.assertEqual(status, "200 OK")
+        self.assertIn('value="new" selected', draft_page)
+        self.assertIn('Введённые данные сохранены в черновике', draft_page)
+        color_card["draft_id"] = parse_qs(draft_query)["draft"][0]
         self.assertEqual(call("POST", "__Host-sid=" + sid, "https://test.example", color_card)[0], "303 See Other")
         parts = self.store.resolve("test-colors")["parts"]
         self.assertEqual([part["color"] for part in parts], ["Оранжевый", "Бордовый", ""])
@@ -393,7 +401,11 @@ class CalculatorTests(unittest.TestCase):
             fields.update(status="active", existing="coral-test", revision="1", comment="Проверить упаковку")
             removed_parts = {key: value for key, value in fields.items() if not key.startswith("part_")}
             status, page, headers = call("POST", cookie, origin, removed_parts, query)
-            self.assertEqual(status, "400 Bad Request")
+            self.assertEqual(status, "303 See Other")
+            draft_query = urlsplit(headers["Location"]).query
+            draft_id = parse_qs(draft_query)["draft"][0]
+            status, page, headers = call(cookie=cookie, query=draft_query)
+            self.assertEqual(status, "200 OK")
             self.assertEqual(headers["Content-Security-Policy"], CALCULATOR_CSP)
             self.assertIn('role="alert"', page)
             self.assertIn("Добавьте хотя бы одну деталь.", page)
@@ -403,11 +415,14 @@ class CalculatorTests(unittest.TestCase):
             self.assertEqual(self.store.resolve("coral-test")["status"], "draft")
             self.assertEqual(len(self.store.history("coral-test")), 1)
 
-            invalid_quantity = dict(fields, pack_id=["bag"], pack_quantity=["0.5"])
-            status, page, _ = call("POST", cookie, origin, invalid_quantity, query)
-            self.assertEqual(status, "400 Bad Request")
+            invalid_quantity = dict(fields, pack_id=["bag"], pack_quantity=["0.5"], draft_id=draft_id)
+            status, _, headers = call("POST", cookie, origin, invalid_quantity, query)
+            self.assertEqual(status, "303 See Other")
+            status, page, _ = call(cookie=cookie, query=urlsplit(headers["Location"]).query)
+            self.assertEqual(status, "200 OK")
             self.assertIn("Штучные расходники указываются целым количеством.", page)
 
+            fields["draft_id"] = draft_id
             self.assertEqual(call("POST", cookie, origin, fields, query)[0], "303 See Other")
             _, page, _ = call(cookie=cookie, query=query)
             self.assertIn('value="active" selected>В работе', page)
@@ -424,3 +439,116 @@ class CalculatorTests(unittest.TestCase):
         self.store.save_reference("settings", "default", {"electricity_per_kwh": "6.5", "defect_percent": "0"}, next_day)
         self.assertEqual(self.store.uniform("coral-test", next_day, next_day)["calculation"]["status"], "calculated")
         self.assertEqual(self.store.at("coral-test", day), current)
+
+    def test_invalid_card_is_kept_as_a_durable_draft_until_corrected(self):
+        call, sid, csrf = self._owner_portal()
+        cookie, origin = "__Host-sid=" + sid, "https://test.example"
+        query = "tab=calculator&view=card&article=300030"
+        original = self.store.resolve("300030")
+        history = self.store.history("300030")
+        fields = {"csrf": csrf, "action": "save_product", "article": "300030", "existing": "300030",
+                  "revision": str(original["revision"]), "name": "Новая <чаша>", "status": "active",
+                  "effective": "2026-11-24", "comment": "Не потерять & проверить",
+                  "photos": "https://example.org/photo.jpg?x=1&y=2",
+                  "link_market": ["ozon", "wb"], "link_code": ["300030", "3000030"],
+                  "link_id": ["5215904379", "1294477629"],
+                  "part_name": ["Корпус", "Крепление"], "part_count": ["1", "2"],
+                  "part_printer": ["f1", "f1"], "part_hours": ["ошибка", "0.3"],
+                  "part_material": ["black", "white"], "part_weight": ["80", "10"],
+                  "part_color": ["new", "saved:black"], "part_color_new": ["Хаки", ""],
+                  "pack_ready": "1", "pack_box": "box", "weight_g": "190", "length_cm": "19",
+                  "width_cm": "10", "height_cm": "8", "pack_id": ["bag"], "pack_quantity": ["1"],
+                  "marking_required": "0", "defect_percent": "5", "manual_minutes": "3", "other": "1",
+                  "unexpected_secret": "must-not-be-stored"}
+        status, _, headers = call("POST", cookie, origin, fields, query)
+        self.assertEqual(status, "303 See Other")
+        draft_query = urlsplit(headers["Location"]).query
+        draft_id = parse_qs(draft_query)["draft"][0]
+        self.assertEqual(self.store.resolve("300030"), original)
+        self.assertEqual(self.store.history("300030"), history)
+        draft = cost_catalog.Store(self.path).form_draft(draft_id)
+        self.assertNotIn("csrf", draft["values"])
+        self.assertNotIn("unexpected_secret", draft["values"])
+        self.assertEqual(draft["values"]["part_hours"], ["ошибка", "0.3"])
+        self.assertEqual(call(query=draft_query)[0], "401 Unauthorized")
+        status, page, _ = call(cookie=cookie, query=draft_query)
+        self.assertEqual(status, "200 OK")
+        for value in ('name="name" value="Новая &lt;чаша&gt;"', 'value="Не потерять &amp; проверить"',
+                      'name="part_hours" value="ошибка"', 'name="part_hours" value="0.3"',
+                      'Деталь «Корпус», печать, ч: Укажите конечное число.',
+                      'value="new" selected', 'name="part_color_new" value="Хаки"',
+                      'name="weight_g" value="190"', 'name="pack_quantity" value="1"',
+                      'Исправьте ошибку и сохраните снова'):
+            self.assertIn(value, page)
+        _, original_page, _ = call(cookie=cookie, query=query)
+        self.assertIn("Продолжить редактирование", original_page)
+
+        fields.update(part_hours=["1.5", "0.3"], draft_id=draft_id)
+        self.assertEqual(call("POST", cookie, origin, fields, query)[0], "303 See Other")
+        self.assertIsNone(self.store.form_draft(draft_id))
+        saved = self.store.resolve("300030")
+        self.assertEqual(saved["name"], "Новая <чаша>")
+        self.assertEqual(saved["parts"][0]["color"], "Хаки")
+        self.assertEqual(saved["package"]["weight_g"], "190")
+
+    def test_reference_validation_keeps_values_and_clears_draft_on_success(self):
+        call, sid, csrf = self._owner_portal()
+        cookie, origin = "__Host-sid=" + sid, "https://test.example"
+        query = "tab=calculator&view=references&kind=material&id=black"
+        fields = {"csrf": csrf, "action": "save_reference", "kind": "material", "fixed_id": "black",
+                  "ref_id": "black", "ref_name": "Новый материал", "active": "1", "material_type": "PETG",
+                  "price_per_kg": "не число", "color": "new", "color_new": "Фисташковый",
+                  "supplier": "Тестовый поставщик", "effective": "2026-11-24"}
+        old = next(item for item in self.store.references() if item["id"] == "black")
+        status, _, headers = call("POST", cookie, origin, fields, query)
+        self.assertEqual(status, "303 See Other")
+        draft_query = urlsplit(headers["Location"]).query
+        draft_id = parse_qs(draft_query)["draft"][0]
+        self.assertEqual(next(item for item in self.store.references() if item["id"] == "black"), old)
+        status, page, _ = call(cookie=cookie, query=draft_query)
+        self.assertEqual(status, "200 OK")
+        for value in ('name="ref_name" value="Новый материал"', 'name="price_per_kg" value="не число"',
+                      'Цена за кг: Укажите конечное число.',
+                      'value="new" selected', 'name="color_new" value="Фисташковый"',
+                      'name="supplier" value="Тестовый поставщик"', 'name="effective" value="2026-11-24"'):
+            self.assertIn(value, page)
+        fields.update(price_per_kg="885", draft_id=draft_id)
+        self.assertEqual(call("POST", cookie, origin, fields, query)[0], "303 See Other")
+        self.assertIsNone(self.store.form_draft(draft_id))
+        saved = next(item for item in self.store.references() if item["id"] == "black")
+        self.assertEqual((saved["name"], saved["color"], saved["price_per_kg"]), ("Новый материал", "Фисташковый", "885"))
+
+    def test_stale_draft_does_not_overwrite_a_concurrent_edit(self):
+        call, sid, csrf = self._owner_portal()
+        cookie, origin = "__Host-sid=" + sid, "https://test.example"
+        query = "tab=calculator&view=card&article=300030"
+        original = self.store.resolve("300030")
+        fields = {"csrf": csrf, "action": "save_product", "article": "300030", "existing": "300030",
+                  "revision": str(original["revision"]), "name": "Мой вариант", "status": "draft",
+                  "effective": "2026-11-24", "defect_percent": "100"}
+        status, _, headers = call("POST", cookie, origin, fields, query)
+        self.assertEqual(status, "303 See Other")
+        draft_id = parse_qs(urlsplit(headers["Location"]).query)["draft"][0]
+        other = dict(original, name="Изменено в другом окне")
+        self.store.save_product(other, "2026-11-24", expected=original["revision"])
+        fields.update(defect_percent="5", draft_id=draft_id)
+        status, _, headers = call("POST", cookie, origin, fields, query)
+        self.assertEqual(status, "303 See Other")
+        _, page, _ = call(cookie=cookie, query=urlsplit(headers["Location"]).query)
+        self.assertIn("Карточка уже изменилась", page)
+        self.assertIn('name="name" value="Мой вариант"', page)
+        self.assertEqual(self.store.resolve("300030")["name"], "Изменено в другом окне")
+        self.assertIsNotNone(self.store.form_draft(draft_id))
+
+    def test_draft_storage_failure_keeps_values_on_the_page_without_claiming_success(self):
+        call, sid, csrf = self._owner_portal()
+        cookie, origin = "__Host-sid=" + sid, "https://test.example"
+        fields = {"csrf": csrf, "action": "save_product", "article": "new-test", "name": "Важное название",
+                  "status": "draft", "revision": "0", "effective": "2026-11-24", "defect_percent": "100"}
+        with patch("cost_catalog.Store.save_form_draft", side_effect=sqlite3.OperationalError("locked")):
+            status, page, _ = call("POST", cookie, origin, fields, "tab=calculator&view=card")
+        self.assertEqual(status, "503 Service Unavailable")
+        self.assertIn('name="name" value="Важное название"', page)
+        self.assertIn("Не удалось сохранить черновик на сервере", page)
+        self.assertNotIn("Введённые данные сохранены в черновике", page)
+        self.assertIsNone(self.store.resolve("new-test"))

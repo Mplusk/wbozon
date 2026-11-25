@@ -91,7 +91,9 @@ document.addEventListener('click', function (event) {
     const row = remove.closest('.calc-input-row');
     const neighbor = row.nextElementSibling || row.previousElementSibling;
     const group = row.parentElement.dataset.costRows;
+    const owner = remove.closest('form');
     row.remove();
+    owner?.dispatchEvent(new Event('input', {bubbles: true}));
     const focus = neighbor?.querySelector('[data-cost-remove]') || document.querySelector('[data-cost-add="'+group+'"]');
     focus?.focus();
     return;
@@ -104,6 +106,7 @@ document.addEventListener('click', function (event) {
   if (list && template && list.children.length < 110) {
     list.append(template.content.cloneNode(true));
     list.lastElementChild.querySelector('input,select').focus();
+    list.closest('form')?.dispatchEvent(new Event('input', {bubbles: true}));
   }
 });
 document.addEventListener('change', function (event) {
@@ -116,6 +119,87 @@ const csv = document.getElementById('cost-csv-file');
 if (csv) csv.addEventListener('change', async function () {
   const file = csv.files[0];
   if (file && file.size <= 220000) document.querySelector('textarea[name=csv]').value = await file.text();
+});
+// A tab-local safety copy covers expired sessions or a lost connection. It never
+// contains the CSRF token and is only restored after the owner chooses to do so.
+const costLocalPrefix = 'sidzen-cost-editor:';
+try {
+  const cleared = new URLSearchParams(location.search).get('clear_draft');
+  if (cleared) {
+    for (let i = sessionStorage.length - 1; i >= 0; i--) {
+      const key = sessionStorage.key(i);
+      if (!key?.startsWith(costLocalPrefix)) continue;
+      try { if (JSON.parse(sessionStorage.getItem(key))?.id === cleared) sessionStorage.removeItem(key); } catch (_) {}
+    }
+  }
+} catch (_) {}
+document.querySelectorAll('form[data-cost-local-key]').forEach(function (form) {
+  const key = costLocalPrefix + form.dataset.costLocalKey;
+  const controls = root => Array.from(root.querySelectorAll('input[name],select[name],textarea[name]'))
+    .filter(el => !['csrf', 'action', 'draft_id'].includes(el.name) && el.type !== 'file');
+  const fields = list => list.map(el => [el.name, el.value]);
+  function capture() {
+    return {
+      main: fields(controls(form).filter(el => !el.closest('[data-cost-rows]'))),
+      groups: Array.from(form.querySelectorAll('[data-cost-rows]')).map(list => ({
+        name: list.dataset.costRows, rows: Array.from(list.children).map(row => fields(controls(row)))
+      }))
+    };
+  }
+  function saveLocal() {
+    try { sessionStorage.setItem(key, JSON.stringify({id: form.elements.draft_id.value, data: capture()})); } catch (_) {}
+  }
+  function applyFields(root, values, outsideRows) {
+    if (!Array.isArray(values) || values.length > 3000) return;
+    const available = controls(root).filter(el => !outsideRows || !el.closest('[data-cost-rows]'));
+    const used = new Set();
+    values.forEach(function (pair) {
+      if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== 'string' || typeof pair[1] !== 'string') return;
+      const el = available.find(item => !used.has(item) && item.name === pair[0]);
+      if (!el) return;
+      used.add(el);
+      if (el.tagName === 'SELECT' && !Array.from(el.options).some(option => option.value === pair[1])) {
+        const option = document.createElement('option');
+        option.value = pair[1]; option.textContent = 'Недоступное значение: ' + pair[1]; el.append(option);
+      }
+      el.value = pair[1];
+    });
+  }
+  let saved;
+  try { saved = JSON.parse(sessionStorage.getItem(key)); } catch (_) {}
+  if (saved?.data && JSON.stringify(saved.data) !== JSON.stringify(capture())) {
+    const notice = document.createElement('p'); notice.className = 'notice'; notice.setAttribute('role', 'status');
+    notice.append('В этой вкладке есть несохранённые данные. ');
+    const restore = document.createElement('button'); restore.type = 'button'; restore.className = 'calc-secondary';
+    restore.textContent = 'Восстановить данные'; notice.append(restore); form.prepend(notice);
+    restore.addEventListener('click', function () {
+      applyFields(form, saved.data.main, true);
+      if (Array.isArray(saved.data.groups)) saved.data.groups.forEach(function (group) {
+        const list = Array.from(form.querySelectorAll('[data-cost-rows]')).find(item => item.dataset.costRows === group.name);
+        const template = document.getElementById('cost-' + group.name);
+        if (!list || !template || !Array.isArray(group.rows) || group.rows.length > 110) return;
+        list.replaceChildren();
+        group.rows.forEach(function (row) {
+          list.append(template.content.cloneNode(true));
+          applyFields(list.lastElementChild, row, false);
+        });
+      });
+      form.querySelectorAll('[data-cost-color]').forEach(function (item) {
+        item.querySelector('[data-cost-new-color]').hidden = item.querySelector('select').value !== 'new';
+      });
+      if (typeof saved.id === 'string' && /^[A-Za-z0-9_-]{24}$/.test(saved.id)) form.elements.draft_id.value = saved.id;
+      notice.remove(); saveLocal();
+    });
+  }
+  let timer;
+  function scheduleLocal() {
+    clearTimeout(timer);
+    timer = setTimeout(function () { timer = undefined; saveLocal(); }, 300);
+  }
+  form.addEventListener('input', scheduleLocal);
+  form.addEventListener('change', scheduleLocal);
+  form.addEventListener('submit', function () { clearTimeout(timer); timer = undefined; saveLocal(); });
+  window.addEventListener('pagehide', function () { if (timer) { clearTimeout(timer); timer = undefined; saveLocal(); } });
 });
 """
 CALCULATOR_HASH=base64.b64encode(hashlib.sha256(CALCULATOR_SCRIPT.encode()).digest()).decode()

@@ -4,6 +4,10 @@ from datetime import date, timedelta
 from decimal import Decimal
 from html import escape
 import hmac
+from itertools import zip_longest
+import json
+import re
+import secrets
 import sqlite3
 from urllib.parse import parse_qs, urlencode
 
@@ -46,6 +50,8 @@ def control(label, key, value="", typ="text", required=False):
 
 
 def select(label, key, choices, current=None):
+    if current not in (None, "") and all(value != current for value, _ in choices):
+        choices = list(choices) + [(current, "Недоступное значение: " + str(current))]
     options = "".join(f'<option value="{h(value)}"{" selected" if value == current else ""}>{h(name)}</option>'
                       for value, name in choices)
     return f'<label>{h(label)}<select name="{h(key)}">{options}</select></label>'
@@ -61,14 +67,19 @@ def _saved_colors(refs, products):
     return colors
 
 
-def _color_select(key, colors, current, empty_label):
+def _color_select(key, colors, current, empty_label, *, choice=None, new_value=""):
     if current:
         colors = {**colors, current.casefold(): current}
+    if choice and choice.startswith("saved:"):
+        color = choice.removeprefix("saved:")
+        colors = {**colors, color.casefold(): color}
     choices = [("", empty_label)]
     choices.extend(("saved:" + color, color) for color in sorted(colors.values(), key=str.casefold))
     choices.append(("new", "Новый цвет…"))
-    return ('<div data-cost-color>' + select("Цвет", key, choices, "saved:" + current if current else "") +
-            '<div data-cost-new-color hidden>' + control("Название нового цвета", key + "_new") + "</div></div>")
+    selected = choice if choice is not None else ("saved:" + current if current else "")
+    return ('<div data-cost-color>' + select("Цвет", key, choices, selected) +
+            '<div data-cost-new-color' + ('' if selected == 'new' else ' hidden') + '>' +
+            control("Название нового цвета", key + "_new", new_value) + "</div></div>")
 
 
 def _submitted_color(value, new):
@@ -85,8 +96,9 @@ def hidden(name, value):
     return f'<input type="hidden" name="{h(name)}" value="{h(value)}">'
 
 
-def form(csrf, action, content, **query):
-    return f'<form method="post" action="{h(url(**query))}">{hidden("csrf", csrf)}{hidden("action", action)}{content}</form>'
+def form(csrf, action, content, *, local_key=None, **query):
+    local = ' data-cost-local-key="' + h(local_key) + '"' if local_key is not None else ''
+    return f'<form method="post" action="{h(url(**query))}"{local}>{hidden("csrf", csrf)}{hidden("action", action)}{content}</form>'
 
 
 def table(headers, lines):
@@ -162,7 +174,8 @@ def _parts(card, refs, colors):
                 control("Печать, ч", "part_hours", data.get("hours")) +
                 select("Пластик", "part_material", _box(refs, "material"), material.get("id")) +
                 control("Вес, г", "part_weight", material.get("grams")) +
-                _color_select("part_color", colors, data.get("color"), "Из материала") +
+                _color_select("part_color", colors, data.get("color"), "Из материала",
+                              choice=data.get("_color_choice"), new_value=data.get("_color_new", "")) +
                 '<button class="calc-secondary" type="button" data-cost-remove>Удалить строку</button></div>')
     rendered = [row(part, material) for part in card.get("parts", []) for material in part["materials"]]
     return _rows("parts", row({}, {}), rendered, trailing_row=False)
@@ -186,7 +199,7 @@ def _components(card, refs):
         return ('<div class="calc-input-row">' + select("Комплектующее", "component_id", choices, item.get("id")) +
                 control(FIELDS["component_quantity"], "component_quantity", item.get("quantity")) + "</div>")
 
-    if len(choices) == 1:
+    if len(choices) == 1 and not card.get("components"):
         return "<p>" + anchor("Добавить комплектующее в справочник", view="references", kind="component") + "</p>"
     return _rows("components", row({}), [row(item) for item in card.get("components", [])])
 
@@ -196,7 +209,8 @@ def _package(card, refs):
     def row(item):
         return ('<div class="calc-input-row">' + select("Расходник", "pack_id", _box(refs, "packaging"), item.get("id")) +
                 control("Количество", "pack_quantity", item.get("quantity")) + "</div>")
-    return (select("Упаковка задана", "pack_ready", [("0", "Заполнить позже"), ("1", "Готова")], str(int(data.get("configured", False)))) +
+    return (select("Упаковка задана", "pack_ready", [("0", "Заполнить позже"), ("1", "Готова")],
+                   data.get("_ready_choice", str(int(data.get("configured", False))))) +
             '<div class="calc-grid">' + select("Коробка", "pack_box", _box(refs, "box"), data.get("box")) +
             "".join(control(FIELDS[k], k, data.get(k)) for k in ("weight_g", "length_cm", "width_cm", "height_cm")) +
             "</div>" + _rows("package", row({}), [row(i) for i in data.get("consumables", [])]))
@@ -264,20 +278,53 @@ def _history(store, article, query):
     return html
 
 
-def _card(store, query, csrf, *, submitted=None, error=None):
+def _draft_target(kind, ident):
+    return json.dumps([kind, ident], ensure_ascii=False, separators=(",", ":"))
+
+
+def _draft_notice(draft, view, **query):
+    if not draft:
+        return ""
+    return ('<p class="notice" role="status">Есть незавершённый черновик. ' +
+            anchor("Продолжить редактирование", view=view, draft=draft["id"], **query) + '.</p>')
+
+
+def _draft_error(draft, refs):
+    if not draft:
+        return ""
+    if draft.get("persisted", True):
+        heading = ('Изменения пока не применены. Введённые данные сохранены в черновике. '
+                   'Исправьте ошибку и сохраните снова.')
+    else:
+        heading = ('Не удалось сохранить черновик на сервере. Данные остались на этой странице. '
+                   'Не закрывайте её и повторите сохранение позже.')
+    message = '<div class="notice" role="alert"><p>' + h(heading) + '</p><p>' + h(draft["message"]) + '</p>'
+    if draft.get("missing"):
+        message += _missing_inputs(draft["missing"], refs)
+    return message + '</div>'
+
+
+def _card(store, query, csrf, *, draft=None):
     original = store.resolve(query["article"]) if query.get("article") else None
     copying = query.get("copy") == "1"
-    data = submitted if submitted is not None else original or {}
+    data = _raw_product(draft["values"]) if draft else original or {}
     refs = store.references()
     editing = bool(original) and not copying
-    keep_identity = editing or submitted is not None
+    keep_identity = editing or draft is not None
+    draft_id = draft["id"] if draft else secrets.token_urlsafe(18)
     title = original["name"] if editing else "Новый товар"
     heading = '<div class="calc-section-title"><h2>' + h(title) + "</h2>"
     if editing:
         heading += anchor("Создать похожий", view="card", article=original["article"], copy="1")
     heading += "</div>"
+    if draft:
+        heading += _draft_error(draft, refs)
+    elif not copying:
+        latest = store.form_draft(kind="product", target=original["article"] if editing else "")
+        heading += _draft_notice(latest, "card")
     legal = hidden("revision", data.get("revision", 0) if keep_identity else 0)
-    legal += hidden("existing", original["article"] if editing else "")
+    legal += hidden("existing", draft["target"] if draft else original["article"] if editing else "")
+    legal += hidden("draft_id", draft_id)
     fields = '<div class="calc-grid">' + control("Внутренний артикул", "article", data.get("article") if keep_identity else "", required=True)
     fields += control("Название", "name", data.get("name"), required=True)
     fields += select("Статус", "status", [(s, LABELS[s]) for s in catalog.STATUSES], data["status"] if keep_identity else "draft")
@@ -290,19 +337,19 @@ def _card(store, query, csrf, *, submitted=None, error=None):
     fields += "<h3>Комплектующие</h3>" + _components(data, refs)
     fields += "<h3>Упаковка</h3>" + _package(data, refs)
     fields += '<h3>Дополнительные расходы</h3><div class="calc-grid">' + select(
-        "Честный знак", "marking_required", [("0", "Не требуется"), ("1", "Требуется")], str(int(data.get("marking_required", False))))
+        "Честный знак", "marking_required", [("0", "Не требуется"), ("1", "Требуется")],
+        data.get("_marking_choice", str(int(data.get("marking_required", False)))))
     fields += select("Позиция маркировки", "marking", _box(refs, "marking"), data.get("marking"))
     fields += control("Брак, %", "defect_percent", data.get("defect_percent"))
     fields += control("Ручная работа, минут", "manual_minutes", data.get("manual_minutes", 0))
     fields += control("Прочие затраты, ₽", "other", data.get("other", 0))
     fields += control("Комментарий к прочим затратам", "other_comment", data.get("other_comment")) + "</div>"
     fields += "<button>Сохранить карточку</button>"
-    if error:
-        heading += ('<div class="notice" role="alert"><p>' + h(error) + '</p>' +
-                    _missing_inputs(error.missing, refs) + '</div>')
-    elif editing:
+    if not draft and editing:
         heading += _breakdown(store.at(original["article"], None), refs)
-    html = heading + '<div class="calc-panel">' + form(csrf, "save_product", legal + fields, view="card") + "</div>"
+    local_target = draft["target"] if draft else original["article"] if editing else ""
+    html = heading + '<div class="calc-panel">' + form(csrf, "save_product", legal + fields,
+                                                       local_key="product:" + local_target, view="card") + "</div>"
     if editing:
         html += "<h2>История себестоимости</h2>" + _history(store, original["article"], query)
     return html
@@ -326,41 +373,61 @@ def _reference_table(kind, rows, columns):
     return table(("Позиция", "Код", *(label for _, label in columns), "Статус", "Действует с", "Действия"), listing)
 
 
-def _reference_page(store, query, csrf):
+def _reference_page(store, query, csrf, *, draft=None):
     kind = query.get("kind", "material")
     if kind not in catalog.REFERENCES:
         raise ValueError()
     options = '<div class="calc-tabs">' + "".join(anchor(LABELS[k], view="references", kind=k) for k in catalog.REFERENCES) + "</div>"
     refs = store.references()
     rows = [r for r in refs if r["kind"] == kind]
-    data = next((r for r in rows if r["id"] == query.get("id") or kind == "settings"), {})
+    original = next((r for r in rows if r["id"] == query.get("id") or kind == "settings"), {})
+    data = dict(original)
+    if draft:
+        values = draft["values"]
+        def get(key, default=""):
+            return values.get(key, [default])[0]
+        data.update(code=get("ref_id"), name=get("ref_name"), active=get("active") == "1",
+                    type=get("material_type"), supplier=get("supplier"), unit=get("unit"),
+                    _active_choice=get("active", "1"), _color_choice=get("color"), _color_new=get("color_new"),
+                    _effective=get("effective"))
+        if get("fixed_id"):
+            data["id"] = get("fixed_id")
+        data.update({key: get(key) for key in catalog.REFERENCES[kind]})
+    draft_id = draft["id"] if draft else secrets.token_urlsafe(18)
     fields = hidden("kind", kind) + hidden("fixed_id", data.get("id", ""))
+    fields += hidden("draft_id", draft_id)
     if kind != "settings":
         fields += control("Код позиции", "ref_id", data.get("code"), required=True) + control("Название", "ref_name", data.get("name"), required=True)
-        fields += select("Статус", "active", [("1", "Активна"), ("0", "Архив")], str(int(data.get("active", True))))
+        fields += select("Статус", "active", [("1", "Активна"), ("0", "Архив")],
+                         data.get("_active_choice", str(int(data.get("active", True)))))
     columns = [(key, "Цена за единицу, ₽" if kind == "component" and key == "price" else FIELDS[key])
                for key in catalog.REFERENCES[kind]]
     fields += "".join(control(label, key, data.get(key, 1 if key == "units_per_box" else 0 if key in ("service_cost", "labor_per_hour") else ""))
                       for key, label in columns)
     if kind == "material":
         fields += select("Тип пластика", "material_type", list(MATERIAL_TYPES.items()), data.get("type", "other"))
-        fields += _color_select("color", _saved_colors(refs, store.products()), data.get("color"), "Без цвета")
+        fields += _color_select("color", _saved_colors(refs, store.products()), data.get("color"), "Без цвета",
+                                choice=data.get("_color_choice"), new_value=data.get("_color_new", ""))
         fields += control("Поставщик", "supplier", data.get("supplier"))
     if kind in ("component", "packaging"):
         fields += select("Единица", "unit", list(UNITS.items()), data.get("unit", "pcs"))
-    fields += control("Изменения действуют с" if data else "Дата начала действия", "effective", catalog.today(), "date", True)
-    if data and kind == "printer":
-        rate = (Decimal(data["manual_rate"]) if data["manual_rate"] is not None else
-                (Decimal(data["purchase_price"]) + Decimal(data["service_cost"])) / Decimal(data["life_hours"]))
+    fields += control("Изменения действуют с" if original else "Дата начала действия", "effective",
+                      data.get("_effective", catalog.today()), "date", True)
+    if original and kind == "printer":
+        rate = (Decimal(original["manual_rate"]) if original["manual_rate"] is not None else
+                (Decimal(original["purchase_price"]) + Decimal(original["service_cost"])) / Decimal(original["life_hours"]))
         tariff = next((item.get("electricity_per_kwh") for item in refs if item["kind"] == "settings"), None)
-        energy = Decimal(tariff) * Decimal(data["power_w"]) / 1000 if tariff is not None else None
+        energy = Decimal(tariff) * Decimal(original["power_w"]) / 1000 if tariff is not None else None
         fields += "<p>Амортизация · " + currency(catalog.display(rate)) + "/ч<br>Электроэнергия · " + (
             currency(catalog.display(energy)) + "/ч" if energy is not None else "укажите тариф") + "</p>"
-    return options + "<h2>" + h(LABELS[kind]) + "</h2>" + (
+    notice = (_draft_error(draft, refs) if draft else _draft_notice(
+        store.form_draft(kind="reference", target=_draft_target(kind, original.get("id", ""))), "references"))
+    return options + "<h2>" + h(LABELS[kind]) + "</h2>" + notice + (
         _reference_table(kind, rows, columns)) + (
-        "<p>" + anchor("Добавить позицию", view="references", kind=kind) + "</p>" if data and kind != "settings" else "") + (
+        "<p>" + anchor("Добавить позицию", view="references", kind=kind) + "</p>" if original and kind != "settings" else "") + (
         '<div class="calc-panel">' + form(csrf, "save_reference", '<div class="calc-grid">' + fields +
-                                         "</div><button>" + ("Сохранить изменения" if data else "Сохранить") + "</button>",
+                                         "</div><button>" + ("Сохранить изменения" if original else "Сохранить") + "</button>",
+                                         local_key="reference:" + (draft["target"] if draft else _draft_target(kind, original.get("id", ""))),
                                          view="references", kind=kind) + "</div>")
 
 
@@ -414,6 +481,45 @@ def _journal(store, csrf):
             "<h2>Изменения калькулятора</h2>" + table(("Время", "Кто", "Раздел", "Код", "Действие", "Поля"), audit))
 
 
+def _raw_product(values):
+    """Rebuild the editor from submitted strings without validating or normalizing them."""
+    def get(key, default=""):
+        items = values.get(key, [])
+        return items[0] if items else default
+
+    def rows(*keys):
+        return zip_longest(*(values.get(key, []) for key in keys), fillvalue="")
+
+    parts = []
+    for name, count, printer, hours, material, weight, color, new_color in rows(
+            "part_name", "part_count", "part_printer", "part_hours", "part_material", "part_weight",
+            "part_color", "part_color_new"):
+        if not any((name, printer, hours, material, weight, color, new_color)) and count in ("", "1"):
+            continue
+        part = dict(name=name, quantity=count, printer=printer, hours=hours,
+                    materials=[dict(id=material, grams=weight)], color="")
+        if "part_color_new" in values:
+            part.update(_color_choice=color, _color_new=new_color)
+        else:
+            part["color"] = color
+        parts.append(part)
+    links = [dict(marketplace=market, code=code, marketplace_id=ident)
+             for market, code, ident in rows("link_market", "link_code", "link_id") if market or code or ident]
+    components = [dict(id=ident, quantity=quantity) for ident, quantity in rows("component_id", "component_quantity")
+                  if ident or quantity]
+    consumables = [dict(id=ident, quantity=quantity) for ident, quantity in rows("pack_id", "pack_quantity")
+                   if ident or quantity]
+    ready, marking = get("pack_ready", "0"), get("marking_required", "0")
+    return dict(article=get("article"), name=get("name"), status=get("status", "draft"),
+                revision=get("revision", "0"), effective=get("effective"), comment=get("comment"),
+                photos=get("photos").splitlines(), links=links, parts=parts, components=components,
+                package=dict(configured=ready == "1", _ready_choice=ready, box=get("pack_box"),
+                             consumables=consumables, **{k: get(k) for k in ("weight_g", "length_cm", "width_cm", "height_cm")}),
+                marking_required=marking == "1", _marking_choice=marking, marking=get("marking"),
+                defect_percent=get("defect_percent"), manual_minutes=get("manual_minutes", "0"),
+                other=get("other", "0"), other_comment=get("other_comment"))
+
+
 def _form_product(values):
     def get(k, default=""):
         data = values.get(k, [default])
@@ -430,16 +536,17 @@ def _form_product(values):
     if "part_color_new" not in values:
         values = {**values, "part_color_new": [None] * len(values.get("part_color", []))}
     parts = {}
-    for name, count, printer, hours, material, weight, color_choice, new_color in lines(
+    for index, (name, count, printer, hours, material, weight, color_choice, new_color) in enumerate(lines(
             ("part_name", "part_count", "part_printer", "part_hours", "part_material", "part_weight",
-             "part_color", "part_color_new")):
-        color = _submitted_color(color_choice, new_color)
+             "part_color", "part_color_new")), 1):
+        label = "Деталь «" + (name or str(index))[:80] + "»"
+        color = catalog.field(label + ", цвет", _submitted_color, color_choice, new_color)
         if not name and not material and not weight and not printer and not hours and not color:
             continue
         if not name:
             raise catalog.CatalogError("Введите название каждой детали.")
-        fields = dict(name=name, quantity=catalog.number(count, positive=True, integer=True),
-                      printer=printer, hours=catalog.number(hours, positive=True), color=color)
+        fields = dict(name=name, quantity=catalog.field(label + ", количество", catalog.number, count, positive=True, integer=True),
+                      printer=printer, hours=catalog.field(label + ", печать, ч", catalog.number, hours, positive=True), color=color)
         if name in parts and any(parts[name][k] != v for k, v in fields.items()):
             raise catalog.CatalogError("Согласуйте количество, принтер, цвет и время в повторяющихся строках детали.")
         parts.setdefault(name, dict(fields, materials=[]))["materials"].append(dict(id=material, grams=weight))
@@ -458,6 +565,18 @@ def _form_product(values):
                 marking_required=get("marking_required") == "1", marking=get("marking"), defect_percent=get("defect_percent"),
                 manual_minutes=get("manual_minutes", "0"), other=get("other", "0"), other_comment=get("other_comment"))
     return card, get("effective"), revision
+
+
+PRODUCT_FIELDS = frozenset((
+    "article", "existing", "revision", "name", "status", "effective", "comment", "photos",
+    "link_market", "link_code", "link_id", "part_name", "part_count", "part_printer", "part_hours",
+    "part_material", "part_weight", "part_color", "part_color_new", "component_id", "component_quantity",
+    "pack_ready", "pack_box", "weight_g", "length_cm", "width_cm", "height_cm", "pack_id", "pack_quantity",
+    "marking_required", "marking", "defect_percent", "manual_minutes", "other", "other_comment",
+))
+REFERENCE_FIELDS = frozenset(("kind", "fixed_id", "ref_id", "ref_name", "active", "material_type", "color",
+                              "color_new", "supplier", "unit", "effective")) | frozenset(
+                                  key for fields in catalog.REFERENCES.values() for key in fields)
 
 
 def handle(portal, env, method, session, query, body, reply, start):
@@ -479,22 +598,60 @@ def handle(portal, env, method, session, query, body, reply, start):
         action = get("action")
         target = {"view": query.get("view", "products")}
         actor = "owner"
-        if action == "save_product":
-            card, day, rev = _form_product(values)
+        draft_id = get("draft_id")
+        if draft_id and not re.fullmatch(r"[A-Za-z0-9_-]{24}", draft_id):
+            raise ValueError()
+        draft_id = draft_id or secrets.token_urlsafe(18)
+
+        def preserve(kind, draft_target, exc, allowed):
+            nonlocal draft_id
+            message = str(exc) if isinstance(exc, catalog.CatalogError) else "Проверьте введённые данные."
+            saved = {key: items for key, items in values.items() if key in allowed}
+            missing = list(getattr(exc, "missing", ()))
             try:
-                store.save_product(card, day, actor, rev)
-            except catalog.ProductNotReady as exc:
-                page = _card(store, {"article": get("existing")}, csrf,
-                             submitted=dict(card, revision=rev, effective=day), error=exc)
-                return reply(_page("card", page), "400 Bad Request", csp=CALCULATOR_CSP)
+                prior = store.form_draft(draft_id)
+                if prior and (prior["kind"], prior["target"]) != (kind, draft_target):
+                    draft_id = secrets.token_urlsafe(18)
+                store.save_form_draft(draft_id, kind, draft_target, saved, message, missing)
+            except (sqlite3.Error, OSError):
+                temporary = dict(id=draft_id, kind=kind, target=draft_target, values=saved, message=message,
+                                 missing=missing, persisted=False)
+                if kind == "product":
+                    page = _card(store, {"article": draft_target}, csrf, draft=temporary)
+                    view = "card"
+                else:
+                    ref_kind, ref_id = json.loads(draft_target)
+                    page = _reference_page(store, {"kind": ref_kind, "id": ref_id}, csrf, draft=temporary)
+                    view = "references"
+                return reply(_page(view, page), "503 Service Unavailable", csp=CALCULATOR_CSP)
+            start("303 See Other", [("Location", url(view="card" if kind == "product" else "references", draft=draft_id)),
+                                    ("Cache-Control", "no-store"), ("Content-Length", "0")])
+            return [b""]
+
+        if action == "save_product":
+            existing = get("existing")
+            if len(existing) > 128 or any(ord(ch) < 32 for ch in existing):
+                raise ValueError()
+            try:
+                card, day, rev = _form_product(values)
+                store.save_product(card, day, actor, rev, draft_id=draft_id, draft_target=existing)
+            except (ValueError, TypeError, KeyError) as exc:
+                return preserve("product", existing, exc, PRODUCT_FIELDS)
             target = dict(view="card", article=card["article"])
         elif action == "save_reference":
             kind, code, existing = get("kind"), get("ref_id"), get("fixed_id")
-            data = dict(name=get("ref_name"), active=get("active") == "1", type=get("material_type"),
-                        color=_submitted_color(get("color"), get("color_new", None)),
-                        supplier=get("supplier"), unit=get("unit"), code=code)
-            data.update({key: get(key) for key in catalog.REFERENCES[kind]})
-            ident = store.save_reference(kind, existing or code, data, get("effective"), actor, create=not existing)
+            if kind not in catalog.REFERENCES or len(existing) > 128 or any(ord(ch) < 32 for ch in existing):
+                raise ValueError()
+            draft_target = _draft_target(kind, existing)
+            try:
+                data = dict(name=get("ref_name"), active=get("active") == "1", type=get("material_type"),
+                            color=_submitted_color(get("color"), get("color_new", None)),
+                            supplier=get("supplier"), unit=get("unit"), code=code)
+                data.update({key: get(key) for key in catalog.REFERENCES[kind]})
+                ident = store.save_reference(kind, existing or code, data, get("effective"), actor,
+                                             create=not existing, draft_id=draft_id, draft_target=draft_target)
+            except (ValueError, TypeError, KeyError) as exc:
+                return preserve("reference", draft_target, exc, REFERENCE_FIELDS)
             target = dict(view="references", kind=kind, id=ident)
         elif action == "inbox":
             ids = [int(value) for value in values.get("id", [])]
@@ -507,10 +664,19 @@ def handle(portal, env, method, session, query, body, reply, start):
             store.csv_import(get("csv"), actor)
         else:
             raise ValueError()
+        if action in ("save_product", "save_reference"):
+            target["clear_draft"] = draft_id
         start("303 See Other", [("Location", url(**target, saved="1")), ("Cache-Control", "no-store"), ("Content-Length", "0")])
         return [b""]
 
     view = query.get("view", "products")
+    draft = None
+    if query.get("draft"):
+        if view not in ("card", "references") or not re.fullmatch(r"[A-Za-z0-9_-]{24}", query["draft"]):
+            raise ValueError()
+        draft = store.form_draft(query["draft"])
+        if not draft or draft["kind"] != ("product" if view == "card" else "reference"):
+            raise catalog.CatalogError("Черновик не найден или уже сохранён.")
     if view == "export":
         append = store.csv_export().encode("utf-8-sig")
         start("200 OK", [("Content-Type", "text/csv; charset=utf-8"),
@@ -518,9 +684,16 @@ def handle(portal, env, method, session, query, body, reply, start):
                          ("X-Content-Type-Options", "nosniff"), ("Cache-Control", "no-store"), ("Content-Length", str(len(append)))])
         return [append]
     if view == "card":
-        content = _card(store, query, csrf)
+        if draft:
+            query = {"article": draft["target"]}
+        content = _card(store, query, csrf, draft=draft)
     elif view == "references":
-        content = _reference_page(store, query, csrf)
+        if draft:
+            kind, ident = json.loads(draft["target"])
+            if kind not in catalog.REFERENCES or not isinstance(ident, str):
+                raise ValueError()
+            query = {"kind": kind, "id": ident}
+        content = _reference_page(store, query, csrf, draft=draft)
     elif view == "inbox":
         content = _inbox(store, csrf)
     elif view == "journal":
