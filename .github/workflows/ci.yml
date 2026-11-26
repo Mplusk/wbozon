@@ -385,6 +385,9 @@ jobs:
           settings_ui="$RUNNER_TEMP/marketplace-settings-ui/service"
           mkdir -p "$settings_ui"
           git archive 68be99c371f00b76b7bf9ef4eb879cdc376cedd4:services/email-auth | tar -x -C "$settings_ui"
+          calculator_drafts="$RUNNER_TEMP/marketplace-calculator-drafts/service"
+          mkdir -p "$calculator_drafts"
+          git archive db81aa4a1996e228b82ea3c2ab32cfef32d7d453:services/email-auth | tar -x -C "$calculator_drafts"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit b151124d70320946c17d22b08b1daa63964018de \
@@ -418,6 +421,7 @@ jobs:
             --successor 6cdbfa8031415abaf9b049cc88ee631b92d02630 "$mail_delivery" \
             --successor 72415697eb784b695ff4896cdf4a5f45ddf02296 "$mail_headers" \
             --successor 68be99c371f00b76b7bf9ef4eb879cdc376cedd4 "$settings_ui" \
+            --successor db81aa4a1996e228b82ea3c2ab32cfef32d7d453 "$calculator_drafts" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
@@ -521,7 +525,11 @@ jobs:
           mkdir -p "$settings_ui"
           git archive 68be99c371f00b76b7bf9ef4eb879cdc376cedd4:services/email-auth | tar -x -C "$settings_ui"
           check_pair "$mail_headers" "$settings_ui"
-          check_pair "$settings_ui" "$packaged"
+          calculator_drafts="$RUNNER_TEMP/marketplace-calculator-drafts/service"
+          mkdir -p "$calculator_drafts"
+          git archive db81aa4a1996e228b82ea3c2ab32cfef32d7d453:services/email-auth | tar -x -C "$calculator_drafts"
+          check_pair "$settings_ui" "$calculator_drafts"
+          check_pair "$calculator_drafts" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

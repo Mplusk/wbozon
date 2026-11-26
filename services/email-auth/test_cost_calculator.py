@@ -440,6 +440,65 @@ class CalculatorTests(unittest.TestCase):
         self.assertEqual(self.store.uniform("coral-test", next_day, next_day)["calculation"]["status"], "calculated")
         self.assertEqual(self.store.at("coral-test", day), current)
 
+    def test_backdated_card_shows_its_calculation_and_can_apply_today(self):
+        call, sid, csrf = self._owner_portal()
+        cookie, origin = "__Host-sid=" + sid, "https://test.example"
+        query = "tab=calculator&view=card&article=lamp-test"
+        self.store.save_product(dict(article="lamp-test", name="Лампа", status="draft"), "2026-11-25")
+        fields = {"csrf": csrf, "action": "save_product", "article": "lamp-test", "existing": "lamp-test",
+                  "revision": "1", "name": "Лампа", "status": "active", "effective": "2026-10-26",
+                  "part_name": ["Основание", "Плафон"], "part_count": ["1", "1"],
+                  "part_printer": ["f1", "f1"], "part_hours": ["1.42", "5.45"],
+                  "part_material": ["black", "black"], "part_weight": ["27", "27"],
+                  "part_color": ["", ""], "part_color_new": ["", ""],
+                  "pack_ready": "1", "pack_box": "box", "weight_g": "50", "length_cm": "20",
+                  "width_cm": "20", "height_cm": "30", "pack_id": ["bag"], "pack_quantity": ["2"]}
+        with patch("cost_catalog.today", return_value="2026-11-26"):
+            self.assertEqual(call("POST", cookie, origin, fields, query)[0], "303 See Other")
+            old_day = self.store.at("lamp-test", "2026-11-25")
+            self.assertEqual(old_day["calculation"]["missing"], ["parts", "package"])
+            _, page, _ = call(cookie=cookie, query=query)
+            self.assertIn("Сегодня действует другая версия с 25.11.2026", page)
+            self.assertIn("Расчёт последнего сохранения · на 26.10.2026", page)
+            self.assertIn("235.64 ₽", page)
+            self.assertIn('name="apply_today" value="1"', page)
+            self.assertIn("Расчёт, действующий сегодня", page)
+
+            invalid = dict(fields, revision="2", apply_today="1", part_hours=["ошибка", "5.45"])
+            status, _, headers = call("POST", cookie, origin, invalid, query)
+            self.assertEqual(status, "303 See Other")
+            draft_query = urlsplit(headers["Location"]).query
+            draft_id = parse_qs(draft_query)["draft"][0]
+            _, page, _ = call(cookie=cookie, query=draft_query)
+            self.assertIn('name="effective" value="2026-11-26"', page)
+            self.assertIn('name="part_hours" value="ошибка"', page)
+            self.assertEqual(self.store.at("lamp-test", "2026-11-25"), old_day)
+
+            fields.update(revision="2", apply_today="1", draft_id=draft_id)
+            self.assertEqual(call("POST", cookie, origin, fields, query)[0], "303 See Other")
+            current = self.store.at("lamp-test", "2026-11-26")
+            self.assertEqual(current["calculation"]["status"], "calculated")
+            expected = (Decimal("78.30") + Decimal("6.87") * Decimal("18.975")) / Decimal(".95") + Decimal("16")
+            self.assertEqual(current["calculation"]["amount"], cost_catalog.display(expected))
+            self.assertEqual(self.store.at("lamp-test", "2026-11-25"), old_day)
+            _, page, _ = call(cookie=cookie, query=query)
+            self.assertNotIn('name="apply_today"', page)
+            self.assertIn("235.64 ₽", page)
+
+    def test_optional_rows_can_be_removed_and_no_blank_row_is_added(self):
+        self.store.save_reference("component", "cable", dict(name="Кабель", unit="pcs", price="30"), "2026-09-01")
+        card = self.store.resolve("300030")
+        card["components"] = [{"id": "cable", "quantity": "1"}]
+        self.store.save_product(card, "2026-11-24", expected=card["revision"])
+        call, sid, _ = self._owner_portal()
+        _, page, _ = call(cookie="__Host-sid=" + sid, query="tab=calculator&view=card&article=300030")
+        for group, count, label in (("parts", 2, "детали"), ("links", 2, "привязки"),
+                                    ("components", 1, "комплектующего"), ("package", 2, "расходника")):
+            rows = page.split('data-cost-rows="' + group + '">', 1)[1].split('<template id="cost-' + group + '">', 1)[0]
+            self.assertEqual(rows.count('data-cost-remove'), count)
+            self.assertEqual(rows.count('aria-label="Удалить строку ' + label + '"'), count)
+            self.assertIn('data-cost-add="' + group + '"', page)
+
     def test_invalid_card_is_kept_as_a_durable_draft_until_corrected(self):
         call, sid, csrf = self._owner_portal()
         cookie, origin = "__Host-sid=" + sid, "https://test.example"

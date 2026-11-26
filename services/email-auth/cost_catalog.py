@@ -556,6 +556,13 @@ class Store:
                 ORDER BY effective DESC,id DESC LIMIT 1""", (article, effective(day))).fetchone()
         return self._output(row, redact_exact=redact_exact)
 
+    def latest_saved(self, article):
+        """Most recent card edit, which may not be the version effective today."""
+        with self.connect() as conn:
+            row = conn.execute("""SELECT * FROM cost_versions WHERE article=? AND reason='product_saved'
+                ORDER BY id DESC LIMIT 1""", (article,)).fetchone()
+        return self._output(row)
+
     def history(self, article, first="", last="9999-12-31"):
         with self.connect() as conn:
             rows = conn.execute("""SELECT * FROM cost_versions WHERE article=? AND effective BETWEEN ? AND ?

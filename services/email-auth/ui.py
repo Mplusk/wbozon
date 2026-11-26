@@ -189,10 +189,14 @@ document.querySelectorAll('form[data-cost-local-key]').forEach(function (form) {
       });
       if (typeof saved.id === 'string' && /^[A-Za-z0-9_-]{24}$/.test(saved.id)) form.elements.draft_id.value = saved.id;
       notice.remove(); saveLocal();
+      const unsaved = form.querySelector('[data-cost-unsaved]');
+      if (unsaved) unsaved.hidden = false;
     });
   }
   let timer;
   function scheduleLocal() {
+    const unsaved = form.querySelector('[data-cost-unsaved]');
+    if (unsaved) unsaved.hidden = false;
     clearTimeout(timer);
     timer = setTimeout(function () { timer = undefined; saveLocal(); }, 300);
   }

@@ -155,7 +155,7 @@ def _product_list(store, query):
             (table(("Товар", "Статус", "₽ за штуку", "Привязки", "Ozon · " + month, "WB · " + month), rows) if rows else empty))
 
 
-def _rows(prefix, template, rendered, *, trailing_row=True):
+def _rows(prefix, template, rendered, *, trailing_row=False):
     return (f'<div data-cost-rows="{prefix}">' + "".join(rendered) + (template if trailing_row else "") + "</div>"
             f'<template id="cost-{prefix}">{template}</template>'
             f'<button class="calc-secondary" type="button" data-cost-add="{prefix}">Добавить строку</button>')
@@ -176,7 +176,7 @@ def _parts(card, refs, colors):
                 control("Вес, г", "part_weight", material.get("grams")) +
                 _color_select("part_color", colors, data.get("color"), "Из материала",
                               choice=data.get("_color_choice"), new_value=data.get("_color_new", "")) +
-                '<button class="calc-secondary" type="button" data-cost-remove>Удалить строку</button></div>')
+                '<button class="calc-secondary" type="button" data-cost-remove aria-label="Удалить строку детали">Удалить строку</button></div>')
     rendered = [row(part, material) for part in card.get("parts", []) for material in part["materials"]]
     return _rows("parts", row({}, {}), rendered, trailing_row=False)
 
@@ -186,7 +186,8 @@ def _links(card):
         return ('<div class="calc-input-row">' +
                 select("Площадка", "link_market", [("", "—")] + [(k, LABELS[k]) for k in catalog.MARKETS], item.get("marketplace")) +
                 control("Код товара", "link_code", item.get("code")) +
-                control("SKU или nmID", "link_id", item.get("marketplace_id")) + "</div>")
+                control("SKU или nmID", "link_id", item.get("marketplace_id")) +
+                '<button class="calc-secondary" type="button" data-cost-remove aria-label="Удалить строку привязки">Удалить строку</button></div>')
     return _rows("links", row({}), [row(item) for item in card.get("links", [])])
 
 
@@ -197,7 +198,8 @@ def _components(card, refs):
 
     def row(item):
         return ('<div class="calc-input-row">' + select("Комплектующее", "component_id", choices, item.get("id")) +
-                control(FIELDS["component_quantity"], "component_quantity", item.get("quantity")) + "</div>")
+                control(FIELDS["component_quantity"], "component_quantity", item.get("quantity")) +
+                '<button class="calc-secondary" type="button" data-cost-remove aria-label="Удалить строку комплектующего">Удалить строку</button></div>')
 
     if len(choices) == 1 and not card.get("components"):
         return "<p>" + anchor("Добавить комплектующее в справочник", view="references", kind="component") + "</p>"
@@ -208,7 +210,8 @@ def _package(card, refs):
     data = card.get("package", {})
     def row(item):
         return ('<div class="calc-input-row">' + select("Расходник", "pack_id", _box(refs, "packaging"), item.get("id")) +
-                control("Количество", "pack_quantity", item.get("quantity")) + "</div>")
+                control("Количество", "pack_quantity", item.get("quantity")) +
+                '<button class="calc-secondary" type="button" data-cost-remove aria-label="Удалить строку расходника">Удалить строку</button></div>')
     return (select("Упаковка задана", "pack_ready", [("0", "Заполнить позже"), ("1", "Готова")],
                    data.get("_ready_choice", str(int(data.get("configured", False))))) +
             '<div class="calc-grid">' + select("Коробка", "pack_box", _box(refs, "box"), data.get("box")) +
@@ -311,6 +314,9 @@ def _card(store, query, csrf, *, draft=None):
     refs = store.references()
     editing = bool(original) and not copying
     keep_identity = editing or draft is not None
+    current = store.at(original["article"], None) if editing and not draft else None
+    saved_card = {key: value for key, value in original.items() if key != "revision"} if editing else None
+    different_current = bool(editing and not draft and (not current or current["product"] != saved_card))
     draft_id = draft["id"] if draft else secrets.token_urlsafe(18)
     title = original["name"] if editing else "Новый товар"
     heading = '<div class="calc-section-title"><h2>' + h(title) + "</h2>"
@@ -322,10 +328,23 @@ def _card(store, query, csrf, *, draft=None):
     elif not copying:
         latest = store.form_draft(kind="product", target=original["article"] if editing else "")
         heading += _draft_notice(latest, "card")
+        if different_current:
+            last_edit = store.latest_saved(original["article"])
+            saved_date = date.fromisoformat(last_edit["effective_from"]).strftime("%d.%m.%Y") if last_edit else "неизвестна"
+            current_date = date.fromisoformat(current["effective_from"]).strftime("%d.%m.%Y") if current else None
+            current_text = ("Сегодня действует другая версия с " + current_date + "." if current_date
+                            else "На сегодня действующей версии нет.")
+            heading += ('<div class="notice" role="status"><p>В форме показаны последние сохранённые данные '
+                        'с датой начала ' + h(saved_date) + '. ' + h(current_text) + ' Чтобы применять данные '
+                        'формы сегодня, нажмите «Сохранить и применять сегодня».</p></div>')
+            if last_edit:
+                heading += '<h3>Расчёт последнего сохранения · на ' + h(saved_date) + '</h3>' + _breakdown(last_edit, refs)
     legal = hidden("revision", data.get("revision", 0) if keep_identity else 0)
     legal += hidden("existing", draft["target"] if draft else original["article"] if editing else "")
     legal += hidden("draft_id", draft_id)
-    fields = '<div class="calc-grid">' + control("Внутренний артикул", "article", data.get("article") if keep_identity else "", required=True)
+    fields = ('<p class="notice" role="status" data-cost-unsaved hidden>Данные в форме изменены. '
+              'Сохраните карточку, чтобы обновить расчёт.</p><div class="calc-grid">')
+    fields += control("Внутренний артикул", "article", data.get("article") if keep_identity else "", required=True)
     fields += control("Название", "name", data.get("name"), required=True)
     fields += select("Статус", "status", [(s, LABELS[s]) for s in catalog.STATUSES], data["status"] if keep_identity else "draft")
     fields += control("Дата начала действия", "effective", data.get("effective", catalog.today()), "date", True) + "</div>"
@@ -344,9 +363,14 @@ def _card(store, query, csrf, *, draft=None):
     fields += control("Ручная работа, минут", "manual_minutes", data.get("manual_minutes", 0))
     fields += control("Прочие затраты, ₽", "other", data.get("other", 0))
     fields += control("Комментарий к прочим затратам", "other_comment", data.get("other_comment")) + "</div>"
-    fields += "<button>Сохранить карточку</button>"
+    fields += '<div class="calc-actions"><button>Сохранить карточку</button>'
+    if different_current:
+        fields += '<button class="calc-secondary" type="submit" name="apply_today" value="1">Сохранить и применять сегодня</button>'
+    fields += '</div>'
     if not draft and editing:
-        heading += _breakdown(store.at(original["article"], None), refs)
+        if different_current:
+            heading += '<h3>Расчёт, действующий сегодня</h3>'
+        heading += _breakdown(current, refs)
     local_target = draft["target"] if draft else original["article"] if editing else ""
     html = heading + '<div class="calc-panel">' + form(csrf, "save_product", legal + fields,
                                                        local_key="product:" + local_target, view="card") + "</div>"
@@ -633,6 +657,10 @@ def handle(portal, env, method, session, query, body, reply, start):
             if len(existing) > 128 or any(ord(ch) < 32 for ch in existing):
                 raise ValueError()
             try:
+                if get("apply_today") not in ("", "1"):
+                    raise ValueError()
+                if get("apply_today") == "1":
+                    values["effective"] = [catalog.today()]
                 card, day, rev = _form_product(values)
                 store.save_product(card, day, actor, rev, draft_id=draft_id, draft_target=existing)
             except (ValueError, TypeError, KeyError) as exc:
