@@ -561,6 +561,11 @@ class Store:
         with self.connect() as conn:
             row = conn.execute("""SELECT * FROM cost_versions WHERE article=? AND reason='product_saved'
                 ORDER BY id DESC LIMIT 1""", (article,)).fetchone()
+            if row:
+                refreshed = conn.execute("""SELECT * FROM cost_versions WHERE article=? AND effective=?
+                    ORDER BY id DESC LIMIT 1""", (article, row["effective"])).fetchone()
+                if refreshed and json.loads(refreshed["snapshot"])["product"] == json.loads(row["snapshot"])["product"]:
+                    row = refreshed
         return self._output(row)
 
     def history(self, article, first="", last="9999-12-31"):

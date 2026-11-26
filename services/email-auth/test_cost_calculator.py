@@ -485,6 +485,26 @@ class CalculatorTests(unittest.TestCase):
             self.assertNotIn('name="apply_today"', page)
             self.assertIn("235.64 ₽", page)
 
+    def test_last_saved_calculation_uses_recalculated_reference_prices(self):
+        call, sid, csrf = self._owner_portal()
+        cookie, origin = "__Host-sid=" + sid, "https://test.example"
+        query = "tab=calculator&view=card&article=300030"
+        old = self.store.resolve("300030")
+        self.store.save_product(dict(article="300030", name="Test product", status="draft"),
+                                "2026-11-25", expected=old["revision"])
+        self.store.save_product(old, "2026-10-26", expected=old["revision"] + 1)
+        before = self.store.latest_saved("300030")
+        self.store.save_reference("material", "black", dict(name="Test black PLA", type="PLA", color="black",
+                                  price_per_kg="1000"), "2026-10-01")
+        after = self.store.latest_saved("300030")
+        self.assertEqual(after["product"], before["product"])
+        self.assertEqual(after["effective_from"], "2026-10-26")
+        self.assertLess(Decimal(after["calculation"]["amount"]), Decimal(before["calculation"]["amount"]))
+        with patch("cost_catalog.today", return_value="2026-11-26"):
+            _, page, _ = call(cookie=cookie, query=query)
+        self.assertIn(after["calculation"]["amount"] + " ₽", page)
+        self.assertIn("Сегодня действует другая версия", page)
+
     def test_optional_rows_can_be_removed_and_no_blank_row_is_added(self):
         self.store.save_reference("component", "cable", dict(name="Кабель", unit="pcs", price="30"), "2026-09-01")
         card = self.store.resolve("300030")
