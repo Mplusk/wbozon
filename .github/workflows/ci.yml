@@ -167,6 +167,8 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Verify the reviewed release chain before building
+        run: python3 -B tools/native-release/check_release_chain.py
       - name: Reconstruct source and hash-locked wheelhouse
         shell: bash
         run: |
