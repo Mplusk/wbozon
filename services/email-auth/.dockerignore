@@ -71,6 +71,8 @@
 !content_factory_cutover_jobs.py
 !content_factory_cutover_ui.py
 !content_factory_workflow_plan.py
+!content_factory_budget_vault.py
+!content_factory_budget_vault_ui.py
 !calculator_ui.py
 !cost_catalog.py
 !cost_integration.py

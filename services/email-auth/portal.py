@@ -23,6 +23,7 @@ if not _worker_cli:
     import external_keys, external_mcp, oauth_mcp, market_actions, market_catalog, ozon_review_reply
     import expansion_gateway, market_health, market_history, market_archive, posting_discovery
     import cost_catalog, cost_integration
+    import content_factory_budget_vault as budget_vault_errors
 
 FIELDS = {'ozon': ('client_id', 'api_key'), 'wb': ('api_token',)}
 CHECK_OPERATIONS = {'ozon':'ozon_products', 'wb':'wb_prices', 'avito':'avito_get_user_info_self'}
@@ -698,7 +699,7 @@ def render_preview(provider, result, fetched_at, sensitive_values=(), lookup_nm_
 
 class Portal:
     native_provider = staticmethod(provider_read)
-    def __init__(self, login, vault, read_token_hash, gateway=provider_read, mcp_read_token_hash=None, external_key_store=None, oauth_store=None, finance_gate_dir=None, ai_gateway=None, budget_gateway=None, write_token_setup=False, ai_gateway_inspector=None, model_config_enabled=False, ai_cutover=None, ai_cutover_jobs=None):
+    def __init__(self, login, vault, read_token_hash, gateway=provider_read, mcp_read_token_hash=None, external_key_store=None, oauth_store=None, finance_gate_dir=None, ai_gateway=None, budget_gateway=None, write_token_setup=False, ai_gateway_inspector=None, model_config_enabled=False, ai_cutover=None, ai_cutover_jobs=None, budget_vault_feature=False, budget_vault_path=None):
         if not re.fullmatch(r'[0-9a-f]{64}',read_token_hash): raise ValueError('Expected SHA256 token hash')
         if mcp_read_token_hash is not None and (not re.fullmatch(r'[0-9a-f]{64}',mcp_read_token_hash) or hmac.compare_digest(read_token_hash,mcp_read_token_hash)):
             raise ValueError('Expected distinct SHA256 MCP token hash')
@@ -708,6 +709,14 @@ class Portal:
         self.model_config_enabled=model_config_enabled is True
         self.ai_cutover=ai_cutover
         self.ai_cutover_jobs=ai_cutover_jobs
+        self.budget_vault_feature=budget_vault_feature is True
+        if self.budget_vault_feature:
+            if ai_gateway is not None or budget_gateway is not None: raise ValueError('Budget vault feature conflicts with configured gateways')
+            import content_factory_budget_vault
+            self.budget_vault_path=budget_vault_path or content_factory_budget_vault.VAULT_PATH
+            budget_gateway=content_factory_budget_vault.Proxy(vault,expected_vault_path=self.budget_vault_path)
+        else:
+            self.budget_vault_path=None
         self.budget_gateway=budget_gateway
         self.write_token_setup = write_token_setup is True
         self.finance_gate_dir=(finance_gate_dir if finance_gate_dir is not None else
@@ -725,6 +734,11 @@ class Portal:
     def budget_gateway_available(self):
         try:
             return self.budget_gateway is not None and self.budget_gateway.ready() is True
+        except Exception:
+            return False
+    def write_token_setup_available(self):
+        try:
+            return self.write_token_setup or (self.budget_vault_feature and self.budget_gateway.enabled())
         except Exception:
             return False
     def read_gateway(self, operation, args, creds, *, include_avito=False):
@@ -917,7 +931,7 @@ class Portal:
                     present=c.execute('SELECT 1 FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),self.login.clock())).fetchone()
                 if present:
                     start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
-        if path not in OAUTH_PATHS and path not in ('/settings','/settings/catalog','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/settings/yandex-backup','/settings/content-factory/connect','/settings/content-factory/models','/settings/content-factory/budget/prepare','/settings/content-factory/budget/confirm','/settings/content-factory/budget/refresh','/settings/content-factory/ai/write-token','/settings/content-factory/ai/reader-token','/settings/content-factory/ai/reader-credential/prepare','/settings/content-factory/ai/reader-credential/confirm','/settings/content-factory/ai/gateway','/settings/content-factory/ai/models/prepare','/settings/content-factory/ai/models/confirm','/settings/content-factory/ai/credentials/prepare','/settings/content-factory/ai/credentials/commit','/settings/content-factory/ai/credentials/provision/prepare','/settings/content-factory/ai/credentials/provision/commit','/settings/content-factory/ai/reconcile/inspect','/settings/content-factory/ai/reconcile/confirm','/settings/content-factory/ai/cutover/job','/settings/content-factory/ai/cutover/pause/prepare','/settings/content-factory/ai/cutover/pause/confirm','/settings/content-factory/ai/cutover/restore/prepare','/settings/content-factory/ai/cutover/restore/confirm','/settings/content-factory/ai/cutover/draft/prepare','/settings/content-factory/ai/cutover/draft/confirm','/settings/content-factory/ai/cutover/publish/prepare','/settings/content-factory/ai/cutover/publish/confirm','/api/content-factory/model-config','/mcp','/api/read','/healthz'):
+        if path not in OAUTH_PATHS and path not in ('/settings','/settings/catalog','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/settings/yandex-backup','/settings/content-factory/connect','/settings/content-factory/models','/settings/content-factory/budget/vault-enable','/settings/content-factory/budget/vault-disable','/settings/content-factory/budget/prepare','/settings/content-factory/budget/confirm','/settings/content-factory/budget/refresh','/settings/content-factory/ai/write-token','/settings/content-factory/ai/reader-token','/settings/content-factory/ai/reader-credential/prepare','/settings/content-factory/ai/reader-credential/confirm','/settings/content-factory/ai/gateway','/settings/content-factory/ai/models/prepare','/settings/content-factory/ai/models/confirm','/settings/content-factory/ai/credentials/prepare','/settings/content-factory/ai/credentials/commit','/settings/content-factory/ai/credentials/provision/prepare','/settings/content-factory/ai/credentials/provision/commit','/settings/content-factory/ai/reconcile/inspect','/settings/content-factory/ai/reconcile/confirm','/settings/content-factory/ai/cutover/job','/settings/content-factory/ai/cutover/pause/prepare','/settings/content-factory/ai/cutover/pause/confirm','/settings/content-factory/ai/cutover/restore/prepare','/settings/content-factory/ai/cutover/restore/confirm','/settings/content-factory/ai/cutover/draft/prepare','/settings/content-factory/ai/cutover/draft/confirm','/settings/content-factory/ai/cutover/publish/prepare','/settings/content-factory/ai/cutover/publish/confirm','/api/content-factory/model-config','/mcp','/api/read','/healthz'):
             return self.login(e,start)
         def reply(text,code='200 OK',json_response=False,extra_headers=(),*,csp=CSP):
             if not json_response and not text.lstrip().lower().startswith('<!doctype'): text=document('Кабинет', '<main id="content" class="error-card"><h1>Кабинет</h1><p>'+text+'</p></main>')
@@ -1213,11 +1227,34 @@ class Portal:
             except (ValueError,TypeError,UnicodeError): return reply('Проверьте ключ чтения моделей.','400 Bad Request')
             except Exception: return reply('Не удалось сохранить ключ чтения моделей.','503 Service Unavailable')
             start('303 See Other',[('Location','/settings?tab=content-factory'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
+        if path in ('/settings/content-factory/budget/vault-enable','/settings/content-factory/budget/vault-disable'):
+            if method != 'POST': return reply('Method not allowed','405 Method Not Allowed')
+            if e.get('HTTP_ORIGIN') != self.login.origin: return reply('Forbidden','403 Forbidden')
+            if session[0]-43200 < now-300: return reply('Для изменения подключения войдите заново по письму.','403 Forbidden')
+            if not self.budget_vault_feature: return reply('Подключение бюджета недоступно.','503 Service Unavailable')
+            try:
+                if not self.login.permit('cf-budget-setup:'+self.login.digest(sid),5,300): return reply('Слишком много попыток.','429 Too Many Requests')
+                form=parse_qs(body('application/x-www-form-urlencoded',maximum=8192),max_num_fields=4,keep_blank_values=True,strict_parsing=True)
+                if any(len(v)!=1 for v in form.values()): raise ValueError()
+                form={k:v[0] for k,v in form.items()}
+                csrf=form.get('csrf','')
+                if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
+                import content_factory_budget_vault
+                if path.endswith('/vault-enable'):
+                    if set(form)!={'csrf','api_key','ack_scope','ack_estimate'} or form['ack_scope']!='understood' or form['ack_estimate']!='understood': raise ValueError()
+                    content_factory_budget_vault.enable(self.vault,form['api_key'],confirm_scope=True,confirm_estimate=True,expected_vault_path=self.budget_vault_path)
+                else:
+                    if set(form)!={'csrf'}: raise ValueError()
+                    content_factory_budget_vault.disable(self.vault,expected_vault_path=self.budget_vault_path)
+            except budget_vault_errors.GatewayBusyError: return reply('Шлюз занят другой операцией; остановка или изменение подключения не выполнены. Дождитесь завершения операции и проверьте состояние.','503 Service Unavailable')
+            except (ValueError,TypeError,UnicodeError): return reply('Проверьте настройки подключения бюджета.','400 Bad Request')
+            except Exception: return reply('Не удалось изменить подключение бюджета.','503 Service Unavailable')
+            start('303 See Other',[('Location','/settings?tab=content-factory'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
         if path == '/settings/content-factory/ai/write-token':
             if method != 'POST': return reply('Method not allowed','405 Method Not Allowed')
             if e.get('HTTP_ORIGIN') != self.login.origin: return reply('Forbidden','403 Forbidden')
             if session[0]-43200 < now-300: return reply('Для изменения ключа войдите заново по письму.','403 Forbidden')
-            if not self.write_token_setup: return reply('Настройка ключа управления недоступна.','503 Service Unavailable')
+            if self.budget_vault_feature or not self.write_token_setup_available(): return reply('Настройка ключа управления недоступна.','503 Service Unavailable')
             try:
                 if not self.login.permit('cf-write-token:'+self.login.digest(sid),5,300): return reply('Слишком много попыток.','429 Too Many Requests')
                 form = parse_qs(body('application/x-www-form-urlencoded',maximum=4096),max_num_fields=2,keep_blank_values=True,strict_parsing=True)
@@ -1263,12 +1300,16 @@ class Portal:
                     page = content_factory_budget_ui.render_budget_confirmation(csrf, proposal['proposal_id'], proposal['before_cents'], proposal['after_cents'], source=getattr(self.budget_gateway, 'source', None))
                     return reply(document('Подтверждение бюджета', '<main id="content">' + page + '</main>', content_factory=True))
                 if set(form) != {'csrf','proposal_id'} or not re.fullmatch(r'[A-Za-z0-9_-]{20,128}',form['proposal_id']): raise ValueError()
+            except budget_vault_errors.GatewayBusyError:
+                return reply('Шлюз занят другой операцией; изменение не выполнено.','503 Service Unavailable')
             except (ValueError,TypeError,UnicodeError):
                 return reply('Проверьте значение бюджета.','400 Bad Request')
             except Exception:
                 return reply('Не удалось подготовить изменение бюджета.','503 Service Unavailable')
             try:
                 if self.budget_gateway.confirm(owner, form['proposal_id']) is not True: raise RuntimeError()
+            except budget_vault_errors.GatewayBusyError:
+                return reply('Шлюз занят другой операцией; это изменение не отправлено.','503 Service Unavailable')
             except Exception:
                 return reply('Результат сохранения неизвестен. Проверьте настройки перед повтором.','503 Service Unavailable')
             if getattr(self.budget_gateway, 'source', None) == 'n8n_live':
@@ -1278,19 +1319,26 @@ class Portal:
             if method != 'POST': return reply('Method not allowed','405 Method Not Allowed')
             if e.get('HTTP_ORIGIN') != self.login.origin: return reply('Forbidden','403 Forbidden')
             selected_gateway = self.ai_gateway or self.budget_gateway
-            if not self.write_token_setup or selected_gateway is None: return reply('Шлюз недоступен.','503 Service Unavailable')
+            if not self.write_token_setup_available() or selected_gateway is None: return reply('Шлюз недоступен.','503 Service Unavailable')
             try:
-                form = parse_qs(body('application/x-www-form-urlencoded',maximum=512),max_num_fields=2,keep_blank_values=True,strict_parsing=True)
-                if set(form) != {'csrf','action'} or any(len(v) != 1 for v in form.values()): raise ValueError()
+                form = parse_qs(body('application/x-www-form-urlencoded',maximum=512),max_num_fields=3,keep_blank_values=True,strict_parsing=True)
+                if not {'csrf','action'}.issubset(form) or set(form)-{'csrf','action','ack_recovery'} or any(len(v) != 1 for v in form.values()): raise ValueError()
                 csrf, action = form['csrf'][0], form['action'][0]
                 if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
                 if action not in ('arm','halt'): raise ValueError()
                 if action == 'arm' and session[0]-43200 < now-300: return reply('Для включения войдите заново по письму.','403 Forbidden')
+                if self.budget_vault_feature and action == 'arm' and form.get('ack_recovery') != ['understood']: raise ValueError()
+                if 'ack_recovery' in form and form['ack_recovery'] != ['understood']: raise ValueError()
                 if not self.login.permit('cf-gateway:'+self.login.digest(sid),5,300): return reply('Слишком много попыток.','429 Too Many Requests')
-                if action == 'halt': selected_gateway.fence.halt()
+                if action == 'halt':
+                    if self.budget_vault_feature: selected_gateway.owner_halt()
+                    else: selected_gateway.fence.halt()
                 else:
-                    selected_gateway.token_reader()  # Require a separate stored write token.
-                    selected_gateway.fence.arm(lambda: True)
+                    if self.budget_vault_feature: selected_gateway.owner_arm()
+                    else:
+                        selected_gateway.token_reader()  # Require a separate stored write token.
+                        selected_gateway.fence.arm(lambda: True)
+            except budget_vault_errors.GatewayBusyError: return reply('Шлюз занят другой операцией; остановка или включение не выполнены. Дождитесь завершения операции и проверьте состояние.','503 Service Unavailable')
             except (ValueError,TypeError,UnicodeError): return reply('Проверьте запрос.','400 Bad Request')
             except Exception: return reply('Шлюз недоступен или требуется сверка неопределённого исхода.','503 Service Unavailable')
             start('303 See Other',[('Location','/settings?tab=content-factory'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
@@ -1544,8 +1592,10 @@ class Portal:
                 snapshot.update(content_factory_ai.snapshot(self.vault))
                 budget_ready = self.budget_gateway_available()
                 budget_settings = self.budget_gateway.settings() if budget_ready else None
-                token_present = self.write_token_setup and 'n8n_content_factory_write' in self.vault.present()
-                return reply(document('Контент-фабрика', content_factory_ui.render(snapshot, csrf=session[1], ai_gateway_ready=self.ai_gateway_available(), budget_gateway_ready=budget_ready, budget_settings=budget_settings, write_token_setup=self.write_token_setup, write_token_present=token_present, budget_gateway_configured=self.budget_gateway is not None, ai_gateway_configured=self.ai_gateway is not None, model_config_enabled=self.model_config_enabled, cutover_configured=self.ai_cutover is not None), content_factory=True))
+                write_setup = self.write_token_setup_available()
+                token_present = write_setup and 'n8n_content_factory_write' in self.vault.present()
+                budget_configured = self.budget_gateway is not None and (not self.budget_vault_feature or self.budget_gateway.enabled())
+                return reply(document('Контент-фабрика', content_factory_ui.render(snapshot, csrf=session[1], ai_gateway_ready=self.ai_gateway_available(), budget_gateway_ready=budget_ready, budget_settings=budget_settings, write_token_setup=write_setup, write_token_present=token_present, budget_gateway_configured=budget_configured, ai_gateway_configured=self.ai_gateway is not None, model_config_enabled=self.model_config_enabled, cutover_configured=self.ai_cutover is not None, budget_vault_feature=self.budget_vault_feature, budget_vault_enabled=budget_configured), content_factory=True))
             except (ValueError, TypeError, UnicodeError):
                 return reply('Проверьте параметры запроса.', '400 Bad Request')
             except (sqlite3.Error, OSError):
@@ -1831,6 +1881,8 @@ def create_portal():
     control, inspector, write_token_setup = content_factory_gateway_config.configure(os.environ, vault, secret_file)
     import content_factory_budget_config
     budget_control = content_factory_budget_config.configure_budget(os.environ, vault, secret_file, control)
+    import content_factory_budget_vault
+    budget_vault_feature = (content_factory_budget_vault.FEATURE_AVAILABLE is True and control is None and budget_control is None)
     write_token_setup = write_token_setup or budget_control is not None
     model_config_flag = os.environ.get('CF_MODEL_CONFIG_ENABLED','0')
     if model_config_flag not in ('0','1'): raise ValueError('Invalid model configuration flag')
@@ -1855,7 +1907,8 @@ def create_portal():
     return Portal(login,vault,secret_file('READ_TOKEN_HASH_FILE'),mcp_read_token_hash=mcp_hash,
                   finance_gate_dir=os.environ.get('OZON_FINANCE_GATE_DIR'), ai_gateway=control,
                   ai_gateway_inspector=inspector, budget_gateway=budget_control, write_token_setup=write_token_setup,
-                  model_config_enabled=model_config_flag == '1', ai_cutover=cutover, ai_cutover_jobs=cutover_jobs)
+                  model_config_enabled=model_config_flag == '1', ai_cutover=cutover, ai_cutover_jobs=cutover_jobs,
+                  budget_vault_feature=budget_vault_feature)
 
 if _worker_cli:
     if sys.argv[2:]:

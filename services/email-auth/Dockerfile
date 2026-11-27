@@ -14,6 +14,7 @@ COPY market_archive.py market_composites.py market_diagnostics.py market_health.
 COPY calculator_ui.py cost_catalog.py cost_integration.py cost_sync.py ./
 COPY content_factory.py content_factory_ui.py content_factory_ai.py content_factory_ai_controls.py content_factory_budget_ui.py content_factory_gateway_token.py content_factory_gateway_wiring.py content_factory_gateway_config.py content_factory_control.py content_factory_fence.py content_factory_n8n_write.py ./
 COPY content_factory_budget_config.py content_factory_n8n_budget.py content_factory_model_config.py content_factory_cutover.py content_factory_cutover_jobs.py content_factory_cutover_ui.py content_factory_workflow_plan.py ./
+COPY content_factory_budget_vault.py content_factory_budget_vault_ui.py ./
 COPY yandex_backup_admin.py ./
 USER 10001:10001
 EXPOSE 8000

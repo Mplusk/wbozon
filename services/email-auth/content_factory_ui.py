@@ -39,7 +39,7 @@ def _card(title, body):
     return '<section class="market-card"><h2>' + h(title) + '</h2>' + body + '</section>'
 
 
-def render(snapshot=None, csrf=None, *, ai_gateway_ready=False, budget_gateway_ready=False, budget_settings=None, write_token_setup=False, write_token_present=False, budget_gateway_configured=False, ai_gateway_configured=False, model_config_enabled=False, cutover_configured=False):
+def render(snapshot=None, csrf=None, *, ai_gateway_ready=False, budget_gateway_ready=False, budget_settings=None, write_token_setup=False, write_token_present=False, budget_gateway_configured=False, ai_gateway_configured=False, model_config_enabled=False, cutover_configured=False, budget_vault_feature=False, budget_vault_enabled=False):
     """Render trusted snapshot data; data absence is never represented as zero."""
     data = snapshot if isinstance(snapshot, dict) else {}
     workflow = data.get("workflow") if isinstance(data.get("workflow"), dict) else {}
@@ -121,8 +121,9 @@ def render(snapshot=None, csrf=None, *, ai_gateway_ready=False, budget_gateway_r
                         '<a href="https://n8n.gamelife.shop/">n8n</a> в разделе Credentials. '
                         'Настройка ключей через этот кабинет пока не подключена.</p></details>')
     if write_token_setup and isinstance(csrf, str) and csrf:
-        import content_factory_gateway_token
-        models_body += content_factory_gateway_token.render(csrf, write_token_present, budget_enabled=budget_gateway_configured, ai_enabled=ai_gateway_configured, cutover_enabled=cutover_configured)
+        if not budget_vault_feature:
+            import content_factory_gateway_token
+            models_body += content_factory_gateway_token.render(csrf, write_token_present, budget_enabled=budget_gateway_configured, ai_enabled=ai_gateway_configured, cutover_enabled=cutover_configured)
         scope = ('выделенные учётные данные и оценочный бюджет фабрики' if ai_gateway_configured and budget_gateway_configured else
                  'оценочный бюджет фабрики' if budget_gateway_configured else 'выделенные учётные данные фабрики')
         models_body += ('<p>Шлюз позволяет изменять ' + scope + '. '
@@ -131,7 +132,12 @@ def render(snapshot=None, csrf=None, *, ai_gateway_ready=False, budget_gateway_r
                         'Не редактируйте одновременно этот сценарий и его credentials в n8n: '
                         'изменения могут перезаписать друг друга или попасть в другую версию.</p>'
                         '<form method="post" action="/settings/content-factory/ai/gateway">'
-                        '<input type="hidden" name="csrf" value="' + h(csrf) + '">'
+                        '<input type="hidden" name="csrf" value="' + h(csrf) + '">' +
+                        ('<p>После перезапуска процесса кабинета управление может автоматически остановиться: перед повторным включением проверьте состояние n8n. '
+                         'После восстановления данных или сбоя остановите операции, проверьте последнее изменение в n8n и дождитесь завершения прежнего запроса. '
+                         'Если результат неизвестен, не включайте управление до выяснения. Откат данных автоматически не обнаруживается.</p>'
+                         '<label><input type="checkbox" name="ack_recovery" value="understood"> '
+                         'Я проверил состояние n8n и подтверждаю, что нет незавершённого или невыясненного изменения</label>' if budget_vault_feature else '') +
                         '<button name="action" value="arm" type="submit">Включить управление фабрикой</button> '
                         '<button name="action" value="halt" type="submit">Остановить управление фабрикой</button></form>')
     if model_config_enabled is True and isinstance(csrf, str) and csrf:
@@ -165,6 +171,9 @@ def render(snapshot=None, csrf=None, *, ai_gateway_ready=False, budget_gateway_r
                                 '<input type="hidden" name="csrf" value="' + h(csrf) + '">'
                                 '<button type="submit">Подготовить подключение и остановку фабрики</button></form>')
     result += _card("Модели и ключи ИИ", models_body)
+    if budget_vault_feature is True and isinstance(csrf,str) and csrf:
+        import content_factory_budget_vault_ui
+        result += content_factory_budget_vault_ui.render(csrf,budget_vault_enabled)
     metric_labels = (("views", "Просмотры"), ("reach", "Охват"),
                      ("clicks", "Переходы"), ("orders", "Заказы"))
     metric_body = '<dl>'
