@@ -1,6 +1,8 @@
 """Owner dashboard for the content factory; no secrets or mutations in this module."""
 
 from html import escape
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def h(value):
@@ -19,6 +21,18 @@ def _status(value):
         "unavailable": "Нет связи",
         "unknown": "Неизвестно",
     }.get(value, "Неизвестно")
+
+
+def _moscow_datetime(value):
+    if not isinstance(value, str):
+        return 'Недоступно'
+    try:
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if dt.tzinfo is None or dt.utcoffset() is None:
+            return 'Недоступно'
+        return dt.astimezone(ZoneInfo('Europe/Moscow')).strftime('%d.%m.%Y %H:%M МСК')
+    except (ValueError, OverflowError, ZoneInfoNotFoundError):
+        return 'Недоступно'
 
 
 def _card(title, body):
@@ -97,7 +111,7 @@ def render(snapshot=None, csrf=None):
     else:
         queue_body = '<ul>' + ''.join(
             '<li>' + _text(row.get("media_type")) + ' · ' +
-            _text(row.get("scheduled_at")) + ' · ' + _text(row.get("status")) + '</li>'
+            _moscow_datetime(row.get("scheduled_at")) + ' · ' + _text(row.get("status")) + '</li>'
             for row in queue_rows) + '</ul>'
         queue_body += '<p>Показаны последние записи, не более 50.' + (' Есть и другие записи.' if queue.get("has_more") is True else '') + '</p>'
     result += _card("Очередь публикаций", queue_body)
@@ -115,7 +129,10 @@ def render(snapshot=None, csrf=None):
     result += _card("Идеи и черновики", idea_body)
     monthly = budget.get("monthly_budget_usd") if budget.get("status") == "available" else None
     monthly_text = (h(monthly) + ' USD') if type(monthly) in (int, float) and 0 <= monthly < 1000000 else 'Недоступно'
+    enabled = budget.get("enabled") if budget.get("status") == "available" else None
+    enabled_text = ('включён' if enabled is True else 'выключен' if enabled is False else 'неизвестно')
     result += _card("Бюджет", '<p>Оценочный месячный лимит: <strong>' + monthly_text +
+                    '</strong>.</p><p>Состояние ограничения: <strong>' + enabled_text +
                     '</strong>.</p><p>Это настройка конвейера; фактические списания уточняйте у поставщиков ИИ.</p>')
     connection_body = ('<p>Для чтения конвейера и таблиц нужен отдельный API-ключ n8n '
                        'только с разрешениями workflow:read и dataTableRow:read. '

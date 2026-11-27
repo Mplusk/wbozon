@@ -150,7 +150,7 @@ def _unavailable():
         'workflow': {'status': 'unknown', 'config': _published_config(None)},
         'queue': {'status': 'unavailable', 'items': [], 'has_more': False},
         'ideas': {'status': 'unavailable', 'items': [], 'has_more': False},
-        'budget': {'status': 'unavailable', 'monthly_budget_usd': None},
+        'budget': {'status': 'unavailable', 'monthly_budget_usd': None, 'enabled': None},
         'metrics': {'status': 'unavailable'},
     }
 def _collect(token):
@@ -191,7 +191,9 @@ def _collect(token):
         pilot = next((r for r in rows if r.get('setting_key') == 'pilot'), None)
         amount = pilot.get('monthly_budget_usd') if pilot else None
         if type(amount) in (int, float) and math.isfinite(amount) and amount >= 0:
-            result['budget'] = {'status': 'available', 'monthly_budget_usd': amount}
+            enabled = pilot.get('enabled')
+            result['budget'] = {'status': 'available', 'monthly_budget_usd': amount,
+                                'enabled': enabled if type(enabled) is bool else None}
             successes += 1
     except Exception:
         pass

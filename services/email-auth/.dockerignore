@@ -53,6 +53,8 @@
 !external_mcp.py
 !oauth_mcp.py
 !ui.py
+!content_factory.py
+!content_factory_ui.py
 !calculator_ui.py
 !cost_catalog.py
 !cost_integration.py

@@ -24,12 +24,27 @@ class ContentFactoryUiTests(unittest.TestCase):
             "metrics": {"views": 0},
         })
         self.assertIn("Источник n8n: <strong>доступен (отдельные данные могут быть недоступны)</strong>", page)
-        self.assertIn("&lt;soon&gt;", page)
+        self.assertNotIn("&lt;soon&gt;", page)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
         self.assertNotIn("<script>", page)
         self.assertIn("<dt>Просмотры</dt><dd>0</dd>", page)
         self.assertIn("<dt>Заказы</dt><dd>Недоступно</dd>", page)
         self.assertIn("10 USD", page)
+        self.assertIn('Состояние ограничения: <strong>неизвестно</strong>', page)
+
+    def test_queue_dates_are_converted_to_moscow_and_invalid_values_hidden(self):
+        page = content_factory_ui.render({"queue": {"status": "available", "items": [
+            {"scheduled_at": "2026-11-27T09:00:00.000Z"},
+            {"scheduled_at": "2026-11-27T09:00:00"},
+            {"scheduled_at": "<script>"}]}})
+        self.assertIn('27.11.2026 12:00 МСК', page)
+        self.assertEqual(page.count(' · Недоступно · '), 2)
+        self.assertNotIn('<script>', page)
+
+    def test_budget_state_is_not_inferred_from_amount(self):
+        for enabled, label in ((True, 'включён'), (False, 'выключен'), (None, 'неизвестно'), ('true', 'неизвестно')):
+            page = content_factory_ui.render({"budget": {"status": "available", "monthly_budget_usd": 10, "enabled": enabled}})
+            self.assertIn('Состояние ограничения: <strong>' + label + '</strong>', page)
 
     def test_unavailable_tables_do_not_display_old_items(self):
         page = content_factory_ui.render({"queue": {"status": "unavailable",

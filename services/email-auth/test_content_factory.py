@@ -51,7 +51,7 @@ class SnapshotTests(unittest.TestCase):
                 return {'data': [{'caption': 'x' * 2195 + token, 'status': 'ready'}], 'nextCursor': 'next'}
             if cf.IDEAS_ID in path:
                 return {'data': [{'title': 'idea'}], 'nextCursor': None}
-            return {'data': [{'setting_key': 'pilot', 'monthly_budget_usd': 10}]}
+            return {'data': [{'setting_key': 'pilot', 'monthly_budget_usd': 10, 'enabled': True}]}
         with patch.object(cf, '_request', side_effect=request):
             result = cf._collect(token)
         self.assertEqual(result['workflow']['config']['generation_time'], '10:00')
@@ -59,6 +59,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(result['workflow']['config']['models']['image'], 'models/gemini-3.1-flash-image')
         self.assertIsNone(result['workflow']['config']['models']['video'])
         self.assertTrue(result['queue']['has_more'])
+        self.assertIs(result['budget']['enabled'], True)
         self.assertNotIn('caption', result['queue']['items'][0])
         self.assertNotIn(token, str(result))
         self.assertNotIn('never show', str(result))
@@ -134,6 +135,16 @@ class SnapshotTests(unittest.TestCase):
         result = cf.snapshot(BrokenVault())
         self.assertEqual(result['status'], 'unavailable')
         self.assertNotIn('private database failure', str(result))
+
+    def test_budget_enabled_is_only_reported_from_a_boolean(self):
+        for value, expected in ((False, False), (True, True), ('true', None), (None, None)):
+            def request(path, _token):
+                if cf.BUDGET_ID in path:
+                    return {'data': [{'setting_key': 'pilot', 'monthly_budget_usd': 10, 'enabled': value}]}
+                raise OSError('offline')
+            with patch.object(cf, '_request', side_effect=request):
+                result = cf._collect('synthetic-api-token-123456')
+            self.assertIs(result['budget']['enabled'], expected)
 
     def test_malformed_rows_do_not_look_like_empty_queue(self):
         def request(path, _token):
