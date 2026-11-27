@@ -15,6 +15,7 @@ import pathlib
 import stat
 import tempfile
 import subprocess
+import signal
 import urllib.request
 
 STATE = pathlib.Path('/var/lib/3dprinta-native-deployer')
@@ -25,6 +26,7 @@ EXPECTED_RELEASE = '7549b40f1f34a1dfdff79bcdf8a6b35ec75de13f-45763537568-1'
 EXPECTED_MAIN = '7549b40f1f34a1dfdff79bcdf8a6b35ec75de13f'
 OLD_SHA = '7b1410b73820b5d22c19d0c904dc2b76d36dac000c3df3614cc099e3179e8f39'
 NEW_SHA = 'aa83c320050169c690043a2dca88f992140e83f1fd8645314960553f3f69e7e0'
+PREFLIGHT_WALL_SECONDS = 25
 
 
 def digest(data):
@@ -149,6 +151,41 @@ def preflight():
             raise ValueError('portal health not confirmed')
 
 
+def bounded_preflight(script, interpreter, timeout=PREFLIGHT_WALL_SECONDS):
+    """Run network checks in a separate process group, bounded by wall time.
+
+    close_fds prevents the preflight and any descendant from retaining the
+    deployment lock if the parent exits. A timeout kills the whole group,
+    including Git helpers, then attempts a bounded reap of the immediate child.
+    Uninterruptible kernel I/O can delay reaping; it must not retain the lock.
+    """
+    proc = subprocess.Popen([interpreter, '-I', str(script), '--preflight'],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, close_fds=True,
+                            start_new_session=True,
+                            env={'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent'})
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            # The process is SIGKILLed but may be in uninterruptible kernel I/O.
+            # Fail closed and let the updater exit/reparent it, releasing lock.
+            raise TimeoutError('preflight killed but reap delayed; lock released on exit') from None
+        raise TimeoutError('preflight exceeded wall-time limit') from None
+    if proc.returncode != 0:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        raise ValueError('preflight failed; controller unchanged')
+
+
 def main():
     if os.geteuid() != 0:
         raise ValueError('root required')
@@ -157,14 +194,26 @@ def main():
     trusted(LIB, True)
     trusted(LIB / 'release_host.py')
     trusted(LIB / 'native_release.py')
+    trusted(LIB / 'build_release.py')
     sys.path.insert(0, str(LIB))
     from release_host import Host
     host = Host(pathlib.Path('/etc/wbozon-cd.json'))
     if host.state != STATE or host.root != ROOT:
         raise ValueError('unexpected host configuration')
     print(json.dumps(_perform(STATE, LIB, ROOT, CANDIDATE, OLD_SHA, NEW_SHA,
-                              EXPECTED_RELEASE, host.verify, preflight), sort_keys=True))
+                              EXPECTED_RELEASE, host.verify,
+                              lambda: bounded_preflight(pathlib.Path(__file__).absolute(), '/usr/bin/python3')), sort_keys=True))
 
 
 if __name__ == '__main__':
-    main()
+    if sys.argv[1:] == ['--preflight']:
+        trusted(pathlib.Path(__file__).absolute())
+        # If the updater dies unexpectedly, the child must not remain stuck in
+        # DNS indefinitely; the parent's lock was not inherited by this child.
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        signal.alarm(PREFLIGHT_WALL_SECONDS)
+        preflight()
+    elif len(sys.argv) == 1:
+        main()
+    else:
+        raise SystemExit('unsupported arguments')

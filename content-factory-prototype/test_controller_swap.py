@@ -108,6 +108,125 @@ class ControllerSwapTests(unittest.TestCase):
             self.run_swap(preflight=fail)
         self.assertEqual((self.lib / 'cd.py').read_bytes(), b'old')
 
+    def test_hung_preflight_is_killed_reaped_and_lock_released(self):
+        import subprocess
+        import time
+        worker = self.base / 'hung.py'
+        marker = self.base / 'worker-started'
+        worker.write_text('import os,pathlib,time\n'
+                          + 'pathlib.Path(' + repr(str(marker)) + ').write_text(str(os.getpid()))\n'
+                          + 'time.sleep(60)\n')
+        real_popen = subprocess.Popen
+        children = []
+        def launch(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            children.append(proc)
+            return proc
+        started = time.monotonic()
+        with patch.object(swap.subprocess, 'Popen', side_effect=launch):
+            with self.assertRaisesRegex(TimeoutError, 'wall-time'):
+                self.run_swap(preflight=lambda: swap.bounded_preflight(worker, sys.executable, timeout=2))
+        self.assertTrue(marker.exists(), 'preflight child never started')
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].returncode)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(children[0].pid, 0)
+        with open(self.state / 'deploy.lock', 'rb') as lock:
+            swap.fcntl.flock(lock.fileno(), swap.fcntl.LOCK_EX | swap.fcntl.LOCK_NB)
+        self.assertEqual((self.lib / 'cd.py').read_bytes(), b'old')
+
+    @unittest.skipUnless(pathlib.Path('/proc/self/stat').exists(), 'requires Linux procfs')
+    def test_hung_preflight_kills_spawned_helper_too(self):
+        import time
+        worker = self.base / 'hung-with-helper.py'
+        marker = self.base / 'helper-pid'
+        worker.write_text('import pathlib,subprocess,sys,time\n'
+                          'p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(60)"])\n'
+                          + 'pathlib.Path(' + repr(str(marker)) + ').write_text(str(p.pid))\n'
+                          + 'time.sleep(60)\n')
+        with self.assertRaisesRegex(TimeoutError, 'wall-time'):
+            self.run_swap(preflight=lambda: swap.bounded_preflight(worker, sys.executable, timeout=2))
+        self.assertTrue(marker.exists(), 'helper never started')
+        helper_pid = int(marker.read_text())
+        # A killed orphan may remain briefly as a zombie before init reaps it;
+        # either a missing proc entry or Z means it is no longer executing.
+        try:
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    state = pathlib.Path('/proc', str(helper_pid), 'stat').read_text().split(') ', 1)[1][0]
+                except FileNotFoundError:
+                    break
+                if state == 'Z':
+                    break
+                if time.monotonic() >= deadline:
+                    self.fail('helper remained alive after group SIGKILL')
+                time.sleep(.05)
+        finally:
+            try:
+                os.kill(helper_pid, swap.signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        with open(self.state / 'deploy.lock', 'rb') as lock:
+            swap.fcntl.flock(lock.fileno(), swap.fcntl.LOCK_EX | swap.fcntl.LOCK_NB)
+        self.assertEqual((self.lib / 'cd.py').read_bytes(), b'old')
+
+    def test_preflight_does_not_inherit_lock_when_parent_is_killed(self):
+        import signal
+        import subprocess
+        import time
+        worker = self.base / 'orphan-worker.py'
+        marker = self.base / 'orphan-pid'
+        worker.write_text('import os,pathlib,time\n'
+                          + 'pathlib.Path(' + repr(str(marker)) + ').write_text(str(os.getpid()))\n'
+                          + 'time.sleep(60)\n')
+        parent_script = self.base / 'lock-parent.py'
+        module = str(pathlib.Path(__file__).with_name('controller_swap.py').resolve())
+        parent_script.write_text(
+            'import fcntl,importlib.util,sys\n'
+            + 's=importlib.util.spec_from_file_location("swap",' + repr(module) + ')\n'
+            'm=importlib.util.module_from_spec(s); s.loader.exec_module(m)\n'
+            + 'f=open(' + repr(str(self.state / 'deploy.lock')) + ',"rb")\n'
+            'fcntl.flock(f.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)\n'
+            + 'm.bounded_preflight(' + repr(str(worker)) + ',sys.executable,timeout=50)\n')
+        parent = subprocess.Popen([sys.executable, '-I', str(parent_script)],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL)
+        child_pid = None
+        try:
+            deadline = time.monotonic() + 8
+            while True:
+                try:
+                    marker_value = marker.read_text()
+                    if marker_value.isdecimal():
+                        break
+                except FileNotFoundError:
+                    pass
+                if parent.poll() is not None:
+                    self.fail('updater parent exited before preflight started')
+                if time.monotonic() >= deadline:
+                    self.fail('preflight did not start')
+                time.sleep(.05)
+            child_pid = int(marker_value)
+            with open(self.state / 'deploy.lock', 'rb') as lock:
+                with self.assertRaises(BlockingIOError):
+                    swap.fcntl.flock(lock.fileno(), swap.fcntl.LOCK_EX | swap.fcntl.LOCK_NB)
+            os.kill(parent.pid, signal.SIGKILL)
+            parent.wait(timeout=5)
+            os.kill(child_pid, 0)  # child remains alive, so the test is meaningful
+            with open(self.state / 'deploy.lock', 'rb') as lock:
+                swap.fcntl.flock(lock.fileno(), swap.fcntl.LOCK_EX | swap.fcntl.LOCK_NB)
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+                parent.wait(timeout=5)
+            if child_pid is not None:
+                try:
+                    os.killpg(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     def test_preflight_rejects_wrong_main_and_bad_health(self):
         import io
         from types import SimpleNamespace
