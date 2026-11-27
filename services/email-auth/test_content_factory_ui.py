@@ -30,7 +30,7 @@ class ContentFactoryUiTests(unittest.TestCase):
         self.assertIn("<dt>Просмотры</dt><dd>0</dd>", page)
         self.assertIn("<dt>Заказы</dt><dd>Недоступно</dd>", page)
         self.assertIn("10 USD", page)
-        self.assertIn('Состояние ограничения: <strong>неизвестно</strong>', page)
+        self.assertIn('Настройка бюджета в n8n: <strong>неизвестно</strong>', page)
 
     def test_queue_dates_are_converted_to_moscow_and_invalid_values_hidden(self):
         page = content_factory_ui.render({"queue": {"status": "available", "items": [
@@ -44,7 +44,8 @@ class ContentFactoryUiTests(unittest.TestCase):
     def test_budget_state_is_not_inferred_from_amount(self):
         for enabled, label in ((True, 'включён'), (False, 'выключен'), (None, 'неизвестно'), ('true', 'неизвестно')):
             page = content_factory_ui.render({"budget": {"status": "available", "monthly_budget_usd": 10, "enabled": enabled}})
-            self.assertIn('Состояние ограничения: <strong>' + label + '</strong>', page)
+            self.assertIn('Настройка бюджета в n8n: <strong>' + label + '</strong>', page)
+            self.assertIn('Проверенное ограничение фактических', page)
 
     def test_unavailable_tables_do_not_display_old_items(self):
         page = content_factory_ui.render({"queue": {"status": "unavailable",
@@ -65,6 +66,22 @@ class ContentFactoryUiTests(unittest.TestCase):
         self.assertNotIn('a-secret-token', page)
         self.assertNotIn('<script>', page)
 
+    def test_ai_drafts_and_active_models_are_separate_without_key_storage(self):
+        page = content_factory_ui.render({
+            'workflow': {'config': {'status': 'verified', 'models': {'text': 'gpt-current'}}},
+            'ai_settings': {'text_model': 'gpt-test', 'image_model': '<bad>', 'video_model': ''},
+            'api_key': 'never-print-this',
+        }, csrf='safe-token')
+        self.assertIn('action="/settings/content-factory/models"', page)
+        self.assertNotIn('action="/settings/content-factory/ai-key"', page)
+        self.assertIn('value="gpt-test"', page)
+        self.assertIn('<option value="gpt-current"></option>', page)
+        self.assertIn('value="&lt;bad&gt;"', page)
+        self.assertIn('Настройка ключей через этот кабинет пока не подключена', page)
+        self.assertIn('конвейер пока не использует', page)
+        self.assertNotIn('never-print-this', page)
+        self.assertEqual(page.count('name="csrf" value="safe-token"'), 2)
+
     def test_only_verified_or_partial_published_config_is_rendered(self):
         config = {"status": "partial", "generation_time": "10:00", "timezone": "Europe/Moscow",
                   "poll_cron": "*/5 * * * *",
@@ -84,6 +101,14 @@ class ContentFactoryUiTests(unittest.TestCase):
         page = content_factory_ui.render({"workflow": {"config": config}})
         self.assertNotIn("10:00", page)
         self.assertNotIn("gpt-model", page)
+
+    def test_budget_only_gateway_is_described_as_budget_control(self):
+        page=content_factory_ui.render({},csrf='c'*32,write_token_setup=True,budget_gateway_configured=True)
+        self.assertIn('оценочный бюджет фабрики',page)
+        self.assertIn('dataTableRow:update',page)
+        self.assertIn('не гарантирует остановку списаний',page)
+        self.assertNotIn('credential:update',page)
+        self.assertIn('Включить управление фабрикой',page)
 
 
 if __name__ == "__main__":

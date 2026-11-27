@@ -403,9 +403,12 @@ jobs:
           content_factory_baseline="$RUNNER_TEMP/marketplace-content-factory-baseline/service"
           mkdir -p "$content_factory_baseline"
           git -c core.autocrlf=false archive 7549b40f1f34a1dfdff79bcdf8a6b35ec75de13f:services/email-auth | tar -x -C "$content_factory_baseline"
-          content_factory_active="$RUNNER_TEMP/marketplace-content-factory-active/service"
-          mkdir -p "$content_factory_active"
-          git -c core.autocrlf=false archive 916a519c95f1d95a005f0a9ff9034f328a9d9cf2:services/email-auth | tar -x -C "$content_factory_active"
+          content_factory_deployed="$RUNNER_TEMP/marketplace-content-factory-deployed/service"
+          mkdir -p "$content_factory_deployed"
+          git -c core.autocrlf=false archive 916a519c95f1d95a005f0a9ff9034f328a9d9cf2:services/email-auth | tar -x -C "$content_factory_deployed"
+          content_factory_latest="$RUNNER_TEMP/marketplace-content-factory-latest/service"
+          mkdir -p "$content_factory_latest"
+          git -c core.autocrlf=false archive d7e98448687ba10865f5d73ed9821e401a1d8fa6:services/email-auth | tar -x -C "$content_factory_latest"
           packaged="$RUNNER_TEMP/native-candidate/service"
           python3 -B -I tools/native-release/check_v2_rollback.py --current-service "$previous" \
             --candidate-service "$deployed" --candidate-commit b151124d70320946c17d22b08b1daa63964018de \
@@ -441,8 +444,11 @@ jobs:
             --successor 68be99c371f00b76b7bf9ef4eb879cdc376cedd4 "$settings_ui" \
             --successor db81aa4a1996e228b82ea3c2ab32cfef32d7d453 "$calculator_drafts" \
             --successor 7549b40f1f34a1dfdff79bcdf8a6b35ec75de13f "$content_factory_baseline" \
-            --successor 916a519c95f1d95a005f0a9ff9034f328a9d9cf2 "$content_factory_active" \
+            --successor 916a519c95f1d95a005f0a9ff9034f328a9d9cf2 "$content_factory_deployed" \
+            --successor d7e98448687ba10865f5d73ed9821e401a1d8fa6 "$content_factory_latest" \
             --successor "$GITHUB_SHA" "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
+          "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_factory_gateway_rollback.py \
+            --previous "$content_factory_deployed" --candidate "$packaged" --python "$RUNNER_TEMP/native-candidate-venv/bin/python"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$active" "$scoped"
           "$RUNNER_TEMP/native-candidate-venv/bin/python" -B -I tools/native-release/check_avito_rollback.py "$scoped" "$packaged" --catalog
           sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports --interrupted-finance \
@@ -550,10 +556,12 @@ jobs:
           git archive db81aa4a1996e228b82ea3c2ab32cfef32d7d453:services/email-auth | tar -x -C "$calculator_drafts"
           check_pair "$settings_ui" "$calculator_drafts"
           content_factory_baseline="$RUNNER_TEMP/marketplace-content-factory-baseline/service"
+          content_factory_deployed="$RUNNER_TEMP/marketplace-content-factory-deployed/service"
           check_pair "$calculator_drafts" "$content_factory_baseline"
-          content_factory_active="$RUNNER_TEMP/marketplace-content-factory-active/service"
-          check_pair "$content_factory_baseline" "$content_factory_active"
-          check_pair "$content_factory_active" "$packaged"
+          check_pair "$content_factory_baseline" "$content_factory_deployed"
+          content_factory_latest="$RUNNER_TEMP/marketplace-content-factory-latest/service"
+          check_pair "$content_factory_deployed" "$content_factory_latest"
+          check_pair "$content_factory_latest" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

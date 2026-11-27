@@ -45,15 +45,23 @@ def _rewrap(cipher_old, cipher_new, blob, aad):
     return nonce + cipher_new.encrypt(nonce, clear, aad)
 
 
+def _preserve_current(provider):
+    return (provider in {"yandex_backup", "yandex_backup_metadata", "n8n"} or
+            provider.startswith("content_factory_") or provider.startswith("n8n_content_factory_"))
+
+
 def prepare_vault(archive_path, current_path, old_key, current_key):
-    """Rewrap archived vault values; retain the live Disk settings and revoke old grants."""
+    """Rewrap the backup, retaining current Disk and content-factory settings."""
     if len(old_key) != 32 or len(current_key) != 32:
         raise InvalidBackup("invalid_vault_key")
     try:
         with closing(_connect(current_path)) as live:
-            current = dict(live.execute("SELECT provider,blob FROM vault WHERE provider IN (?,?)",
-                                        ("yandex_backup", "yandex_backup_metadata")))
-        if set(current) != {"yandex_backup", "yandex_backup_metadata"}:
+            rows = live.execute("SELECT provider,blob FROM vault LIMIT 1001").fetchall()
+            if len(rows) > 1000:
+                raise InvalidBackup("invalid_current_vault")
+            current = {provider: blob for provider, blob in rows
+                       if isinstance(provider, str) and _preserve_current(provider)}
+        if not {"yandex_backup", "yandex_backup_metadata"} <= set(current):
             raise InvalidBackup("current_backup_settings_missing")
         with closing(_connect(archive_path)) as db, db:
             db.execute("BEGIN IMMEDIATE")
@@ -64,6 +72,9 @@ def prepare_vault(archive_path, current_path, old_key, current_key):
             for provider, blob in rows:
                 if not isinstance(provider, str) or not 1 <= len(provider) <= 256:
                     raise InvalidBackup("invalid_vault")
+                if _preserve_current(provider):
+                    db.execute("DELETE FROM vault WHERE provider=?", (provider,))
+                    continue
                 encrypted = _rewrap(old, new, blob, provider.encode())
                 db.execute("UPDATE vault SET blob=? WHERE provider=?", (encrypted, provider))
             db.executemany("INSERT OR REPLACE INTO vault(provider,blob) VALUES(?,?)", current.items())

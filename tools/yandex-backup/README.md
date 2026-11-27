@@ -72,7 +72,7 @@ and commits replacements under the deployment recovery journal. An interrupted
 replacement is rolled back; a committed restore is finished rather than replayed.
 Unsupported schemas, missing keys or insufficient disk space stop the restore.
 SQLite files and history are restored when present. Current Disk connection
-settings, rate-limit files and the current reports database are preserved; the
+settings, content-factory vault entries, rate-limit files and the current reports database are preserved; the
 latest operation journal is preserved and paused, pending write proposals expire,
 and all MCP keys and login sessions are revoked. The owner must log in again,
 check marketplace limits and unresolved operations, and explicitly allow
@@ -84,8 +84,10 @@ integration and a fresh vault key first; the archive cannot supply operating
 system configuration or restore standalone SMTP credentials. Reconnect the
 same Yandex folder and retain access to the identity file. Old archives with
 unrecognized database schemas are rejected rather than silently migrated.
-Filesystem marketplace gates are not in the archive, so limits and uncertain
-operations from a lost server must be reconciled before requests are resumed.
+Filesystem marketplace gates and the separate content-factory budget gateway
+database are not in this archive, so limits and uncertain operations from a
+lost server must be reconciled before requests are resumed. Reconfigure that
+gateway after a server loss rather than assuming its audit ledger was restored.
 
 The restore broker and recovery modules are root-managed companions of the
 native deployment controller. Install only a CI-reviewed matching version into

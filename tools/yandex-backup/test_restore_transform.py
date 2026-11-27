@@ -62,6 +62,24 @@ class RestoreTransformTests(unittest.TestCase):
         with closing(sqlite3.connect(archived)) as db:
             self.assertEqual(decrypted(OLD, "ozon", db.execute("SELECT blob FROM vault").fetchone()[0]), b"archive-credential")
 
+    def test_factory_settings_never_revert_or_reactivate_from_archive(self):
+        archived = self.vault("archive.db", OLD, {
+            "ozon": b"archive-credential", "n8n": b"old-n8n",
+            "content_factory_budget_gateway_setup": b"old-gateway",
+            "n8n_content_factory_write": b"old-revoked-write-key",
+        })
+        current = self.vault("current.db", CURRENT, {
+            "yandex_backup": b"current", "yandex_backup_metadata": b"meta",
+            "n8n": b"current-n8n", "content_factory_budget_gateway_setup": b"current-gateway",
+        })
+        transform.prepare_vault(archived, current, OLD, CURRENT)
+        with closing(sqlite3.connect(archived)) as db:
+            rows = dict(db.execute("SELECT provider,blob FROM vault"))
+        self.assertEqual(decrypted(CURRENT, "ozon", rows["ozon"]), b"archive-credential")
+        self.assertEqual(decrypted(CURRENT, "n8n", rows["n8n"]), b"current-n8n")
+        self.assertEqual(decrypted(CURRENT, "content_factory_budget_gateway_setup", rows["content_factory_budget_gateway_setup"]), b"current-gateway")
+        self.assertNotIn("n8n_content_factory_write", rows)
+
     def test_auth_clears_sessions_but_preserves_rate_limit_history(self):
         current, prepared = self.root / "auth.db", self.root / "new-auth.db"
         with closing(sqlite3.connect(current)) as db, db:
