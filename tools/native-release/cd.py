@@ -75,6 +75,7 @@ MARKET_REPORT_SUCCESSORS = (
     'ee6097e0f5f08bc2f2089f56868e84f0b6b9ab70a5506b33ce3f12795bf50212',
     'cd9534dd6aafd8fb4e8b88f3c6470c8d18476f8341f8a10fb6fbce6c3bada251',
     'd19147a65acf3bd1ea387620ca59f6ffea1737641c73a9d0178c82e8091b4a36',
+    '24369af2009a69b5957edb949715cb6f47c48a41ea0225e89d9ac77e16fe444a',
 )
 
 
@@ -230,7 +231,8 @@ class Transaction:
             info = (proc / 'fdinfo' / str(fd)).read_text()
             return (match and proc.stat().st_uid == 0 and ticks == permit['ticks'] and
                     (group.endswith('/' + self.host.cfg['recovery_unit']) or
-                     re.fullmatch(r'/system\.slice/wbozon-deploy-[0-9]+-[0-9]+\.service', group) is not None) and
+                     re.fullmatch(r'/system\.slice/wbozon-deploy-[0-9]+-[0-9]+\.service', group) is not None or
+                     j.get('restore') == 1 and re.fullmatch(r'/system\.slice/wbozon-restore@[A-Za-z0-9_.:-]+\.service', group) is not None) and
                     re.search(r'^lock:\s+\d+: FLOCK\s+ADVISORY\s+WRITE\s+' + str(pid) + r'\s', info, re.M) is not None)
         except (FileNotFoundError, ProcessLookupError):
             return False
@@ -386,6 +388,10 @@ class Transaction:
         if not self.pending.exists():
             return
         j = json.loads(secure(self.pending).read_bytes())
+        if 'restore' in j:
+            import restore_controller
+            restore_controller.recover(self, j)
+            return
         self.host.reserve(False)
         if 'market_final' in j:
             name = j['market_final']

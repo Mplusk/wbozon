@@ -80,8 +80,62 @@ def driver(cfg, name, sha, fault):
         Inject(host).activate(name, sha, lambda: None)
 
 
+def restore_driver(cfg, fault, index):
+    """Exercise a real fenced restore using only the temporary fixture databases."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    import restore_controller
+    import restore_files
+    host = Host(cfg)
+    name, _ = Transaction(host).receipt()
+    root = host.state / ('restore-fixture-' + index)
+    root.mkdir(mode=0o700)
+    archive, keyfile, work = root / 'vault.sqlite', root / 'vault-key', root / 'work'
+    work.mkdir(mode=0o700)
+    with contextlib.closing(sqlite3.connect(Path(host.cfg['databases'][1]).as_uri() + '?mode=ro', uri=True)) as src:
+        with contextlib.closing(sqlite3.connect(archive)) as dst:
+            src.backup(dst)
+            old_key = b'a' * 32
+            for provider, value in (('yandex_backup', b'old-test-settings'),
+                                    ('yandex_backup_metadata', b'old-test-metadata'), ('ozon', b'from-backup')):
+                nonce = os.urandom(12)
+                dst.execute('UPDATE vault SET blob=? WHERE provider=?',
+                            (nonce + AESGCM(old_key).encrypt(nonce, value, provider.encode()), provider))
+            dst.commit()
+    archive.chmod(0o600)
+    keyfile.write_bytes(b'a' * 32)
+    files = {'databases/vault.sqlite': archive, 'secrets/vault-key': keyfile}
+    original_apply = restore_files.apply
+    class Inject(Transaction):
+        def phase(self, journal, phase):
+            super().phase(journal, phase)
+            if (fault == 'before-apply' and phase == 'restoring' and journal.get('restore_state') == 'modifying' or
+                    fault == 'after-commit' and phase == 'committed'):
+                os.kill(os.getpid(), signal.SIGKILL)
+        def start(self, journal, release, guard):
+            super().start(journal, release, guard)
+            if fault == 'after-start':
+                os.kill(os.getpid(), signal.SIGKILL)
+        def complete(self, journal, release, sha):
+            if fault == 'after-open':
+                host.barrier(journal['txn'], journal['mark'], False)
+                client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                with client.open('http://127.0.0.1:' + str(host.port) + '/restore-write', timeout=8) as response:
+                    if response.read() != b'changed':
+                        raise RuntimeError('synthetic post-admission write failed')
+                os.kill(os.getpid(), signal.SIGKILL)
+            super().complete(journal, release, sha)
+    if fault == 'partial':
+        def interrupted_apply(*args, **kwargs):
+            def stop(_name):
+                os.kill(os.getpid(), signal.SIGKILL)
+            return original_apply(*args, **kwargs, after_each=stop)
+        restore_files.apply = interrupted_apply
+    with host.locked():
+        restore_controller.activate(Inject(host), files, work, b'c' * 32)
+
+
 def suite(python, gate_source, baseline_service=None, candidate_service=None, market_bootstrap=False,
-          market_reports=False, interrupted_finance=False):
+          market_reports=False, interrupted_finance=False, restore_test=False):
     tag = 'wbozon-qa-' + secrets.token_hex(3)
     unit, recover, holder = (tag + suffix + '.service' for suffix in ('', '-recover', '-holder'))
     run = str(secrets.randbelow(10**10) + 10**12)
@@ -153,6 +207,7 @@ def suite(python, gate_source, baseline_service=None, candidate_service=None, ma
         unit_data = ('[Service]\nType=exec\nDynamicUser=yes\nUser=' + tag + '\nSupplementaryGroups=wbozon-release\n'
             'WorkingDirectory=' + str(root / 'current/service') + '\nStateDirectory=' + tag + '\nStateDirectoryMode=0700\n'
             'Environment=PYTHONPATH=' + str(fixtures) + ' WBOZON_QA_RELEASE_PAIR=' + str(int(config['qa_release_pair'])) +
+            ' WBOZON_QA_RESTORE=' + str(int(restore_test)) +
             ' PYTHONDONTWRITEBYTECODE=1 DATABASE_PATH=' + config['databases'][0] +
             ' VAULT_PATH=' + config['databases'][1] + '\nKillMode=mixed\nExecCondition=+/usr/bin/python3 -I ' +
             str(HERE / 'cd.py') + ' --config ' + str(cfg) + ' start-check\nExecStart=' + str(python) +
@@ -181,6 +236,30 @@ def suite(python, gate_source, baseline_service=None, candidate_service=None, ma
         def checked(name):
             return (not (state / 'pending.json').exists() and host.current() == name and
                     host.process(name) and request('/healthz') == b'{"status":"ok"}')
+        if restore_test:
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            def actual():
+                with contextlib.closing(sqlite3.connect(data / 'vault.sqlite')) as db:
+                    blob = db.execute("SELECT blob FROM vault WHERE provider='ozon'").fetchone()[0]
+                return AESGCM(b'c' * 32).decrypt(blob[:12], blob[12:], b'ozon')
+            for index, (fault, expected) in enumerate((('before-apply', b'before-restore'),
+                    ('partial', b'before-restore'), ('after-start', b'before-restore'),
+                    ('after-commit', b'from-backup'), ('after-open', b'after-admission')), 1):
+                proc = subprocess.Popen(['/usr/bin/systemd-run', '--quiet', '--wait', '--collect',
+                    '--unit=wbozon-restore@' + run + '-' + str(index), '--property=UMask=0077',
+                    '--property=Slice=system.slice', '--property=OnFailure=' + recover,
+                    '/usr/bin/python3', '-I', str(Path(__file__).resolve()), 'restore-driver', str(cfg), fault, str(index)])
+                assert proc.wait(timeout=180) != 0
+                until(lambda: checked(old), 140)
+                assert actual() == expected, (fault, actual())
+                hold = host.root / '.market-cutover-pending'
+                if fault in ('after-commit', 'after-open'):
+                    assert json.loads(hold.read_bytes()).get('purpose') == 'restore'
+                    hold.unlink()  # Test-only: model the owner's later explicit resume.
+                else:
+                    assert not hold.exists()
+                print('PASS synthetic restore recovery at', fault, flush=True)
+            return
         if market_bootstrap:
             assert launch(new, 'bootstrap-after-open').wait(timeout=150) != 0
             until(lambda: checked(old) and not (root / '.market-cutover-pending').exists(), 140)
@@ -336,6 +415,8 @@ def suite(python, gate_source, baseline_service=None, candidate_service=None, ma
 if __name__ == '__main__':
     if sys.argv[1:2] == ['driver']:
         driver(*sys.argv[2:])
+    elif sys.argv[1:2] == ['restore-driver']:
+        restore_driver(*sys.argv[2:])
     else:
         parser = argparse.ArgumentParser(description=__doc__)
         parser.add_argument('--python', type=Path, required=True)
@@ -345,10 +426,11 @@ if __name__ == '__main__':
         parser.add_argument('--market-bootstrap', action='store_true')
         parser.add_argument('--market-reports', action='store_true')
         parser.add_argument('--interrupted-finance', action='store_true')
+        parser.add_argument('--restore', action='store_true')
         args = parser.parse_args()
         if bool(args.baseline_service) != bool(args.candidate_service) or bool(args.gate_source) == bool(args.baseline_service):
             parser.error('provide both service trees or a single synthetic gate source')
         if args.interrupted_finance and not args.market_reports:
             parser.error('--interrupted-finance requires --market-reports')
         suite(args.python, args.gate_source, args.baseline_service, args.candidate_service,
-              args.market_bootstrap, args.market_reports, args.interrupted_finance)
+              args.market_bootstrap, args.market_reports, args.interrupted_finance, args.restore)

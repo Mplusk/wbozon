@@ -1,0 +1,21 @@
+[Unit]
+Description=Apply an owner-authorized Yandex backup restore
+After=network-online.target
+
+[Service]
+Type=exec
+User=root
+Group=root
+Slice=system.slice
+UMask=0077
+LimitCORE=0
+MemoryMax=1G
+TasksMax=64
+RuntimeMaxSec=15min
+TimeoutStopSec=15s
+RuntimeDirectory=wbozon-restore-%i
+RuntimeDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateTmp=yes
+StandardInput=socket
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/wbozon-cd/restore_broker.py

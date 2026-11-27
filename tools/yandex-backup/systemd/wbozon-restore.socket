@@ -1,0 +1,15 @@
+[Unit]
+Description=Owner-authorized Yandex backup restore socket
+
+[Socket]
+ListenStream=/run/wbozon-restore/restore.sock
+DirectoryMode=0755
+SocketMode=0660
+SocketUser=root
+SocketGroup=wbozon-release
+Accept=yes
+MaxConnections=4
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

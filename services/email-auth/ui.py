@@ -52,6 +52,11 @@ CSS += """
 .settings-block ::selection{background:#cfe6d5;color:#172821}
 @media(max-width:1050px){.settings-block .settings-grid{grid-template-columns:minmax(0,1fr);gap:24px}}
 @media(max-width:650px){.settings-block.mcp-card{padding:20px}.settings-block .settings-heading h2{font-size:18px}.settings-block input:is([type=text],[type=url],[type=password]),.settings-block select{font-size:16px}.settings-block .settings-form>button{width:100%}.settings-block .settings-key-row{align-items:flex-start}}
+.restore-page{max-width:760px}.restore-page .calc-panel{margin-top:24px;padding:24px}
+.restore-page .restore-help{margin:8px 0 0;color:#52675a;font-size:13px;line-height:1.5}
+.restore-page .restore-check{display:flex;align-items:flex-start;gap:10px;margin:20px 0;color:var(--ink);font-size:14px;font-weight:500;line-height:1.5}
+.restore-page .restore-check input{width:18px;height:18px;flex:none;margin:2px 0 0;accent-color:var(--green)}
+@media(max-width:650px){.restore-page .calc-panel{padding:20px}.restore-page .calc-actions button{width:100%}}
 """
 STYLE_HASH=base64.b64encode(hashlib.sha256(CSS.encode()).digest()).decode()
 SCRIPT = '''

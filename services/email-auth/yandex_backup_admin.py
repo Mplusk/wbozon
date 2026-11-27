@@ -208,4 +208,9 @@ def render(vault, csrf, fresh):
                  '<button type="submit">Сохранить настройки</button></form>')
     else:
         text += '<p class="settings-help">Чтобы изменить данные Диска или включить копии, войдите заново по ссылке из письма.</p>'
-    return text + '</div></section>'
+    text += '</div>'
+    if configured:
+        import yandex_restore_admin
+        text += ('<div class="settings-empty">' + yandex_restore_admin.status_text() +
+                 yandex_restore_admin.provider_hold(csrf, fresh) + yandex_restore_admin.button(csrf, fresh) + '</div>')
+    return text + '</section>'

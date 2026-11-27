@@ -516,6 +516,17 @@ def _provider_worker():
     """Private child entry point; exceptions and upstream bodies are not logged."""
     try:
         request=json.load(sys.stdin)
+        # The same durable fence survives rollback to earlier marketplace releases.
+        # Include Avito, which does not use market_cooldown.request internally.
+        if market_cooldown.BOOTSTRAP_HOLD is not None:
+            try:
+                market_cooldown.BOOTSTRAP_HOLD.lstat()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                raise finance_gate.GateError('storage_unavailable') from None
+            else:
+                raise finance_gate.GateError('retry_time_unknown')
         market_diagnostics.enable()
         if request['operation'] in finance_gate.FINANCE_OPERATIONS:
             finance_request_preflight(request['operation'],request['args'],request['creds'])
@@ -900,7 +911,7 @@ class Portal:
                     present=c.execute('SELECT 1 FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),self.login.clock())).fetchone()
                 if present:
                     start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
-        if path not in OAUTH_PATHS and path not in ('/settings','/settings/catalog','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/settings/yandex-backup','/settings/content-factory/connect','/mcp','/api/read','/healthz'):
+        if path not in OAUTH_PATHS and path not in ('/settings','/settings/catalog','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/settings/yandex-backup','/settings/yandex-restore/list','/settings/yandex-restore/submit','/settings/yandex-restore/resume','/settings/content-factory/connect','/mcp','/api/read','/healthz'):
             return self.login(e,start)
         def reply(text,code='200 OK',json_response=False,extra_headers=(),*,csp=CSP):
             if not json_response and not text.lstrip().lower().startswith('<!doctype'): text=document('Кабинет', '<main id="content" class="error-card"><h1>Кабинет</h1><p>'+text+'</p></main>')
@@ -1130,6 +1141,35 @@ class Portal:
         except sqlite3.Error:
             return reply('Сервис временно недоступен. Повторите позже. <a href="/settings">Настройки</a>','503 Service Unavailable')
         if not session: return reply('Войдите заново на главной странице.','401 Unauthorized')
+        if path in ('/settings/yandex-restore/list','/settings/yandex-restore/submit','/settings/yandex-restore/resume'):
+            if method!='POST': return reply('Method not allowed','405 Method Not Allowed')
+            if e.get('HTTP_ORIGIN')!=self.login.origin: return reply('Forbidden','403 Forbidden')
+            if session[0]-43200 < now-300: return reply('Для восстановления войдите заново по ссылке из письма.','403 Forbidden')
+            import yandex_restore_admin
+            try:
+                if path.endswith('/resume'):
+                    form=parse_qs(body('application/x-www-form-urlencoded',maximum=1024),max_num_fields=2,keep_blank_values=True,strict_parsing=True)
+                    if set(form)!={'csrf','confirm'} or any(len(v)!=1 for v in form.values()) or form['confirm']!=['yes']: raise ValueError()
+                    csrf=form['csrf'][0]
+                    if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
+                    yandex_restore_admin.broker({'action':'resume'})
+                    start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
+                if path.endswith('/list'):
+                    form=parse_qs(body('application/x-www-form-urlencoded',maximum=1024),max_num_fields=1,keep_blank_values=True,strict_parsing=True)
+                    if set(form)!={'csrf'} or len(form['csrf'])!=1: raise ValueError()
+                    csrf=form['csrf'][0]
+                    if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
+                    response=yandex_restore_admin.broker({'action':'list'})
+                    if response.get('status')!='ok': raise ValueError()
+                    return reply(yandex_restore_admin.select_page(session[1],response.get('backups')))
+                form=yandex_restore_admin.parse_multipart(e)
+                csrf=form['csrf']
+                if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
+                response=yandex_restore_admin.broker(yandex_restore_admin.start_request(form))
+                if response.get('status')!='accepted': raise ValueError()
+                return reply(yandex_restore_admin.started_page(),'202 Accepted')
+            except (ValueError,TypeError,UnicodeError,OSError):
+                return reply('Не удалось подготовить восстановление. Проверьте копию и доступ к серверу. <a href="/settings">Настройки</a>','503 Service Unavailable')
         if path=='/settings/yandex-backup':
             if method!='POST': return reply('Method not allowed','405 Method Not Allowed')
             if e.get('HTTP_ORIGIN')!=self.login.origin: return reply('Forbidden','403 Forbidden')

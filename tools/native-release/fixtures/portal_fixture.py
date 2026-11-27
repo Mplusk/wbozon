@@ -11,6 +11,7 @@ import finance_gate
 
 data = Path(os.environ['VAULT_PATH']).parent
 release_pair = os.environ.get('WBOZON_QA_RELEASE_PAIR') == '1'
+restore_fixture = os.environ.get('WBOZON_QA_RESTORE') == '1'
 wal_reader = None
 
 
@@ -33,6 +34,31 @@ def provider():
 
 def application(env, start):
     route = env['PATH_INFO']
+    if restore_fixture and route in ('/seed', '/restore-write'):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        key = b'c' * 32
+        def sealed(provider, value):
+            nonce = os.urandom(12)
+            return nonce + AESGCM(key).encrypt(nonce, value, provider.encode())
+        if route == '/seed':
+            with sqlite3.connect(data / 'auth.sqlite') as db:
+                db.executescript('CREATE TABLE IF NOT EXISTS tokens(hash TEXT); CREATE TABLE IF NOT EXISTS sessions(hash TEXT);'
+                                 'CREATE TABLE IF NOT EXISTS attempts(bucket TEXT); INSERT INTO sessions VALUES (\'test-session\');')
+            with sqlite3.connect(data / 'vault.sqlite') as db:
+                db.executescript('CREATE TABLE IF NOT EXISTS vault(provider TEXT PRIMARY KEY,blob BLOB NOT NULL);'
+                    'CREATE TABLE IF NOT EXISTS connection_checks(provider TEXT);'
+                    'CREATE TABLE IF NOT EXISTS external_mcp_keys(public_id TEXT,revoked_at REAL);'
+                    'CREATE TABLE IF NOT EXISTS oauth_codes(hash TEXT); CREATE TABLE IF NOT EXISTS oauth_tokens(hash TEXT);')
+                for provider, value in (('yandex_backup', b'test-settings'), ('yandex_backup_metadata', b'test-metadata'),
+                                        ('ozon', b'before-restore')):
+                    db.execute('INSERT OR REPLACE INTO vault VALUES (?,?)', (provider, sealed(provider, value)))
+            for name in ('auth.sqlite', 'vault.sqlite'):
+                os.chmod(data / name, 0o600)
+        else:
+            with sqlite3.connect(data / 'vault.sqlite') as db:
+                db.execute('UPDATE vault SET blob=? WHERE provider=?', (sealed('ozon', b'after-admission'), 'ozon'))
+            start('200 OK', [])
+            return [b'changed']
     if route in ('/interrupt-finance', '/check-interrupted-finance'):
         if route == '/interrupt-finance':
             child = subprocess.run([sys.executable, __file__, '--interrupt-finance'])
