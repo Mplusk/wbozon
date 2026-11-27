@@ -1,0 +1,21 @@
+name: Controller swap prototype checks
+on:
+  push:
+    branches: [codex/controller-swap-tests]
+    paths:
+      - content-factory-prototype/controller_swap.py
+      - content-factory-prototype/test_controller_swap.py
+      - .github/workflows/controller-swap-prototype.yml
+permissions:
+  contents: read
+jobs:
+  isolated-posix-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Test against temporary fixture directories
+        working-directory: content-factory-prototype
+        run: python3 -I -c 'import sys, unittest; sys.path.insert(0, "."); unittest.main(module=None, argv=["unittest", "-v", "test_controller_swap"])'
