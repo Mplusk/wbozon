@@ -1,0 +1,65 @@
+name: Content factory rollback prototype
+
+on:
+  push:
+    branches: [codex/content-factory-rollback-test]
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-transitions:
+    name: Test three release transitions on isolated systemd
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact commit and release history
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify reviewed release chain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 -B tools/native-release/check_release_chain.py
+      - name: Prepare hash-locked isolated runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c 'import platform,sys; assert sys.version_info[:2] == (3,12); assert platform.machine() == "x86_64"'
+          bundle="$RUNNER_TEMP/content-factory-rollback"
+          mkdir -p "$bundle/bootstrap" "$bundle/wheelhouse"
+          python3 -m pip download --isolated --index-url https://pypi.org/simple \
+            --only-binary=:all: --require-hashes --no-deps \
+            --dest "$bundle/bootstrap" -r tools/native-test-bundle/requirements-bootstrap.lock
+          python3 -m pip download --isolated --index-url https://pypi.org/simple \
+            --only-binary=:all: --require-hashes --no-deps \
+            --dest "$bundle/wheelhouse" -r tools/native-test-bundle/requirements-offline.lock
+          python3 -m venv --without-pip --copies "$bundle/venv"
+          "$bundle/venv/bin/python" -c 'import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); runpy.run_module("pip",run_name="__main__")' \
+            "$bundle/bootstrap/pip-26.3-py3-none-any.whl" install --isolated --no-index --find-links "$bundle/wheelhouse" \
+            --require-hashes -r tools/native-test-bundle/requirements-offline.lock
+          sudo groupadd --system wbozon-release
+          sudo install -d -m 0755 /opt/staging-account-acceptance
+          sudo cp -a "$bundle/venv" /opt/staging-account-acceptance/venv
+          sudo chmod -R a+rX /opt/staging-account-acceptance/venv
+      - name: Verify adjacent and same-release transitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/content-factory-rollback"
+          for name in previous production candidate; do mkdir -p "$bundle/$name"; done
+          git -c core.autocrlf=false archive db81aa4a1996e228b82ea3c2ab32cfef32d7d453:services/email-auth | tar -x -C "$bundle/previous"
+          git -c core.autocrlf=false archive 7549b40f1f34a1dfdff79bcdf8a6b35ec75de13f:services/email-auth | tar -x -C "$bundle/production"
+          git -c core.autocrlf=false archive "$GITHUB_SHA":services/email-auth | tar -x -C "$bundle/candidate"
+          check_pair() {
+            echo "Testing isolated transition $1 -> $2"
+            sudo python3 -B -u -I tools/native-release/host_acceptance.py --market-reports --interrupted-finance \
+              --python /opt/staging-account-acceptance/venv/bin/python --baseline-service "$1" --candidate-service "$2"
+          }
+          check_pair "$bundle/previous" "$bundle/production"
+          check_pair "$bundle/production" "$bundle/candidate"
+          check_pair "$bundle/candidate" "$bundle/candidate"
