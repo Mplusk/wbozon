@@ -201,7 +201,7 @@ def select_page(csrf, backups):
     request_id = secrets.token_urlsafe(16)
     return document("Восстановление", '<main id="content" class="calculator restore-page"><h1>Восстановление из копии</h1>'
         '<p>Выберите копию по дате и укажите закрытый ключ, которым она зашифрована.</p>'
-        '<div class="calc-panel"><p>Данные, изменённые после даты копии, будут заменены. Перед восстановлением текущие данные сохранятся для отката.</p>'
+        '<div class="calc-panel"><p>Карточки, история и ключи площадок будут восстановлены на дату копии. Текущие ограничения запросов и журнал операций сохранятся. Перед заменой текущие данные сохранятся для отката.</p>'
         '<p>Кабинет временно отключится. Затем потребуется войти заново и создать новые ключи MCP. Запросы к маркетплейсам и отправка изменений будут остановлены до вашей проверки.</p>'
         '<form class="settings-form" method="post" action="/settings/yandex-restore/submit" enctype="multipart/form-data">'
         '<input type="hidden" name="csrf" value="' + html.escape(csrf, quote=True) + '">'
