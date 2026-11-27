@@ -900,7 +900,7 @@ class Portal:
                     present=c.execute('SELECT 1 FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),self.login.clock())).fetchone()
                 if present:
                     start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
-        if path not in OAUTH_PATHS and path not in ('/settings','/settings/catalog','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/settings/yandex-backup','/mcp','/api/read','/healthz'):
+        if path not in OAUTH_PATHS and path not in ('/settings','/settings/catalog','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/settings/yandex-backup','/settings/content-factory/connect','/mcp','/api/read','/healthz'):
             return self.login(e,start)
         def reply(text,code='200 OK',json_response=False,extra_headers=(),*,csp=CSP):
             if not json_response and not text.lstrip().lower().startswith('<!doctype'): text=document('Кабинет', '<main id="content" class="error-card"><h1>Кабинет</h1><p>'+text+'</p></main>')
@@ -1153,6 +1153,34 @@ class Portal:
             except (sqlite3.Error,OSError):
                 return reply('Не удалось сохранить настройки резервирования. <a href="/settings">Настройки</a>','503 Service Unavailable')
             start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
+        if path == '/settings/content-factory/connect':
+            if method != 'POST': return reply('Method not allowed','405 Method Not Allowed')
+            if e.get('HTTP_ORIGIN') != self.login.origin: return reply('Forbidden','403 Forbidden')
+            if session[0]-43200 < now-300: return reply('Для изменения ключа n8n войдите заново по письму.','403 Forbidden')
+            try:
+                form = parse_qs(body('application/x-www-form-urlencoded',maximum=4096),max_num_fields=2,keep_blank_values=True,strict_parsing=True)
+                if set(form) != {'csrf','api_key'} or any(len(v) != 1 for v in form.values()): raise ValueError()
+                csrf, api_key = form['csrf'][0], form['api_key'][0]
+                if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
+                if not re.fullmatch(r'[!-~]{16,2048}',api_key): raise ValueError()
+                self.vault.save('n8n', {'api_key':api_key})
+            except (ValueError,TypeError,UnicodeError):
+                return reply('Проверьте ключ доступа n8n.', '400 Bad Request')
+            except (sqlite3.Error,OSError):
+                return reply('Не удалось сохранить ключ n8n.', '503 Service Unavailable')
+            start('303 See Other',[('Location','/settings?tab=content-factory'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
+        if path == '/settings' and 'tab=content-factory' in e.get('QUERY_STRING', ''):
+            if method != 'GET': return reply('Method not allowed','405 Method Not Allowed')
+            try:
+                parsed = parse_qs(e.get('QUERY_STRING', ''), max_num_fields=4, keep_blank_values=True)
+                if parsed != {'tab': ['content-factory']}: raise ValueError()
+                import content_factory, content_factory_ui
+                snapshot = content_factory.snapshot(self.vault)
+                return reply(document('Контент-фабрика', content_factory_ui.render(snapshot, csrf=session[1]), content_factory=True))
+            except (ValueError, TypeError, UnicodeError):
+                return reply('Проверьте параметры запроса.', '400 Bad Request')
+            except (sqlite3.Error, OSError):
+                return reply('Данные контент-фабрики временно недоступны.', '503 Service Unavailable')
         if path == '/settings' and 'tab=calculator' in e.get('QUERY_STRING', ''):
             import calculator_ui
             try:

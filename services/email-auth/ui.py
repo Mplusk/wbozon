@@ -213,12 +213,12 @@ CSP = STATIC_POLICY + DOCUMENT_POLICY
 CALCULATOR_CSP = (STATIC_POLICY + " 'sha256-" + CALCULATOR_HASH + "'" +
     "; img-src 'self' https://*.ozone.ru https://*.ozon.ru https://*.wbbasket.ru https://*.wbbasket.net "
     "https://*.wildberries.ru https://*.wbstatic.net" + DOCUMENT_POLICY)
-def document(title,content,auth=False,progress=False,calculator=False):
+def document(title,content,auth=False,progress=False,calculator=False,content_factory=False):
     head='<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>'+html.escape(title)+' — SIDZEN</title><style>'+CSS+'</style></head><body><a class="skip" href="#content">К содержимому</a>'
     brand='<a class="brand" href="/">SIDZEN<small>MARKETPLACE WORKSPACE</small></a>'
     if auth:
         body='<div class="auth-layout"><aside class="auth-story">'+brand+'<h2>Ваши кабинеты.<br>Одна точка входа.</h2><p>Подключайте Wildberries и Ozon, проверяйте доступ и просматривайте данные без изменения товаров.</p><div class="auth-art" aria-hidden="true"></div></aside><main id="content" class="auth-main"><div class="auth-card">'+content+'</div></main></div>'
     else:
-        location = 'Калькулятор' if calculator else 'Кабинеты'
-        body='<div class="shell"><aside class="sidebar">'+brand+'<div><div class="nav-label">Рабочее пространство</div><nav aria-label="Основная навигация"><a href="/settings">Кабинеты маркетплейсов</a><a href="/settings?tab=calculator">Калькулятор</a></nav></div><div class="sidebar-foot">Только чтение данных<br>Без изменения товаров и цен</div></aside><div class="main"><div class="topline"><span>Рабочее пространство / '+location+'</span><span class="tag">'+('RUB' if calculator else 'READ-ONLY')+'</span></div>'+content+'<footer class="footer"><span>SIDZEN · кабинет маркетплейсов</span><span>Секреты не отображаются после сохранения</span></footer></div></div>'
+        location = 'Контент-фабрика' if content_factory else ('Калькулятор' if calculator else 'Кабинеты')
+        body='<div class="shell"><aside class="sidebar">'+brand+'<div><div class="nav-label">Рабочее пространство</div><nav aria-label="Основная навигация"><a href="/settings">Кабинеты маркетплейсов</a><a href="/settings?tab=calculator">Калькулятор</a><a href="/settings?tab=content-factory">Контент-фабрика</a></nav></div><div class="sidebar-foot">Только чтение данных<br>Без изменения товаров и цен</div></aside><div class="main"><div class="topline"><span>Рабочее пространство / '+location+'</span><span class="tag">'+('RUB' if calculator else 'READ-ONLY')+'</span></div>'+content+'<footer class="footer"><span>SIDZEN · кабинет маркетплейсов</span><span>Секреты не отображаются после сохранения</span></footer></div></div>'
     return head+body+('<script>'+SCRIPT+'</script>' if progress else '')+('<script>'+CALCULATOR_SCRIPT+'</script>' if calculator else '')+'</body></html>'
