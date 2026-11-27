@@ -155,7 +155,7 @@ jobs:
     needs: [email-auth, marketplace-egress]
     runs-on: ubuntu-24.04
     # Exercise each admitted transition and same-release recovery under systemd.
-    timeout-minutes: 65
+    timeout-minutes: 85
     outputs:
       artifact_id: ${{ steps.native_artifact.outputs.artifact-id }}
       artifact_attempt: ${{ github.run_attempt }}
@@ -535,7 +535,9 @@ jobs:
           mkdir -p "$calculator_drafts"
           git archive db81aa4a1996e228b82ea3c2ab32cfef32d7d453:services/email-auth | tar -x -C "$calculator_drafts"
           check_pair "$settings_ui" "$calculator_drafts"
-          check_pair "$calculator_drafts" "$packaged"
+          content_factory_baseline="$RUNNER_TEMP/marketplace-content-factory-baseline/service"
+          check_pair "$calculator_drafts" "$content_factory_baseline"
+          check_pair "$content_factory_baseline" "$packaged"
           check_pair "$packaged" "$packaged"
       - name: Package candidate with source provenance and hashes
         shell: bash

@@ -221,11 +221,19 @@ def suite(python, gate_source, baseline_service=None, candidate_service=None, ma
                 assert request('/interrupt-finance') == b'held'
                 snapshot = finance_snapshot()
             assert launch(new, 'reports-after-open').wait(timeout=150) != 0
+            assert (data / ('fail-' + new)).is_file(), (
+                f'reports-after-open fault was not reached: {baseline_service} -> {candidate_service}'
+            )
             until(lambda: checked(old), 140)
             if interrupted_finance:
                 assert request('/check-interrupted-finance') == b'held' and finance_snapshot() == snapshot
             for provider in ('ozon', 'wb'):
-                assert request('/market-limit-' + provider) == b'held'
+                response = request('/market-limit-' + provider)
+                assert response == b'held', (
+                    f'cooldown after rollback: provider={provider}, '
+                    f'response={response if response in (b"held", b"recorded") else b"unexpected"!r}, '
+                    f'pair={baseline_service} -> {candidate_service}'
+                )
                 assert (data / ('attempts-' + provider)).read_text().splitlines() == ['attempt']
             (data / ('fail-' + new)).unlink()
             assert launch(new, 'none').wait(timeout=150) == 0 and checked(new)
@@ -234,7 +242,12 @@ def suite(python, gate_source, baseline_service=None, candidate_service=None, ma
                 print('PASS interrupted Ozon finance read stays blocked with identical state and epoch through '
                       'activation, rollback and redeployment', flush=True)
             for provider in ('ozon', 'wb'):
-                assert request('/market-limit-' + provider) == b'held'
+                response = request('/market-limit-' + provider)
+                assert response == b'held', (
+                    f'cooldown after redeployment: provider={provider}, '
+                    f'response={response if response in (b"held", b"recorded") else b"unexpected"!r}, '
+                    f'pair={baseline_service} -> {candidate_service}'
+                )
                 assert (data / ('attempts-' + provider)).read_text().splitlines() == ['attempt']
             print('PASS Ozon and WB deadlines survive a post-admission systemd rollback and redeployment', flush=True)
             if seeded_keys:
