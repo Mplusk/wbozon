@@ -16,10 +16,11 @@ import content_factory_model_catalog_vault as module
 class CatalogVaultTests(unittest.TestCase):
     def setUp(self):
         self.root = os.path.join(os.getcwd(), 'cf-catalog-vault-test-' + uuid.uuid4().hex)
-        os.mkdir(self.root)
+        os.mkdir(self.root, 0o700 if os.name == 'posix' else 0o777)
         self.vault_path = os.path.join(self.root, 'vault.sqlite')
         self.key = secrets.token_bytes(32)
         self.vault = Vault(self.vault_path, self.key)
+        if os.name == 'posix': os.chmod(self.vault_path, 0o600)
         self.environ = {'DATABASE_PATH': os.path.join(self.root, 'login.sqlite')}
         self.secret_reader = lambda name, binary: self.key
         self.patch = patch.object(module, 'FEATURE_AVAILABLE', True)

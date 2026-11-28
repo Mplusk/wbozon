@@ -20,13 +20,14 @@ class CatalogOptInPortalTests(unittest.TestCase):
 
     def setUp(self):
         self.root = os.path.join(os.getcwd(), 'cf-optin-test-' + uuid.uuid4().hex)
-        os.mkdir(self.root)
+        os.mkdir(self.root, 0o700 if os.name == 'posix' else 0o777)
         self.now = 100000
         self.key = secrets.token_bytes(32)
         self.vault_path = os.path.join(self.root, 'vault.sqlite')
         self.login = LoginApp(os.path.join(self.root, 'login.sqlite'), 'x'*32,
                               'https://3dprinta.shop', clock=lambda: self.now)
         self.vault = Vault(self.vault_path, self.key)
+        if os.name == 'posix': os.chmod(self.vault_path, 0o600)
         self.env = {'DATABASE_PATH': self.login.db, 'VAULT_PATH': self.vault_path}
         self.app = self.make_worker()
         self.sid, self.csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
