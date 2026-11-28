@@ -66,7 +66,7 @@ def main():
             test_account.pw_gid != grp.getgrnam('wbozon-test').gr_gid):
         raise RuntimeError('unexpected sandbox identity')
     LIB.mkdir(mode=0o755, exist_ok=True)
-    for name in ('cd.py', 'release_host.py', 'build_release.py', 'github_artifact.py',
+    for name in ('cd.py', 'release_host.py', 'catalog_cd_guard.py', 'build_release.py', 'github_artifact.py',
                  'finance_guard.py', 'native_release.py', 'dispatch.py'):
         install(SOURCE / name, LIB / name)
     for p in (STATE / 'candidates', STATE / 'backups'):

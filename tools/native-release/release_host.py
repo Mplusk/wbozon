@@ -19,6 +19,7 @@ import tempfile
 import time
 
 import build_release
+import catalog_cd_guard
 from native_release import secure, syncdir
 
 
@@ -87,9 +88,25 @@ def process_uid(pid):
     raise ReleaseError('missing process identity')
 
 
-def unit_properties(unit, names):
-    raw = command(['/usr/bin/systemctl', 'show', unit, *['--property=' + n for n in names]])
+def unit_properties(unit, names, *, all_values=False):
+    raw = command(['/usr/bin/systemctl', 'show', unit, *(['--all'] if all_values else []),
+                   *['--property=' + n for n in names]])
     return dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
+
+
+def catalogue_empty_stop_hooks():
+    """Use typed D-Bus arrays; systemctl show omits unset ExecStop arrays."""
+    raw = command(['/usr/bin/busctl','call','org.freedesktop.systemd1',
+                   '/org/freedesktop/systemd1','org.freedesktop.systemd1.Manager',
+                   'GetUnit','s',catalog_cd_guard.UNIT])
+    match = re.fullmatch(r'o "(/org/freedesktop/systemd1/unit/[A-Za-z0-9_]+)"\s*',raw)
+    if not match:
+        raise ReleaseError('catalogue D-Bus unit unavailable')
+    for field in ('ExecStop','ExecStopPost'):
+        raw = command(['/usr/bin/busctl','get-property','org.freedesktop.systemd1',
+                       match.group(1),'org.freedesktop.systemd1.Service',field])
+        if raw.strip() != 'a(sasbttttuii) 0':
+            raise ReleaseError('catalogue stop hooks are not empty')
 
 
 def service_digest(release):
@@ -236,6 +253,9 @@ class Host:
                 os.chown(p, 0, self.group, follow_symlinks=False)
 
     def switch(self, name, txn):
+        # Prototype: refuse both normal and recovery switch unless the optional
+        # worker is stopped, with the portal already inactive and settled.
+        self.catalogue_quiescent()
         temp = self.root / ('.cd-link-' + txn)
         if temp.is_symlink() and temp.lstat().st_uid == 0:
             temp.unlink()
@@ -247,8 +267,26 @@ class Host:
         unit_text = command(['/usr/bin/systemctl', 'cat', '--no-pager', self.unit])
         if digest(unit_text.encode()) != self.cfg['unit_sha256']:
             raise ReleaseError('systemd unit changed')
+        cat_fields = ['LoadState','ActiveState','MainPID','ControlGroup','InvocationID',
+                      'NeedDaemonReload','PartOf','Requisite','After','KillMode',
+                      'DynamicUser','User','Restart','ExecStop','ExecStopPost',
+                      'PropagatesStopTo','OnSuccess','OnFailure']
+        cat_props = unit_properties(catalog_cd_guard.UNIT, cat_fields, all_values=True)
         props = unit_properties(self.unit, ['NeedDaemonReload', 'KillMode', 'DynamicUser', 'PrivateNetwork',
                                'PartOf', 'BoundBy', 'RequiredBy', 'ConsistsOf', 'PropagatesStopTo', 'TriggeredBy'])
+        members = props.pop('ConsistsOf', '')
+        cat, launcher = b'', b''
+        if cat_props.get('LoadState') == 'loaded':
+            cat = command(['/usr/bin/systemctl','cat','--no-pager',catalog_cd_guard.UNIT]).encode()
+            launcher = secure('/usr/local/libexec/3dprinta-model-catalog-launch.py').read_bytes()
+            catalogue_empty_stop_hooks()
+            # --all still omits unset ExecStop arrays on systemd 255. Only the
+            # typed D-Bus check above permits treating them as empty.
+            cat_props['ExecStop'] = cat_props['ExecStopPost'] = ''
+        try:
+            self.catalog_enabled = catalog_cd_guard.check_configuration(members,cat_props,cat,launcher,self.cfg.get('catalog_guard',{}))
+        except ValueError as exc:
+            raise ReleaseError('catalogue unit refused') from exc
         if (props.pop('NeedDaemonReload') != 'no' or props.pop('KillMode') != 'mixed' or
                 props.pop('DynamicUser') != 'yes' or props.pop('PrivateNetwork') != 'no' or any(props.values())):
             raise ReleaseError('unexpected loaded unit or stop propagation')
@@ -263,6 +301,55 @@ class Host:
         for unit in self.cfg['dependencies']:
             if unit_properties(unit, ['ActiveState'])['ActiveState'] != 'active':
                 raise ReleaseError('required network service unavailable')
+
+    def catalogue_quiescent(self, *, require_portal_inactive=True):
+        """Called under deploy.lock. Absence/ambiguity never permits switch."""
+        self.check_unit()
+        fields = ['ActiveState','MainPID','ControlGroup','InvocationID']
+        def snapshot():
+            if command(['/usr/bin/systemctl','list-jobs','--no-legend','--no-pager',catalog_cd_guard.UNIT]).strip():
+                raise ReleaseError('catalogue unit has outstanding job')
+            values = unit_properties(catalog_cd_guard.UNIT,fields,all_values=True)
+            if set(values) != set(fields): raise ReleaseError('catalogue state unavailable')
+            return values
+        portal = self.props()
+        # A failed portal with Restart=on-failure may have an auto-restart
+        # scheduled after this snapshot. An explicit stop must cancel it.
+        if require_portal_inactive and (portal['ActiveState'] != 'inactive' or portal['MainPID'] != '0'):
+            raise ReleaseError('portal is not stopped')
+        before = snapshot()
+        if before['ControlGroup'] not in ('', '/system.slice/' + catalog_cd_guard.UNIT):
+            raise ReleaseError('unexpected catalogue cgroup')
+        tree = Path('/sys/fs/cgroup/system.slice') / catalog_cd_guard.UNIT
+        pids = []
+        try:
+            st = tree.lstat()
+        except FileNotFoundError:
+            # Valid only when systemd snapshots agree on a stopped unit and
+            # no outstanding job. This requires verified cgroup v2 semantics.
+            st = None
+        if st is not None:
+            if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+                raise ReleaseError('invalid catalogue cgroup')
+            def scan_group(directory):
+                # scandir/on-error is explicit: pathlib glob can silently skip
+                # unreadable children and must not imply that they are empty.
+                pids.extend(int(pid) for pid in (directory / 'cgroup.procs').read_text().split())
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if entry.is_symlink(): raise ReleaseError('invalid catalogue cgroup child')
+                        if entry.is_dir(follow_symlinks=False): scan_group(directory / entry.name)
+            try:
+                scan_group(tree)
+            except OSError as exc:
+                raise ReleaseError('catalogue cgroup unreadable') from exc
+        after = snapshot()
+        if before != after or self.props() != portal:
+            raise ReleaseError('catalogue or portal changed during inspection')
+        try:
+            catalog_cd_guard.require_stopped(after,pids)
+        except ValueError as exc:
+            raise ReleaseError('catalogue is not quiescent') from exc
 
     def props(self):
         return unit_properties(self.unit, ['ActiveState', 'MainPID', 'ControlGroup', 'InvocationID', 'SubState'])

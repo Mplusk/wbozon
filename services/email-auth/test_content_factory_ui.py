@@ -82,6 +82,43 @@ class ContentFactoryUiTests(unittest.TestCase):
         self.assertNotIn('never-print-this', page)
         self.assertEqual(page.count('name="csrf" value="safe-token"'), 2)
 
+    def test_catalog_offers_models_without_changing_saved_or_active_values(self):
+        page = content_factory_ui.render({
+            'workflow': {'config': {'status': 'verified', 'models': {'text': 'gpt-active'}}},
+            'ai_settings': {'text_model': 'gpt-draft'},
+            'model_catalog': {
+                'openai': {'status': 'ready', 'updated_at': 0, 'ids': ['gpt-active', 'gpt-new', '<unsafe>']},
+                'gemini': {'status': 'stale', 'updated_at': 0, 'ids': ['models/gemini-image'],
+                           'last_attempt': {'attempted_at': 0, 'outcome': 'unavailable'}},
+            },
+        }, csrf='token')
+        self.assertIn('value="gpt-draft"', page)
+        self.assertEqual(page.count('<option value="gpt-active"></option>'), 1)
+        self.assertIn('<option value="gpt-new"></option>', page)
+        self.assertIn('<option value="models/gemini-image"></option>', page)
+        self.assertNotIn('<unsafe>', page)
+        self.assertIn('01.01.1970 03:00 МСК', page)
+        self.assertIn('Список мог устареть', page)
+        self.assertIn('Последняя попытка обновления Gemini не удалась', page)
+        self.assertIn('совместимость с конвейером и стоимость не проверены', page)
+        self.assertIn('Обновление списка не меняет выбранные модели', page)
+
+    def test_catalog_suggestions_avoid_unrelated_modalities(self):
+        catalog = {
+            'openai': {'status':'ready', 'updated_at':0,
+                       'ids':['gpt-5', 'gpt-audio-test', 'text-embedding-3-small']},
+            'gemini': {'status':'ready', 'updated_at':0,
+                       'ids':['models/gemini-text', 'models/gemini-image', 'models/veo-test']},
+        }
+        page = content_factory_ui.render({'model_catalog':catalog}, csrf='token')
+        self.assertIn('<option value="gpt-5"></option>', page)
+        self.assertNotIn('<option value="gpt-audio-test"></option>', page)
+        self.assertNotIn('<option value="text-embedding-3-small"></option>', page)
+        self.assertNotIn('<option value="models/gemini-text"></option>', page)
+        self.assertIn('<option value="models/gemini-image"></option>', page)
+        self.assertIn('<option value="models/veo-test"></option>', page)
+        self.assertIn('предварительно отобраны по названию', page)
+
     def test_only_verified_or_partial_published_config_is_rendered(self):
         config = {"status": "partial", "generation_time": "10:00", "timezone": "Europe/Moscow",
                   "poll_cron": "*/5 * * * *",

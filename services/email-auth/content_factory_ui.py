@@ -1,8 +1,9 @@
 """Owner dashboard for the content factory; secret values are never rendered."""
 
 from html import escape
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+import re
 
 
 def h(value):
@@ -35,11 +36,32 @@ def _moscow_datetime(value):
         return 'Недоступно'
 
 
+def _catalog_datetime(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 'Недоступно'
+    try:
+        return datetime.fromtimestamp(value, timezone.utc).astimezone(ZoneInfo('Europe/Moscow')).strftime('%d.%m.%Y %H:%M МСК')
+    except (ValueError, OverflowError, OSError, ZoneInfoNotFoundError):
+        return 'Недоступно'
+
+
+def _likely_model_for_field(model, field):
+    # Provider list APIs do not consistently describe output modalities. This
+    # is a suggestion filter, not a compatibility or pricing check.
+    name = model.lower().rsplit('/', 1)[-1]
+    if field == 'text':
+        return bool(re.match(r'^(?:gpt-|o\d)', name)) and not any(
+            part in name for part in ('image', 'audio', 'realtime', 'transcribe', 'tts', 'embedding', 'moderation', 'search'))
+    if field == 'image':
+        return 'image' in name or name.startswith('imagen-')
+    if field == 'video':
+        return name.startswith('veo-')
+    return False
 def _card(title, body):
     return '<section class="market-card"><h2>' + h(title) + '</h2>' + body + '</section>'
 
 
-def render(snapshot=None, csrf=None, *, ai_gateway_ready=False, budget_gateway_ready=False, budget_settings=None, write_token_setup=False, write_token_present=False, budget_gateway_configured=False, ai_gateway_configured=False, model_config_enabled=False, cutover_configured=False, budget_vault_feature=False, budget_vault_enabled=False):
+def render(snapshot=None, csrf=None, *, ai_gateway_ready=False, budget_gateway_ready=False, budget_settings=None, write_token_setup=False, write_token_present=False, budget_gateway_configured=False, ai_gateway_configured=False, model_config_enabled=False, cutover_configured=False, budget_vault_feature=False, budget_vault_enabled=False,catalog_ready=False,catalog_setup_feature=False,catalog_setup_pending=False):
     """Render trusted snapshot data; data absence is never represented as zero."""
     data = snapshot if isinstance(snapshot, dict) else {}
     workflow = data.get("workflow") if isinstance(data.get("workflow"), dict) else {}
@@ -89,6 +111,7 @@ def render(snapshot=None, csrf=None, *, ai_gateway_ready=False, budget_gateway_r
                     'Настройки ниже сохраняются в кабинете как черновик: '
                     'конвейер пока не использует их.</p>')
     settings = data.get("ai_settings") if isinstance(data.get("ai_settings"), dict) else {}
+    catalog = data.get("model_catalog") if isinstance(data.get("model_catalog"), dict) else {}
     if isinstance(csrf, str) and csrf:
         token = h(csrf)
         models_body += ('<details class="details"><summary>Выбрать модели</summary>'
@@ -100,8 +123,15 @@ def render(snapshot=None, csrf=None, *, ai_gateway_ready=False, budget_gateway_r
             value = settings.get(field) if isinstance(settings.get(field), str) else ''
             required = ' required' if field != 'video_model' else ''
             active_value = configured_models.get(current)
-            options = ('<option value="' + h(active_value) + '"></option>'
-                       if isinstance(active_value, str) and active_value.strip() else '')
+            provider = 'openai' if current == 'text' else 'gemini'
+            provider_catalog = catalog.get(provider) if isinstance(catalog.get(provider), dict) else {}
+            ids = provider_catalog.get('ids') if isinstance(provider_catalog.get('ids'), list) else []
+            candidates = ([active_value] if isinstance(active_value, str) and active_value.strip() else [])
+            candidates += [item for item in ids[:1000] if isinstance(item, str)
+                           and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,79}', item)
+                           and _likely_model_for_field(item,current)
+                           and not any(part.lower().startswith(('sk-', 'aiza')) for part in item.split('/'))]
+            options = ''.join('<option value="' + h(item) + '"></option>' for item in dict.fromkeys(candidates))
             models_body += ('<label for="ai-' + field + '">' + label + '</label>'
                             '<input type="text" id="ai-' + field + '" name="' + field +
                             '" value="' + h(value) + '" maxlength="80" '
@@ -109,7 +139,42 @@ def render(snapshot=None, csrf=None, *, ai_gateway_ready=False, budget_gateway_r
                             '<datalist id="ai-options-' + field + '">' + options + '</datalist>')
         models_body += ('<p>Выберите текущую модель из подсказки или введите идентификатор из кабинета поставщика. '
                         'Поле видео можно оставить пустым.</p>'
+                        + ('<p>Подсказки предварительно отобраны по названию из списка поставщика; '
+                           'совместимость с конвейером и стоимость не проверены. '
+                           'Обновление списка не меняет выбранные модели.</p>' if catalog else '') +
                         '<button type="submit">Сохранить черновик моделей</button></form></details>')
+        if catalog:
+            for provider, label in (('openai', 'OpenAI'), ('gemini', 'Gemini')):
+                item = catalog.get(provider)
+                if isinstance(item, dict) and item.get('status') in ('ready', 'stale'):
+                    models_body += ('<p>Последнее успешное обновление ' + label + ': ' +
+                                    _catalog_datetime(item.get('updated_at')) +
+                                    ('. Список мог устареть.' if item.get('status') == 'stale' else '.') + '</p>')
+                elif isinstance(item, dict):
+                    status = {'not_configured': 'ключ не подключён', 'pending': 'ожидается ночное обновление',
+                              'unavailable': 'данные временно недоступны'}.get(item.get('status'), 'состояние неизвестно')
+                    models_body += '<p>Каталог ' + label + ': ' + status + '.</p>'
+                if isinstance(item, dict) and isinstance(item.get('last_attempt'), dict) and item['last_attempt'].get('outcome') == 'unavailable':
+                    models_body += ('<p>Последняя попытка обновления ' + label + ' не удалась: ' +
+                                    _catalog_datetime(item['last_attempt'].get('attempted_at')) + '.</p>')
+        if catalog_setup_pending is True and catalog_ready is not True:
+            models_body += '<p>Настройка каталога сохранена, но каталог временно недоступен. Повторное подключение заблокировано до проверки состояния.</p>'
+        elif catalog_setup_feature is True and catalog_ready is not True:
+            models_body += ('<form class="save-form" method="post" action="/settings/content-factory/catalog/enable">'
+                            '<input type="hidden" name="csrf" value="' + token + '">'
+                            '<button type="submit">Подключить обновление списка моделей</button></form>')
+        if catalog_ready is True:
+            models_body += ('<details class="details"><summary>Подключить обновление списка моделей</summary>'
+                            '<p>Введите API-ключи для получения списка моделей. Ключи сохраняются в защищённом хранилище кабинета; '
+                            'они не подключают модели к сценарию n8n. Обновление выполняется отдельно для каждого поставщика.</p>')
+            for provider, label in (('openai', 'OpenAI'), ('gemini', 'Google Gemini')):
+                models_body += ('<form class="save-form" method="post" action="/settings/content-factory/catalog/key" autocomplete="off">'
+                                '<input type="hidden" name="csrf" value="' + token + '">'
+                                '<input type="hidden" name="provider" value="' + provider + '">'
+                                '<label for="catalog-key-' + provider + '">Ключ ' + label + '</label>'
+                                '<input type="password" id="catalog-key-' + provider + '" name="api_key" maxlength="2048" autocomplete="off" required>'
+                                '<button type="submit">Сохранить ключ ' + label + '</button></form>')
+            models_body += '</details>'
     else:
         models_body += '<p>Для сохранения настроек требуется защищённый сеанс.</p>'
     if ai_gateway_ready is True and isinstance(csrf, str) and csrf:

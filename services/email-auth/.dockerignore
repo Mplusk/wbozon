@@ -68,6 +68,12 @@
 !content_factory_budget_config.py
 !content_factory_n8n_budget.py
 !content_factory_model_config.py
+!content_factory_model_catalog.py
+!content_factory_model_catalog_control.py
+!content_factory_model_catalog_config.py
+!content_factory_model_catalog_cli.py
+!content_factory_model_schedule.py
+!content_factory_model_catalog_vault.py
 !content_factory_cutover.py
 !content_factory_cutover_jobs.py
 !content_factory_cutover_ui.py

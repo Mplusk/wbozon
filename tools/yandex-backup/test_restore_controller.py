@@ -34,9 +34,13 @@ class Host:
         (self.state / "backups").mkdir(mode=0o700)
         self.cfg = {"databases": [str(self.data / "auth.sqlite"), str(self.data / "vault.sqlite")]}
         self.running, self.fenced = True, False
+        self.catalogue_busy = False
     def current(self): return "a" * 40
     def verify(self, name, sha): pass
     def check_unit(self): pass
+    def catalogue_quiescent(self):
+        if self.running or self.catalogue_busy:
+            raise controller.ReleaseError("catalogue still active")
     def settled(self): pass
     def holder(self): return os.getuid()
     def sockets(self): return 0
@@ -152,6 +156,22 @@ class ControllerTests(unittest.TestCase):
                 self.assertFalse(fixture.host.fenced)
                 self.assertFalse(fixture.txn.pending.exists())
                 self.assertFalse(fixture.txn.market_hold.exists())
+
+    def test_busy_catalogue_refuses_restore_and_can_recover_without_data_change(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(controller, "secure", side_effect=lambda path, *a: Path(path)):
+            fixture = Fixture(Path(directory))
+            fixture.host.catalogue_busy = True
+            with self.assertRaises(controller.ReleaseError):
+                controller.activate(fixture.txn, fixture.files, fixture.work, fixture.current)
+            self.assertEqual(fixture.value(), b"current")
+            self.assertTrue(fixture.txn.pending.exists())
+            self.assertTrue(fixture.host.fenced)
+            fixture.host.catalogue_busy = False
+            controller.recover(fixture.txn, json.loads(fixture.txn.pending.read_text()))
+            self.assertEqual(fixture.value(), b"current")
+            self.assertTrue(fixture.host.running)
+            self.assertFalse(fixture.txn.pending.exists())
+            self.assertFalse(fixture.host.fenced)
 
     def test_bad_archive_schema_leaves_original_intact(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(controller, "secure", side_effect=lambda path, *a: Path(path)):

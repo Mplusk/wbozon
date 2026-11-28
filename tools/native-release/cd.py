@@ -460,7 +460,8 @@ class Transaction:
             if props['ActiveState'] == 'active':
                 p, _, _ = self.drain(h.current(), j['mark'])
                 guard.verify('/proc/' + str(p) + '/root', '/proc/' + str(p) + '/ns/time')
-            if h.props()['ActiveState'] not in ('inactive', 'failed'):
+            # Explicit stop also cancels a delayed Restart=on-failure job.
+            if h.props()['ActiveState'] != 'inactive':
                 h.stop()
             if h.props()['MainPID'] != '0':
                 raise ReleaseError('unexpected live process during recovery')
@@ -475,6 +476,12 @@ def prune(host, txn):
     # Only delete previously registered CI builds and controller-created snapshots.
     # Always keep the running release, its predecessor and the five most recent entries.
     from native_release import syncdir
+    try:
+        host.catalogue_quiescent(require_portal_inactive=False)
+    except Exception:
+        # Do not remove releases when a catalogue worker may still use one.
+        print('Skipping release cleanup: catalogue worker state unavailable', flush=True)
+        return
     current, _ = txn.receipt()
     keep = {current, host.cfg['baseline']}
     if txn.active.exists():

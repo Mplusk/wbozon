@@ -120,6 +120,9 @@ def activate(txn, files, work, current_key):
             host.stop()
             if host.props()["MainPID"] != "0":
                 raise ReleaseError("portal did not stop")
+            # The separate read-only catalogue worker must have exited before
+            # taking SQLite snapshots and replacing the owner vault.
+            host.catalogue_quiescent()
             data = Path(host.cfg["databases"][0]).parent.resolve(strict=True)
             if Path(host.cfg["databases"][1]).parent.resolve(strict=True) != data:
                 raise ReleaseError("unexpected data directory")
@@ -182,10 +185,12 @@ def recover(txn, journal):
             txn.complete(journal, name, journal["old_sha"])
             return
     with txn.gate_lock(allow_uncertain=True) as guard:
-        if host.props()["ActiveState"] not in ("inactive", "failed"):
+        # Stop also cancels a delayed Restart=on-failure before vault rollback.
+        if host.props()["ActiveState"] != "inactive":
             host.stop()
         if host.props()["MainPID"] != "0":
             raise ReleaseError("portal still running during restore recovery")
+        host.catalogue_quiescent()
         if not committed and state == "modifying":
             before = _snapshot_dir(host, journal)
             restore_files._validate_records(before, journal.get("records"))

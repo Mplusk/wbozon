@@ -710,7 +710,7 @@ def render_preview(provider, result, fetched_at, sensitive_values=(), lookup_nm_
 
 class Portal:
     native_provider = staticmethod(provider_read)
-    def __init__(self, login, vault, read_token_hash, gateway=provider_read, mcp_read_token_hash=None, external_key_store=None, oauth_store=None, finance_gate_dir=None, ai_gateway=None, budget_gateway=None, write_token_setup=False, ai_gateway_inspector=None, model_config_enabled=False, ai_cutover=None, ai_cutover_jobs=None, budget_vault_feature=False, budget_vault_path=None):
+    def __init__(self, login, vault, read_token_hash, gateway=provider_read, mcp_read_token_hash=None, external_key_store=None, oauth_store=None, finance_gate_dir=None, ai_gateway=None, budget_gateway=None, write_token_setup=False, ai_gateway_inspector=None, model_config_enabled=False, ai_cutover=None, ai_cutover_jobs=None, budget_vault_feature=False, budget_vault_path=None,model_catalog=None,model_catalog_schedule_path=None,catalog_setup_feature=False):
         if not re.fullmatch(r'[0-9a-f]{64}',read_token_hash): raise ValueError('Expected SHA256 token hash')
         if mcp_read_token_hash is not None and (not re.fullmatch(r'[0-9a-f]{64}',mcp_read_token_hash) or hmac.compare_digest(read_token_hash,mcp_read_token_hash)):
             raise ValueError('Expected distinct SHA256 MCP token hash')
@@ -718,6 +718,9 @@ class Portal:
         self.ai_gateway=ai_gateway
         self.ai_gateway_inspector=ai_gateway_inspector
         self.model_config_enabled=model_config_enabled is True
+        self.model_catalog=model_catalog
+        self.model_catalog_schedule_path=model_catalog_schedule_path
+        self.catalog_setup_feature=catalog_setup_feature is True
         self.ai_cutover=ai_cutover
         self.ai_cutover_jobs=ai_cutover_jobs
         self.budget_vault_feature=budget_vault_feature is True
@@ -916,6 +919,30 @@ class Portal:
         # Test/injected gateways use the same contract and serialization.
         return finance_gate.run(self.finance_gate_dir,creds.get('client_id'),
                                 lambda:self.gateway(operation,args,creds),(creds.get('api_key'),),read_recovery=True)
+    def model_catalog_ready(self):
+        if self.model_catalog is not None:
+            return True
+        if not self.catalog_setup_feature:
+            return False
+        try:
+            import content_factory_model_catalog_vault
+            configured = content_factory_model_catalog_vault.load(self.vault,os.environ,secret_file)
+            if configured is not None:
+                self.model_catalog,self.model_catalog_schedule_path = configured
+                return True
+        except Exception:
+            pass
+        return False
+
+    def catalog_setup_pending(self):
+        if not self.catalog_setup_feature:
+            return False
+        try:
+            import content_factory_model_catalog_vault
+            return content_factory_model_catalog_vault.setup_pending(self.vault)
+        except Exception:
+            return True  # An unreadable marker must not offer a new setup.
+
     def request_budget(self, provider, now):
         """Read-only local limiter snapshot. It neither reserves nor grants a request."""
         if provider not in CHECK_OPERATIONS: raise ValueError('Invalid provider')
@@ -942,7 +969,7 @@ class Portal:
                     present=c.execute('SELECT 1 FROM sessions WHERE hash=? AND expires>?',(self.login.digest(sid),self.login.clock())).fetchone()
                 if present:
                     start('303 See Other',[('Location','/settings'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
-        if path not in OAUTH_PATHS and path not in ('/settings','/settings/catalog','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/settings/yandex-backup','/settings/yandex-restore/list','/settings/yandex-restore/submit','/settings/yandex-restore/resume','/settings/content-factory/connect','/settings/content-factory/models','/settings/content-factory/budget/vault-enable','/settings/content-factory/budget/vault-disable','/settings/content-factory/budget/prepare','/settings/content-factory/budget/confirm','/settings/content-factory/budget/refresh','/settings/content-factory/ai/write-token','/settings/content-factory/ai/reader-token','/settings/content-factory/ai/reader-credential/prepare','/settings/content-factory/ai/reader-credential/confirm','/settings/content-factory/ai/gateway','/settings/content-factory/ai/models/prepare','/settings/content-factory/ai/models/confirm','/settings/content-factory/ai/credentials/prepare','/settings/content-factory/ai/credentials/commit','/settings/content-factory/ai/credentials/provision/prepare','/settings/content-factory/ai/credentials/provision/commit','/settings/content-factory/ai/reconcile/inspect','/settings/content-factory/ai/reconcile/confirm','/settings/content-factory/ai/cutover/job','/settings/content-factory/ai/cutover/pause/prepare','/settings/content-factory/ai/cutover/pause/confirm','/settings/content-factory/ai/cutover/restore/prepare','/settings/content-factory/ai/cutover/restore/confirm','/settings/content-factory/ai/cutover/draft/prepare','/settings/content-factory/ai/cutover/draft/confirm','/settings/content-factory/ai/cutover/publish/prepare','/settings/content-factory/ai/cutover/publish/confirm','/api/content-factory/model-config','/mcp','/api/read','/healthz'):
+        if path not in OAUTH_PATHS and path not in ('/settings','/settings/catalog','/settings/check','/settings/preview','/settings/wb-lookup','/settings/mcp/create','/settings/mcp/revoke','/settings/yandex-backup','/settings/yandex-restore/list','/settings/yandex-restore/submit','/settings/yandex-restore/resume','/settings/content-factory/connect','/settings/content-factory/catalog/enable','/settings/content-factory/catalog/key','/settings/content-factory/models','/settings/content-factory/budget/vault-enable','/settings/content-factory/budget/vault-disable','/settings/content-factory/budget/prepare','/settings/content-factory/budget/confirm','/settings/content-factory/budget/refresh','/settings/content-factory/ai/write-token','/settings/content-factory/ai/reader-token','/settings/content-factory/ai/reader-credential/prepare','/settings/content-factory/ai/reader-credential/confirm','/settings/content-factory/ai/gateway','/settings/content-factory/ai/models/prepare','/settings/content-factory/ai/models/confirm','/settings/content-factory/ai/credentials/prepare','/settings/content-factory/ai/credentials/commit','/settings/content-factory/ai/credentials/provision/prepare','/settings/content-factory/ai/credentials/provision/commit','/settings/content-factory/ai/reconcile/inspect','/settings/content-factory/ai/reconcile/confirm','/settings/content-factory/ai/cutover/job','/settings/content-factory/ai/cutover/pause/prepare','/settings/content-factory/ai/cutover/pause/confirm','/settings/content-factory/ai/cutover/restore/prepare','/settings/content-factory/ai/cutover/restore/confirm','/settings/content-factory/ai/cutover/draft/prepare','/settings/content-factory/ai/cutover/draft/confirm','/settings/content-factory/ai/cutover/publish/prepare','/settings/content-factory/ai/cutover/publish/confirm','/api/content-factory/model-config','/mcp','/api/read','/healthz'):
             return self.login(e,start)
         def reply(text,code='200 OK',json_response=False,extra_headers=(),*,csp=CSP):
             if not json_response and not text.lstrip().lower().startswith('<!doctype'): text=document('Кабинет', '<main id="content" class="error-card"><h1>Кабинет</h1><p>'+text+'</p></main>')
@@ -1599,6 +1626,41 @@ class Portal:
             if outcome not in ('verified','accepted_unconfirmed','rejected_before_send','unknown'): outcome = 'unknown'
             page = content_factory_ai_controls.render_result(outcome, csrf, form['proposal_id'])
             return reply(document('Результат изменения ключа', '<main id="content">' + page + '</main>', content_factory=True))
+        if path == '/settings/content-factory/catalog/enable':
+            if method != 'POST': return reply('Method not allowed','405 Method Not Allowed')
+            if not self.catalog_setup_feature: return reply('Каталог моделей недоступен.','503 Service Unavailable')
+            if e.get('HTTP_ORIGIN') != self.login.origin: return reply('Forbidden','403 Forbidden')
+            if session[0]-43200 < now-300: return reply('Для подключения войдите заново по письму.','403 Forbidden')
+            try:
+                form = parse_qs(body('application/x-www-form-urlencoded',maximum=1024),max_num_fields=1,keep_blank_values=True,strict_parsing=True)
+                if set(form) != {'csrf'} or len(form['csrf']) != 1: raise ValueError()
+                csrf = form['csrf'][0]
+                if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
+                import content_factory_model_catalog_vault
+                content_factory_model_catalog_vault.enable(self.vault,os.environ,secret_file,confirmed=True)
+                # Every web worker, including this one, subsequently opens the
+                # created catalogue through the bounded read-only load path.
+                if not self.model_catalog_ready():
+                    return reply('Настройка каталога сохранена, но загрузка временно недоступна. Повторное подключение заблокировано до проверки состояния.','503 Service Unavailable')
+            except (ValueError,TypeError,UnicodeError): return reply('Не удалось подключить каталог. Проверьте его состояние.','400 Bad Request')
+            except Exception: return reply('Каталог временно недоступен.','503 Service Unavailable')
+            start('303 See Other',[('Location','/settings?tab=content-factory'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
+        if path == '/settings/content-factory/catalog/key':
+            if method != 'POST': return reply('Method not allowed','405 Method Not Allowed')
+            if not self.model_catalog_ready(): return reply('Каталог моделей недоступен.','503 Service Unavailable')
+            if e.get('HTTP_ORIGIN') != self.login.origin: return reply('Forbidden','403 Forbidden')
+            if session[0]-43200 < now-300: return reply('Для изменения ключа войдите заново по письму.','403 Forbidden')
+            try:
+                form = parse_qs(body('application/x-www-form-urlencoded',maximum=8192),max_num_fields=3,keep_blank_values=True,strict_parsing=True)
+                if set(form) != {'csrf','provider','api_key'} or any(len(v) != 1 for v in form.values()): raise ValueError()
+                form = {k:v[0] for k,v in form.items()}
+                csrf = form['csrf']
+                if not re.fullmatch(r'[A-Za-z0-9_-]{32}',csrf) or not hmac.compare_digest(csrf,session[1]): return reply('Forbidden','403 Forbidden')
+                import content_factory_model_catalog_control
+                content_factory_model_catalog_control.save_catalog_key(self.vault,form['provider'],form['api_key'])
+            except (ValueError,TypeError,UnicodeError): return reply('Проверьте ключ каталога.','400 Bad Request')
+            except Exception: return reply('Не удалось сохранить ключ каталога.','503 Service Unavailable')
+            start('303 See Other',[('Location','/settings?tab=content-factory'),('Cache-Control','no-store'),('Content-Length','0')]);return [b'']
         if path == '/settings/content-factory/models':
             if method != 'POST': return reply('Method not allowed','405 Method Not Allowed')
             if e.get('HTTP_ORIGIN') != self.login.origin: return reply('Forbidden','403 Forbidden')
@@ -1630,12 +1692,19 @@ class Portal:
                 snapshot = content_factory.snapshot(self.vault)
                 import content_factory_ai
                 snapshot.update(content_factory_ai.snapshot(self.vault))
+                catalog_ready = self.model_catalog_ready()
+                if catalog_ready:
+                    try:
+                        import content_factory_model_catalog_control
+                        snapshot['model_catalog'] = content_factory_model_catalog_control.snapshot(self.vault,self.model_catalog,schedule_path=self.model_catalog_schedule_path)
+                    except Exception:
+                        snapshot['model_catalog'] = {}
                 budget_ready = self.budget_gateway_available()
                 budget_settings = self.budget_gateway.settings() if budget_ready else None
                 write_setup = self.write_token_setup_available()
                 token_present = write_setup and 'n8n_content_factory_write' in self.vault.present()
                 budget_configured = self.budget_gateway is not None and (not self.budget_vault_feature or self.budget_gateway.enabled())
-                return reply(document('Контент-фабрика', content_factory_ui.render(snapshot, csrf=session[1], ai_gateway_ready=self.ai_gateway_available(), budget_gateway_ready=budget_ready, budget_settings=budget_settings, write_token_setup=write_setup, write_token_present=token_present, budget_gateway_configured=budget_configured, ai_gateway_configured=self.ai_gateway is not None, model_config_enabled=self.model_config_enabled, cutover_configured=self.ai_cutover is not None, budget_vault_feature=self.budget_vault_feature, budget_vault_enabled=budget_configured), content_factory=True))
+                return reply(document('Контент-фабрика', content_factory_ui.render(snapshot, csrf=session[1], ai_gateway_ready=self.ai_gateway_available(), budget_gateway_ready=budget_ready, budget_settings=budget_settings, write_token_setup=write_setup, write_token_present=token_present, budget_gateway_configured=budget_configured, ai_gateway_configured=self.ai_gateway is not None, model_config_enabled=self.model_config_enabled, cutover_configured=self.ai_cutover is not None, budget_vault_feature=self.budget_vault_feature, budget_vault_enabled=budget_configured,catalog_ready=catalog_ready,catalog_setup_feature=self.catalog_setup_feature,catalog_setup_pending=self.catalog_setup_pending() if not catalog_ready else False), content_factory=True))
             except (ValueError, TypeError, UnicodeError):
                 return reply('Проверьте параметры запроса.', '400 Bad Request')
             except (sqlite3.Error, OSError):
@@ -1944,11 +2013,26 @@ def create_portal():
         cutover=Cutover(control.fence,BoundedWire(control.token_reader),ids,
                         lambda stage, targets: bounded_cutover_preflight(control.token_reader(),stage,targets))
         cutover_jobs=Store(control.fence.path,control.fence.key)
+    model_catalog = None
+    model_catalog_schedule_path = None
+    try:
+        import content_factory_model_catalog_config
+        configured_catalog = content_factory_model_catalog_config.configure(os.environ,vault,secret_file)
+        if configured_catalog is not None:
+            model_catalog, model_catalog_schedule_path = configured_catalog
+    except Exception:
+        # Optional read-only catalogue must never prevent the portal from starting.
+        model_catalog = None
+    try:
+        import content_factory_model_catalog_vault
+        catalog_setup_feature = content_factory_model_catalog_vault.FEATURE_AVAILABLE is True
+    except Exception:
+        catalog_setup_feature = False
     return Portal(login,vault,secret_file('READ_TOKEN_HASH_FILE'),mcp_read_token_hash=mcp_hash,
                   finance_gate_dir=os.environ.get('OZON_FINANCE_GATE_DIR'), ai_gateway=control,
                   ai_gateway_inspector=inspector, budget_gateway=budget_control, write_token_setup=write_token_setup,
                   model_config_enabled=model_config_flag == '1', ai_cutover=cutover, ai_cutover_jobs=cutover_jobs,
-                  budget_vault_feature=budget_vault_feature)
+                  budget_vault_feature=budget_vault_feature,model_catalog=model_catalog,model_catalog_schedule_path=model_catalog_schedule_path,catalog_setup_feature=catalog_setup_feature)
 
 if _worker_cli:
     if sys.argv[2:]:
