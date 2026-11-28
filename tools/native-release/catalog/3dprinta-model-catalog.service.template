@@ -1,0 +1,45 @@
+[Unit]
+Description=Refresh content factory model catalogue (staging template)
+# Fail rather than start the portal as a side effect when it is stopped.
+Requisite=3dprinta-portal.service
+After=3dprinta-portal.service
+PartOf=3dprinta-portal.service
+ConditionPathExists=/opt/3dprinta-portal/current/service/content_factory_model_catalog_cli.py
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+User=wbozon-portal
+SupplementaryGroups=wbozon-release
+StateDirectory=3dprinta-portal
+StateDirectoryMode=0700
+WorkingDirectory=/
+# The key is passed via systemd credential storage, never in environment text.
+LoadCredential=vault-key:/etc/3dprinta-portal/credentials/vault-key
+Environment=DATABASE_PATH=/var/lib/3dprinta-portal/auth.sqlite
+Environment=VAULT_PATH=/var/lib/3dprinta-portal/vault.sqlite
+Environment=VAULT_KEY_FILE=%d/vault-key
+Environment=CF_MODEL_CATALOG_DATA_DIR=/var/lib/3dprinta-portal/.content-factory-model-catalog
+Environment=CF_MODEL_CATALOG_ENABLED=1
+Environment=CF_MODEL_CATALOG_STAGING_VERIFIED=1
+# Prototype only: root-owned launcher must be independently installed and reviewed.
+ExecStart=/usr/bin/python3 -B /usr/local/libexec/3dprinta-model-catalog-launch.py
+TimeoutStartSec=460
+RuntimeMaxSec=460
+Restart=no
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=256M
+TasksMax=16
+StandardOutput=null
+StandardError=null

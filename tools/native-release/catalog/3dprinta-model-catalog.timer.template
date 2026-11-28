@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily content factory model catalogue refresh (staging template)
+
+[Timer]
+# Poll every half hour; runner blocks provider calls before 03:00 Moscow and
+# journals a maximum of one attempt per day.
+OnCalendar=*-*-* *:00,30:00 Europe/Moscow
+Persistent=true
+Unit=3dprinta-model-catalog.service
+
+[Install]
+WantedBy=timers.target
