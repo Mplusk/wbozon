@@ -78,7 +78,7 @@ MARKET_REPORT_SUCCESSORS = (
     # Content-factory controls; budget gateway state uses a separate database.
     'c5b96b2eebcb1dfe0b304e5453f9885ff23f3ac88f7207b87b72fb066786ea16',
     '01fe5914a31b18d2728d5a0ed3bfbd677e67e066aad818c1652a802deda56c63',
-    '7f41f4b339928db008f171ee0f1e542e90610a43393011b6886191d60fecf7c2',
+    '05e0c0e6e9552978054615d143911366f2394584fb66bd1d1243f8bbee4451ae',
 )
 
 
